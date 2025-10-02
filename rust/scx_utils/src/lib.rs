@@ -111,3 +111,9 @@ pub use cli::TopologyArgs;
 pub mod autopower;
 
 pub mod perf;
+
+// CPU list parsing and primary CPU selection helpers
+pub mod cpu_list;
+pub use cpu_list::parse_cpu_list;
+pub use cpu_list::get_primary_cpus;
+pub use cpu_list::Powermode;

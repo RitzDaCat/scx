@@ -36,6 +36,8 @@ pub enum SupportedSched {
     Rustland,
     #[serde(rename = "scx_cosmos")]
     Cosmos,
+    #[serde(rename = "scx_gamer")]
+    Gamer,
 }
 
 impl FromStr for SupportedSched {
@@ -45,6 +47,7 @@ impl FromStr for SupportedSched {
         match scx_name {
             "scx_bpfland" => Ok(SupportedSched::Bpfland),
             "scx_cosmos" => Ok(SupportedSched::Cosmos),
+            "scx_gamer" => Ok(SupportedSched::Gamer),
             "scx_flash" => Ok(SupportedSched::Flash),
             "scx_lavd" => Ok(SupportedSched::Lavd),
             "scx_p2dq" => Ok(SupportedSched::P2DQ),
@@ -68,6 +71,7 @@ impl From<SupportedSched> for &str {
         match scx_name {
             SupportedSched::Bpfland => "scx_bpfland",
             SupportedSched::Cosmos => "scx_cosmos",
+            SupportedSched::Gamer => "scx_gamer",
             SupportedSched::Flash => "scx_flash",
             SupportedSched::Lavd => "scx_lavd",
             SupportedSched::P2DQ => "scx_p2dq",

@@ -102,6 +102,7 @@ impl ScxLoader {
         vec![
             "scx_bpfland",
             "scx_cosmos",
+            "scx_gamer",
             "scx_flash",
             "scx_lavd",
             "scx_p2dq",
