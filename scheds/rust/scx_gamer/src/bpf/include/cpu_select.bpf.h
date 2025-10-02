@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scx_gamer: CPU Selection & SMT Logic
- * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
+ * Copyright (c) 2025 RitzDaCat
  *
  * Idle CPU selection with physical core priority for GPU threads.
  * This file is AI-friendly: ~300 lines, single responsibility.
