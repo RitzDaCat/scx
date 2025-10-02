@@ -16,180 +16,231 @@ scx_gamer is a Linux sched_ext (eBPF) scheduler that attempts to minimize input 
 - Stay safe: cleanly detach to CFS on exit or stall
 - Test AI capabilities in systems programming and scheduler development
 
-Architecture at a glance
-- Userspace (Rust):
-  - CLI, topology detection, BPF skeleton management.
-  - Event-driven loop via epoll: evdev FDs (input), timerfd (frame Hz, CPU util), and inotify on DRM debugfs vblank file.
-  - Optional input detection via evdev for input-active windows (no polling).
-  - Optional frame cadence via fixed Hz (timerfd) or DRM vblank counter (inotify event-driven).
-  - Stats server and in-process monitor.
-  - Watchdog to auto-fallback to CFS when stalled.
-- BPF (C):
-  - Per-CPU dispatch queues (DSQs) with round-robin.
-  - Global EDF fallback when system is busy; hysteresis to avoid thrash.
-  - Migration limiter, mm-affinity LRU hints (bounded), NUMA-local preference.
-  - SMT contention avoidance, with guarded allowance for light paired threads.
-  - Input / frame / NAPI-softirq windows are per-CPU and short-lived.
-  - Criticality EMAs (interactive_avg per-CPU, interactive_sys_avg) to adjust slice and policy.
-  - Futex/chain-boost for wake chains.
-  - Wakeup timer re-arms at configurable period to kick idle CPUs with pending work.
+## Architecture at a glance
+- **Userspace (Rust)**:
+  - CLI argument parsing and topology detection
+  - BPF skeleton management and lifecycle
+  - Event-driven loop via epoll for input device monitoring
+  - Statistics collection and monitoring
+  - Watchdog for automatic CFS fallback on stalls
 
-How it works (high-level)
-1) Under light load, scx_gamer dispatches from per-CPU DSQs (round-robin). This maximizes locality and minimizes lock contention.
-2) When the EMA of system CPU utilization exceeds a threshold, it transitions to an EDF-mode global queue to improve responsiveness and load balancing under contention. Hysteresis prevents rapid toggling.
-3) Short windows elevate responsiveness:
-   - Input window (evdev activity): shorter slices, relaxed migration limit, optional NAPI preference to help input processing.
-   - Frame window (timer cadence or DRM vblank): block most migrations to stabilize frame pacing and modestly tighten slice. Driven by timerfd or inotify (no polling).
-4) Placement and migration decisions consider NUMA boundaries, mm-affinity hints (per-mm recent CPU), SMT contention, and migration rate limiting.
-5) Safety: SIGINT/SIGTERM and Drop detach struct_ops; watchdog exits if no dispatch progress for N seconds.
+- **BPF (C)**:
+  - Per-CPU dispatch queues (DSQs) with round-robin
+  - Global EDF fallback when system load increases
+  - Migration limiting to preserve cache locality
+  - mm-affinity hints (LRU-based) for same-address-space tasks
+  - NUMA-aware placement when enabled
+  - SMT contention avoidance
+  - Input-window boost for low-latency input handling
+  - Configurable wakeup timer for idle CPU management
 
-Intended benefits
-- Local-first approach when uncongested may retain hot caches for game and render threads
-- EDF under pressure attempts to prioritize time-critical tasks and stabilize latency
-- Windows aim to align boosts to real input/render phases, gated to the foreground game when provided
-- NUMA and SMT awareness attempts to avoid cross-node stalls and sibling contention
+## How it works
+1. **Local-first scheduling**: Under light load, tasks dispatch from per-CPU queues (round-robin) to maximize cache locality and minimize contention
 
-Results may vary depending on workload, hardware, and configuration.
+2. **Load-aware transitions**: When CPU utilization exceeds configured thresholds, switches to global EDF mode for better load balancing under pressure
 
-Requirements
-- Linux with sched_ext (scx) enabled (see repository root docs for kernel versions).
-- Root privileges to attach sched_ext and read DRM debugfs (optional) or be in the video group.
-- debugfs mounted at /sys/kernel/debug for DRM vblank counter (optional).
+3. **Input window boost**: When input device activity is detected (via evdev monitoring), tasks receive shorter slices and relaxed migration limits for responsive input handling
 
-Build
+4. **Placement decisions** consider:
+   - NUMA boundaries (when enabled)
+   - mm-affinity hints for same-address-space tasks
+   - SMT contention avoidance
+   - Per-task migration rate limiting
+
+5. **Safety mechanisms**: Clean shutdown via SIGINT/SIGTERM, watchdog for automatic CFS fallback on dispatch stalls
+
+## Intended benefits
+- Cache locality preservation for game and render threads
+- Load-aware scheduling transitions for responsiveness under pressure
+- Input-window boost for reduced input latency
+- NUMA and SMT awareness to avoid cross-node/sibling contention
+
+**Note**: Results vary significantly based on workload, hardware topology, and configuration.
+
+## Requirements
+- Linux kernel with sched_ext enabled (6.12+)
+- Root privileges to attach BPF scheduler
+- Input devices accessible via `/dev/input/event*` for input monitoring (optional)
+
+## Build
 ```bash
+# From repository root
 cargo build -p scx_gamer --release
 ```
 
-Run (direct, recommended for Ctrl+C)
-- Foreground run lets Ctrl+C cleanly restore CFS.
+## Usage
+
+### Direct run (recommended)
+Foreground execution allows clean shutdown with Ctrl+C:
+
 ```bash
-sudo ./target/release/scx_gamer --stats 1 \
-  --input-window-us 2000 \
-  --frame-window-us 2000 \
-  --wakeup-timer-us 500
+sudo ./target/release/scx_gamer --stats 1
 ```
 
-Optional: drive frame windows from display events
-- Fixed cadence: `--frame-hz 240` (or 60/120/144).
-- DRM vblank (good with VRR): `--drm-debugfs card:crtc` (e.g., 0:0). If not provided, we auto-detect the most active vblank source under `/sys/kernel/debug/dri/*` and subscribe via inotify (no busy read loop). If debugfs isn’t available, omit and use `--frame-hz`.
-
-Run via scx_loader (DBus service)
-```bash
-cargo build -p scx_loader --release
-sudo ./tools/scx_loader/target/release/scx_loader --set gamer
-# Use scxctl to observe status
-cargo build -p scxctl --release
-./tools/scxctl/target/release/scxctl status
-```
-Note: Running via the loader may place scx_gamer under a service; Ctrl+C stops your client, not the scheduler. Use scxctl or systemd to stop.
-
-Clean shutdown
-- Direct run: Ctrl+C is handled; scheduler detaches and CFS is restored.
-- Watchdog: `--watchdog-secs N` auto-detaches if dispatch progress stalls.
-
-CLI reference
-Defaults shown in parentheses. Units in comments.
-- `--exit-dump-len <u32>` (0): BPF exit dump length.
-- `-s, --slice-us <u64>` (10): Max scheduling slice (µs).
-- `-l, --slice-lag-us <u64>` (20000): Max vtime debt charged (µs).
-- `-c, --cpu-busy-thresh <u64>` (75): Busy enter threshold (%).
-- `--cpu-busy-exit <u64>`: Busy exit threshold (%). Default: busy_enter-10, floored at 0.
-- `-p, --polling-ms <u64>` (0): Deprecated. CPU util is sampled in-kernel; this flag is a no-op.
-- `-m, --primary-domain <list|keyword>`: Preferred CPU set: comma/range list or `turbo|performance|powersave|all`.
-- `-n, --enable-numa`: Enable NUMA-aware policies.
-- `-f, --disable-cpufreq`: Disable cpufreq integration.
-- `-i, --flat-idle-scan`: Light-weight idle scan.
-- `-P, --preferred-idle-scan`: Prefer higher-capacity CPUs first.
-- `--disable-smt`: Disable SMT placement (only with an idle scan mode).
-- `-S, --avoid-smt`: Avoid SMT contention where possible.
-- `-w, --no-wake-sync`: Disable synchronous wake direct dispatch.
-- `-d, --no-deferred-wakeup`: Disable deferred wakeups.
-- `-a, --mm-affinity`: Keep same-mm threads on the same CPU across wakeups.
-- `--mig-window-ms <u64>` (50): Migration limiter window (ms).
-- `--mig-max <u32>` (3): Max migrations per task per window.
-- `--input-window-us <u64>` (2000): Enable input-active boost window (µs). 0=off.
-- `--frame-window-us <u64>` (0): Enable frame-active window (µs). 0=off.
-- `--frame-hz <f64>`: Fixed cadence for frame window (Hz). Requires frame-window-us>0.
-- `--drm-debugfs <card:crtc>`: Drive frame window from DRM vblank counter.
-- `--foreground-pid <u32>` (0): Restrict input/frame effects to this TGID (game). 0=global.
-- `--watchdog-secs <u64>` (0): Exit to CFS if no dispatch progress for N seconds. 0=off.
-- `--prefer-napi-on-input`: Prefer NAPI/softirq CPUs briefly during input window.
-- `--enable-mm-hint`: Enable per-mm recent CPU hinting for cache affinity.
-- `--mm-hint-size <u32>` (4096): Size of the mm hint LRU (clamped 128-65536 entries).
-- `--vblank-sample-ms <u64>` (200): DRM vblank auto-detect sample window (10-1000 ms).
-- `--wakeup-timer-us <u64>` (0): Periodic wakeup timer (µs). 0=use slice_us. Clamped to ≥250µs in-kernel.
-- `--event-loop-cpu <usize>`: Pin the event loop (epoll/timerfd/inotify) to a specific CPU. If omitted, scx_gamer auto-pins to a low-capacity housekeeping CPU.
-- `--stats <sec>`: Run scheduler and print live metrics every N seconds.
-- `--monitor <sec>`: Monitor-only mode; do not attach the scheduler.
-- `-v, --verbose`: Verbose logging.
-- `-V, --version`: Print version.
-- `--help-stats`: Print metric descriptions and exit.
-
-Recommended starting points
-- High-Hz VRR FPS (e.g., 240 Hz):
+With input monitoring and optimizations:
 ```bash
 sudo ./target/release/scx_gamer \
+  --stats 1 \
   --input-window-us 2000 \
-  --frame-window-us 2000 \
-  --drm-debugfs 0:0 \
-  --event-loop-cpu 0 \
-  --wakeup-timer-us 500 \
-  --stats 1
+  --mm-affinity \
+  --avoid-smt \
+  --preferred-idle-scan
 ```
-- Fixed Hz displays (e.g., 144 Hz):
+
+### Via scx_loader (system service)
+```bash
+# Using system scx_loader
+sudo scx_loader --set scx_gamer
+
+# Check status
+scxctl status
+
+# Stop scheduler
+sudo systemctl stop scx_loader
+```
+
+### Clean shutdown
+- **Direct run**: Ctrl+C triggers clean detachment and restores CFS
+- **Watchdog**: `--watchdog-secs N` auto-exits if no dispatch progress detected
+
+## CLI Reference
+
+### Core scheduling
+- `-s, --slice-us <u64>` (10): Maximum scheduling slice in microseconds
+- `-l, --slice-lag-us <u64>` (20000): Maximum vtime debt per task in microseconds
+- `-p, --polling-ms <u64>` (0): Deprecated/no-op (in-kernel sampling used)
+
+### CPU topology
+- `-m, --primary-domain <list|keyword>`: CPU priority set
+  - Accepts: comma-separated list (e.g., `0-3,12-15`)
+  - Keywords: `turbo`, `performance`, `powersave`, `all` (default)
+- `-n, --enable-numa`: Enable NUMA-aware placement
+- `-f, --disable-cpufreq`: Disable CPU frequency control
+
+### Idle CPU selection
+- `-i, --flat-idle-scan`: Simple idle scan (lower overhead)
+- `-P, --preferred-idle-scan`: Prioritize higher-capacity CPUs
+- `--disable-smt`: Disable SMT placement (requires idle scan mode)
+- `-S, --avoid-smt`: Aggressively avoid SMT sibling contention
+
+### Task placement
+- `-w, --no-wake-sync`: Disable direct dispatch on sync wakeups
+- `-d, --no-deferred-wakeup`: Disable deferred wakeups (may reduce power)
+- `-a, --mm-affinity`: Keep same-address-space tasks on same CPU
+
+### Migration control
+- `--mig-window-ms <u64>` (50): Migration limiter window in milliseconds
+- `--mig-max <u32>` (3): Max migrations per task per window
+
+### Input boost
+- `--input-window-us <u64>` (2000): Input-active boost window (µs). 0=disabled
+- `--prefer-napi-on-input`: Prefer NAPI/softirq CPUs during input
+- `--foreground-pid <u32>` (0): Restrict boost to this TGID. 0=global
+
+### Memory affinity
+- `--disable-mm-hint`: Disable per-mm cache affinity hints (enabled by default)
+- `--mm-hint-size <u32>` (8192): mm hint LRU size (128-65536)
+
+### System
+- `--wakeup-timer-us <u64>` (500): Wakeup timer period (min 250µs)
+- `--event-loop-cpu <usize>`: Pin event loop to specific CPU (auto-selected by default)
+- `--watchdog-secs <u64>` (0): Auto-exit to CFS after N seconds of stall. 0=disabled
+
+### Monitoring
+- `--stats <sec>`: Print statistics every N seconds
+- `--monitor <sec>`: Monitor-only mode (don't attach scheduler)
+- `--help-stats`: Show metric descriptions
+- `-v, --verbose`: Enable verbose output
+- `-V, --version`: Print version
+
+### Debug
+- `--exit-dump-len <u32>` (0): BPF exit dump buffer length
+
+## Configuration Examples
+
+### Balanced gaming setup
 ```bash
 sudo ./target/release/scx_gamer \
+  --stats 1 \
   --input-window-us 2000 \
-  --frame-window-us 2000 \
-  --frame-hz 144 \
-  --event-loop-cpu 0 \
-  --wakeup-timer-us 500 \
-  --stats 1
+  --mm-affinity \
+  --avoid-smt \
+  --preferred-idle-scan
 ```
 
-Monitoring & metrics
-- `--stats <sec>` prints per-interval deltas for:
-  - RR/EDF enqueue counts, dispatch mix (direct/shared), migrations, migration blocks.
-  - Sync-local count, frame-window migration blocks.
-  - CPU util instant and EMA; estimated FPS from frame events.
-- `--monitor <sec>` runs a monitor without attaching the scheduler.
+### Low-latency competitive gaming
+```bash
+sudo ./target/release/scx_gamer \
+  --stats 1 \
+  --input-window-us 1000 \
+  --slice-us 5 \
+  --preferred-idle-scan \
+  --avoid-smt \
+  --mig-max 1
+```
 
-Design details
-- Busy detection and hysteresis: cpu_util is sampled in-kernel (BPF) each wakeup timer tick; BPF maintains an EMA used to enter/exit EDF mode. Thresholds are configurable and scaled into 0–1024.
-- Per-CPU windows: input/frame/NAPI windows are recorded in per-CPU context, and userspace triggers fan-out via a syscall; primary CPUs can be restricted to a subset.
-- Migration control: migrations are limited per-task per window; during frame windows most migrations are blocked.
-- NUMA & locality: prefer local node when system is busy; avoid spilling if local DSQ depth is below a threshold; mm_last_cpu is an LRU hash (bounded) to guide wake affinity.
-- SMT: avoid siblings when contended; allow siblings for light paired threads when system is not busy and interactive activity is low.
-- Criticality: interactive_avg per-CPU and interactive_sys_avg guide slice scaling and policy choice; futex/chain boost raises priority for locking chains.
-- Wakeup timer: kicks idle CPUs with pending DSQ tasks and updates cpu_util_avg EMA each period. Period is configurable and clamped.
-- Safety: SIGINT/SIGTERM and Drop detach struct_ops; watchdog triggers exit if no progress.
-- Event-driven control loop: epoll integrates evdev, timerfd, and inotify (DRM vblank file) so reactions are immediate and CPU overhead is minimal.
+### Power-efficient gaming
+```bash
+sudo ./target/release/scx_gamer \
+  --stats 1 \
+  --primary-domain powersave \
+  --no-deferred-wakeup
+```
 
-Troubleshooting
-- Scheduler won’t stop with Ctrl+C: ensure you ran scx_gamer directly in the foreground. If launched by scx_loader/systemd, stop with scxctl or systemd.
-- DRM debugfs not readable: run as root or add user to video group and mount debugfs. Fallback to `--frame-hz` cadence if needed.
-- No visible monitor output: use `--stats <sec>` (scheduler attached) or `--monitor <sec>` (monitor-only). Ensure the terminal is not being cleared by another tool.
-- Network hitches: if `--prefer-napi-on-input` is enabled, it briefly biases NAPI CPUs during input; toggle off to compare.
-- Anti-cheat: scx_gamer is a kernel scheduling policy and does not inject into game processes. However, aggressive timer settings or service management may interact with anti-cheat heuristics; prefer direct foreground runs while testing.
+## Monitoring
+The `--stats` option prints periodic statistics including:
+- Enqueue/dispatch counts (local vs shared)
+- Migration statistics and blocks
+- CPU utilization (instant and EMA)
+- Input event counts
 
-Testing and validation
-This scheduler is under active development and testing. When evaluating:
-- Compare with established schedulers (scx_lavd, scx_cosmos, default CFS) on identical scenarios
-- Test scenarios: OBS/game capture, VRR on/off, varying workloads
-- Measure objective metrics: 1%/0.1% frame-time lows, input latency, network stability
-- Your mileage may vary; results depend heavily on hardware, game engine, and configuration
+Use `--help-stats` for detailed metric descriptions.
 
-Glossary
-- DSQ: dispatch queue.
-- EDF: earliest-deadline-first.
-- EMA: exponential moving average.
-- NAPI: New API (network softirq processing path).
-- VRR: variable refresh rate.
+## Design Notes
+- **Load detection**: In-kernel CPU utilization sampling with EMA-based mode transitions
+- **Migration limiting**: Per-task rate limiting to preserve cache affinity
+- **Input boost**: evdev-based input detection triggers short-lived boost windows
+- **mm-affinity**: LRU-based hints to keep same-address-space tasks co-located
+- **SMT awareness**: Configurable sibling avoidance to reduce contention
+- **Safety**: Clean SIGINT/SIGTERM handling and optional watchdog for stall detection
 
-License
+## Troubleshooting
+
+**Can't stop with Ctrl+C**
+- Ensure running in foreground (not via scx_loader/systemd)
+- If using scx_loader: `sudo systemctl stop scx_loader`
+
+**Input monitoring not working**
+- Check `/dev/input/event*` permissions
+- Run with `-v` for verbose device detection logs
+
+**High CPU usage from event loop**
+- Event loop auto-pins to low-capacity CPU by default
+- Manually specify with `--event-loop-cpu N` if needed
+
+**Performance worse than CFS**
+- Try different flag combinations (see Configuration Examples)
+- Some games may not benefit from this scheduling approach
+- Compare with established schedulers (scx_lavd, scx_bpfland)
+
+## Testing and Validation
+
+This scheduler is experimental. When evaluating:
+- **Baseline**: Compare against CFS and established sched_ext schedulers
+- **Metrics**: Measure frametime percentiles (P99, P99.9), input latency, stutters
+- **Scenarios**: Test with/without OBS capture, various game engines, different CPU loads
+- **Hardware**: Results vary significantly by CPU topology (E/P-cores, SMT, NUMA)
+
+## Glossary
+- **DSQ**: Dispatch queue
+- **EDF**: Earliest-deadline-first scheduling
+- **EMA**: Exponential moving average
+- **CFS**: Completely Fair Scheduler (Linux default)
+- **SMT**: Simultaneous multithreading (HyperThreading)
+
+## License
 GPL-2.0-only
 
-Maintainers
-- Paul Reitz <PaulAnthonyReitz@gmail.com>
+## Author
+RitzDaCat
 

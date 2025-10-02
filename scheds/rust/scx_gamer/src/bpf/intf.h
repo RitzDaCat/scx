@@ -1,3 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * scx_gamer: Gaming-optimized scheduler for low-latency input and frame delivery
+ * Copyright (c) 2025 RitzDaCat
+ */
+
 #ifndef __INTF_H
 #define __INTF_H
 
