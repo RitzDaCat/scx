@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scx_gamer: Type Definitions
- * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
+ * Copyright (c) 2025 RitzDaCat
  *
  * All data structures, maps, and type definitions.
  * This file is AI-friendly: ~200 lines, data structures only.

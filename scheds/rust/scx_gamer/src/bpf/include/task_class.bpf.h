@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scx_gamer: Thread Classification
- * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
+ * Copyright (c) 2025 RitzDaCat
  *
  * Automatic detection of GPU, compositor, network, audio, and input threads.
  * This file is AI-friendly: ~250 lines, single responsibility.

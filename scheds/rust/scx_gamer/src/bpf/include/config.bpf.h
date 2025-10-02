@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scx_gamer: Configuration and Tunables
- * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
+ * Copyright (c) 2025 RitzDaCat
  *
  * All scheduler tunables, thresholds, and constants.
  * This file is AI-friendly: ~100 lines, single responsibility.

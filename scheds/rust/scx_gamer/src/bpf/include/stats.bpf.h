@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scx_gamer: Statistics Collection
- * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
+ * Copyright (c) 2025 RitzDaCat
  *
  * Conditional statistics helpers for performance monitoring.
  * This file is AI-friendly: ~100 lines, single responsibility.
