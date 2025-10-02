@@ -87,6 +87,7 @@ pub fn get_default_config() -> Config {
         SupportedSched::Tickless,
         SupportedSched::Rustland,
         SupportedSched::Cosmos,
+        SupportedSched::Gamer,
     ];
     let scheds_map = HashMap::from(supported_scheds.map(|x| init_default_config_entry(x)));
     Config {
@@ -233,6 +234,20 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
             SchedMode::PowerSave => vec!["-m", "powersave", "-d", "-p", "5000"],
             SchedMode::Server => vec!["-a", "-s", "20000"],
             SchedMode::Auto => vec!["-d"],
+        },
+        SupportedSched::Gamer => match sched_mode {
+            // Favor fast cores, immediate wakeups; avoid SMT; enable short input window
+            SchedMode::Gaming => vec![
+                "-m", "performance", "-d", "-a", "-P", "-S",
+                "-s", "10", "-l", "20000", "--input-window-us", "2000"
+            ],
+            SchedMode::LowLatency => vec![
+                "-m", "performance", "-d", "-a", "-P", "-S",
+                "-s", "10", "-l", "15000", "--input-window-us", "2500"
+            ],
+            SchedMode::PowerSave => vec!["-m", "powersave", "-d"],
+            SchedMode::Server => vec!["-a", "-s", "20000"],
+            SchedMode::Auto => vec![],
         },
     }
 }
