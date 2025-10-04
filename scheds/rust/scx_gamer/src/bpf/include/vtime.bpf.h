@@ -23,10 +23,19 @@ extern u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 value);
 /*
  * Get foreground TGID (runtime-updatable or configured)
  */
+/* Safe foreground TGID getter with double-buffering.
+ * Copies staging → active if changed, preventing torn reads during userspace updates.
+ */
 static inline u32 get_fg_tgid(void)
 {
+	extern volatile u32 detected_fg_tgid_staging;
 	extern volatile u32 detected_fg_tgid;
 	extern const volatile u32 foreground_tgid;
+
+	u32 staging = detected_fg_tgid_staging;
+	if (staging != detected_fg_tgid)
+		detected_fg_tgid = staging;
+
 	return detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
 }
 
@@ -125,9 +134,17 @@ static u64 task_dl_with_ctx(struct task_struct *p, struct task_ctx *tctx, struct
 	 * Gaming Priority Fast Paths (during boost windows)
 	 */
 
-	/* PRIORITY 1: Input handlers - HIGHEST priority */
-	if (tctx->is_input_handler && in_input_window)
-		return p->scx.dsq_vtime + (tctx->exec_runtime >> 7);  /* 10x boost */
+	/* PRIORITY 1: Input handlers - HIGHEST priority
+	 * Wine input threads (wine_xinput, wine_wginput) get permanent boost when foreground.
+	 * This fixes input lag in Wine/Proton games by prioritizing the Windows→Linux
+	 * input translation layer, not just the game's input processing threads.
+	 */
+	if (tctx->is_input_handler) {
+		/* Wine input threads: always boost for foreground game (not just during window) */
+		bool is_fg = is_foreground_task_cached(p, fg_tgid);
+		if (is_fg || in_input_window)
+			return p->scx.dsq_vtime + (tctx->exec_runtime >> 6);  /* 8x boost */
+	}
 
 	/* PRIORITY 2: GPU submission threads */
 	if (tctx->is_gpu_submit)
@@ -141,9 +158,14 @@ static u64 task_dl_with_ctx(struct task_struct *p, struct task_ctx *tctx, struct
 	if (tctx->is_game_audio)
 		return p->scx.dsq_vtime + (tctx->exec_runtime >> 5) + (tctx->exec_runtime >> 7);  /* 6x */
 
-	/* PRIORITY 5: Compositor */
-	if (tctx->is_compositor)
-		return p->scx.dsq_vtime + (tctx->exec_runtime >> 5);  /* 5x boost */
+	/* PRIORITY 5: Compositor
+	 * System compositors (KWin, Mutter) get boosted during input window even if not
+	 * part of game process tree. This ensures smooth window/frame presentation.
+	 */
+	if (tctx->is_compositor && in_input_window)
+		return p->scx.dsq_vtime + (tctx->exec_runtime >> 6);  /* 8x boost during input */
+	else if (tctx->is_compositor)
+		return p->scx.dsq_vtime + (tctx->exec_runtime >> 5);  /* 5x boost baseline */
 
 	/* PRIORITY 6: Network threads (during input window) */
 	if (tctx->is_network && in_input_window)
