@@ -5,7 +5,12 @@
 set -e  # Exit on error
 
 SCHEDULER_NAME="scx_gamer"
-BINARY_PATH="/home/ritz/Documents/Repo/Linux/scx/target/release/${SCHEDULER_NAME}"
+
+# Detect SCX repository root (script is in scheds/rust/scx_gamer/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCX_REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+BINARY_PATH="${SCX_REPO}/target/release/${SCHEDULER_NAME}"
+
 INSTALL_DIR="/usr/bin"
 CONFIG_FILE="/etc/default/scx"
 LOADER_CONFIG="/etc/scx_loader.toml"
@@ -33,7 +38,7 @@ if [ ! -f "$BINARY_PATH" ]; then
     echo -e "${RED}Error: Binary not found at: ${BINARY_PATH}${NC}"
     echo ""
     echo "Please build first:"
-    echo "  cd /home/ritz/Documents/Repo/Linux/scx"
+    echo "  cd $SCX_REPO"
     echo "  cargo build --release --package scx_gamer"
     exit 1
 fi
@@ -137,25 +142,23 @@ echo -e "${GREEN}✓${NC} Generated complete scx_loader configuration with all s
 # Rebuild scx_loader to include scx_gamer in GUI dropdown
 echo ""
 echo -e "${YELLOW}→${NC} Rebuilding scx_loader to add scx_gamer to GUI..."
-SCX_REPO="/home/ritz/Documents/Repo/Linux/scx"
 LOADER_BINARY="$SCX_REPO/target/release/scx_loader"
 
-# Check if we're in the scx repo
-if [ ! -d "$SCX_REPO" ]; then
+# Verify we're in the scx repo
+if [ ! -f "$SCX_REPO/Cargo.toml" ]; then
     echo -e "${RED}Error: SCX repository not found at $SCX_REPO${NC}"
     echo "scx_gamer installed, but GUI integration requires rebuilding scx_loader"
-    echo "Run manually: cd $SCX_REPO && cargo build --release --package scx_loader"
+    echo "Run manually: cd <scx_repo> && cargo build --release --package scx_loader"
 else
     # Build scx_loader (this includes scx_gamer in the supported scheduler list)
     echo -e "${YELLOW}→${NC} Building scx_loader (this may take 1-2 minutes)..."
-    cd "$SCX_REPO"
 
     # Run build as the original user (not root) to avoid permission issues
     ORIGINAL_USER=$(who am i | awk '{print $1}')
     if [ -n "$ORIGINAL_USER" ] && [ "$ORIGINAL_USER" != "root" ]; then
-        sudo -u "$ORIGINAL_USER" cargo build --release --package scx_loader 2>&1 | grep -E "Compiling|Finished|error|warning" || true
+        sudo -u "$ORIGINAL_USER" bash -c "cd '$SCX_REPO' && cargo build --release --package scx_loader 2>&1 | grep -E 'Compiling|Finished|error|warning' || true"
     else
-        cargo build --release --package scx_loader 2>&1 | grep -E "Compiling|Finished|error|warning" || true
+        (cd "$SCX_REPO" && cargo build --release --package scx_loader 2>&1 | grep -E "Compiling|Finished|error|warning" || true)
     fi
 
     # Install updated scx_loader
