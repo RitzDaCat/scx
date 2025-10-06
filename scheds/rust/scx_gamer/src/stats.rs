@@ -85,6 +85,38 @@ pub struct Metrics {
     pub game_audio_threads: u64,
     #[stat(desc = "Input handler threads detected (live count)")]
     pub input_handler_threads: u64,
+    #[stat(desc = "Input trigger rate (events/sec, EMA)")]
+    pub input_trigger_rate: u64,
+    #[stat(desc = "Continuous input mode active (1=yes, 0=no)")]
+    pub continuous_input_mode: u64,
+
+    /* BPF Profiling: Hot-path latency measurements */
+    #[stat(desc = "select_cpu avg latency (ns)")]
+    pub prof_select_cpu_avg_ns: u64,
+    #[stat(desc = "enqueue avg latency (ns)")]
+    pub prof_enqueue_avg_ns: u64,
+    #[stat(desc = "dispatch avg latency (ns)")]
+    pub prof_dispatch_avg_ns: u64,
+    #[stat(desc = "deadline calc avg latency (ns)")]
+    pub prof_deadline_avg_ns: u64,
+
+    /* Raw profiling counters (for calculating averages) */
+    #[stat(desc = "select_cpu total ns")]
+    pub prof_select_cpu_ns: u64,
+    #[stat(desc = "select_cpu calls")]
+    pub prof_select_cpu_calls: u64,
+    #[stat(desc = "enqueue total ns")]
+    pub prof_enqueue_ns: u64,
+    #[stat(desc = "enqueue calls")]
+    pub prof_enqueue_calls: u64,
+    #[stat(desc = "dispatch total ns")]
+    pub prof_dispatch_ns: u64,
+    #[stat(desc = "dispatch calls")]
+    pub prof_dispatch_calls: u64,
+    #[stat(desc = "deadline total ns")]
+    pub prof_deadline_ns: u64,
+    #[stat(desc = "deadline calls")]
+    pub prof_deadline_calls: u64,
 }
 
 impl Metrics {
@@ -113,19 +145,33 @@ impl Metrics {
 
         let now = Local::now();
         writeln!(w, "┌─ {} {} ─", crate::SCHEDULER_NAME, now.format("%H:%M:%S"))?;
-        writeln!(w, "│ CPU {:>5.1}% (avg {:>5.1}%)  EDF {:>4.1}%  FPS~ {:>6.1}{}",
+        writeln!(w, "│ CPU {:>5.1}% (avg {:>5.1}%)  EDF {:>4.1}%{}",
                  (self.cpu_util as f64) * 100.0 / 1024.0,
                  (self.cpu_util_avg as f64) * 100.0 / 1024.0,
-                 edf_pct, self.frame_hz_est, fg)?;
+                 edf_pct, fg)?;
         writeln!(w, "│ q: rr {:>6}  edf {:>6}  dir {:>6} ({:>4.0}%)  sh {:>6}",
                  self.rr_enq, self.edf_enq, self.direct, direct_pct, self.shared)?;
-        writeln!(w, "│ win: in {:>4.0}%  fr {:>4.0}%   hint: idle {:>6}  mm {:>6}   FG {:>3}%   trig i:{:>5} f:{:>5}",
-                 in_pct, fr_pct, self.idle_pick, self.mm_hint_hit, self.fg_cpu_pct, self.input_trig, self.frame_trig)?;
+        let input_mode_indicator = if self.continuous_input_mode != 0 {
+            format!("CONT@{}/s", self.input_trigger_rate)
+        } else {
+            format!("i:{:>5}", self.input_trig)
+        };
+        writeln!(w, "│ win: in {:>4.0}%  fr {:>4.0}%   hint: idle {:>6}  mm {:>6}   FG {:>3}%   trig {} f:{:>5}",
+                 in_pct, fr_pct, self.idle_pick, self.mm_hint_hit, self.fg_cpu_pct, input_mode_indicator, self.frame_trig)?;
         writeln!(w, "│ mig {:>6}  blk {:>6}  sync {:>6}  fblk {:>6}  syncfast {:>6}",
                  self.migrations, self.mig_blocked, self.sync_local, self.frame_mig_block, self.sync_wake_fast)?;
         writeln!(w, "│ threads: input {:>2}  gpu {:>2}  sys_aud {:>2}  gm_aud {:>2}  comp {:>2}  net {:>2}  bg {:>2}",
                  self.input_handler_threads, self.gpu_submit_threads, self.system_audio_threads,
                  self.game_audio_threads, self.compositor_threads, self.network_threads, self.background_threads)?;
+
+        // Show profiling data if available
+        if self.prof_select_cpu_avg_ns > 0 || self.prof_enqueue_avg_ns > 0 {
+            writeln!(w, "│ prof: sel {:>4}ns  enq {:>4}ns  dsp {:>4}ns  dl {:>3}ns",
+                     self.prof_select_cpu_avg_ns,
+                     self.prof_enqueue_avg_ns,
+                     self.prof_dispatch_avg_ns,
+                     self.prof_deadline_avg_ns)?;
+        }
         writeln!(w, "└─")?;
         Ok(())
     }
@@ -144,7 +190,7 @@ impl Metrics {
             cpu_util_avg: self.cpu_util_avg,
             frame_hz_est: self.frame_hz_est,
             fg_pid: self.fg_pid,
-            fg_app: self.fg_app.clone(),
+            fg_app: self.fg_app.clone(),  // String clone needed for delta (not in hot path)
             fg_fullscreen: self.fg_fullscreen,
             win_input_ns: self.win_input_ns.saturating_sub(prev.win_input_ns),
             win_frame_ns: self.win_frame_ns.saturating_sub(prev.win_frame_ns),
@@ -162,6 +208,32 @@ impl Metrics {
             system_audio_threads: self.system_audio_threads,  // live count, not delta
             game_audio_threads: self.game_audio_threads,  // live count, not delta
             input_handler_threads: self.input_handler_threads,  // live count, not delta
+            input_trigger_rate: self.input_trigger_rate,  // live rate (EMA), not delta
+            continuous_input_mode: self.continuous_input_mode,  // live flag, not delta
+
+            // Profiling: calculate averages from deltas
+            prof_select_cpu_avg_ns: if self.prof_select_cpu_calls > prev.prof_select_cpu_calls {
+                (self.prof_select_cpu_ns - prev.prof_select_cpu_ns) / (self.prof_select_cpu_calls - prev.prof_select_cpu_calls)
+            } else { 0 },
+            prof_enqueue_avg_ns: if self.prof_enqueue_calls > prev.prof_enqueue_calls {
+                (self.prof_enqueue_ns - prev.prof_enqueue_ns) / (self.prof_enqueue_calls - prev.prof_enqueue_calls)
+            } else { 0 },
+            prof_dispatch_avg_ns: if self.prof_dispatch_calls > prev.prof_dispatch_calls {
+                (self.prof_dispatch_ns - prev.prof_dispatch_ns) / (self.prof_dispatch_calls - prev.prof_dispatch_calls)
+            } else { 0 },
+            prof_deadline_avg_ns: if self.prof_deadline_calls > prev.prof_deadline_calls {
+                (self.prof_deadline_ns - prev.prof_deadline_ns) / (self.prof_deadline_calls - prev.prof_deadline_calls)
+            } else { 0 },
+
+            // Raw counters (deltas for monitoring, absolute for export)
+            prof_select_cpu_ns: self.prof_select_cpu_ns,
+            prof_select_cpu_calls: self.prof_select_cpu_calls,
+            prof_enqueue_ns: self.prof_enqueue_ns,
+            prof_enqueue_calls: self.prof_enqueue_calls,
+            prof_dispatch_ns: self.prof_dispatch_ns,
+            prof_dispatch_calls: self.prof_dispatch_calls,
+            prof_deadline_ns: self.prof_deadline_ns,
+            prof_deadline_calls: self.prof_deadline_calls,
         }
     }
 }
@@ -217,10 +289,29 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    // Custom monitor with terminal clearing to prevent endless scrolling
+    // Clears screen every 20 outputs (~100 seconds at 5s interval)
+    let mut iteration_count = 0u32;
+    const CLEAR_INTERVAL: u32 = 20;  // Clear every 20 stats outputs
+
     scx_utils::monitor_stats::<Metrics>(
         &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
-        |metrics| metrics.format(&mut std::io::stdout()),
+        |metrics| {
+            iteration_count += 1;
+
+            // Clear terminal every CLEAR_INTERVAL outputs
+            // ANSI escape codes: \x1b[2J (clear screen) + \x1b[H (move cursor to top)
+            if iteration_count % CLEAR_INTERVAL == 1 {
+                print!("\x1b[2J\x1b[H");  // Clear screen and move to top
+                println!("─────────────────────────────────────────────────────────");
+                println!("scx_gamer stats (screen cleared every {} outputs)", CLEAR_INTERVAL);
+                println!("─────────────────────────────────────────────────────────");
+                println!();
+            }
+
+            metrics.format(&mut std::io::stdout())
+        },
     )
 }
