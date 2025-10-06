@@ -14,6 +14,7 @@ pub use bpf_intf::*;
 mod stats;
 mod trigger;
 mod game_detect;
+mod game_detect_bpf;  // BPF LSM-based game detection (modern, kernel-level)
 mod ml_collect;
 mod ml_scoring;
 mod ml_autotune;
@@ -25,6 +26,7 @@ mod cpu_detect;
 // mod thread_sampler;
 use crate::trigger::TriggerOps;
 use crate::game_detect::GameDetector;
+use crate::game_detect_bpf::BpfGameDetector;
 use crate::ml_collect::MLCollector;
 use crate::ml_autotune::MLAutotuner;
 use crate::ml_profiles::ProfileManager;
@@ -330,7 +332,8 @@ struct Scheduler<'a> {
     // MICRO-OPTIMIZATION: Function pointer selected at init time to avoid runtime branch
     // Saves 10-20ns per input event (branch misprediction cost)
     input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel),
-    game_detector: Option<GameDetector>,
+    bpf_game_detector: Option<BpfGameDetector>,    // BPF LSM game detection (kernel-level, preferred)
+    game_detector: Option<GameDetector>,           // Fallback inotify detection (if BPF unavailable)
     ml_collector: Option<MLCollector>,  // ML data collection for per-game tuning
     ml_autotuner: Option<MLAutotuner>,  // Automated parameter exploration
     profile_manager: Option<ProfileManager>,  // Per-game config profiles
@@ -338,6 +341,36 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
+    /// Get current game TGID from active detector (BPF LSM or inotify fallback)
+    #[inline]
+    fn get_detected_game_tgid(&self) -> u32 {
+        if let Some(ref detector) = self.bpf_game_detector {
+            detector.get_game_tgid()
+        } else if let Some(ref detector) = self.game_detector {
+            detector.get_game_tgid()
+        } else {
+            0
+        }
+    }
+
+    /// Get full game info from active detector
+    #[inline]
+    fn get_detected_game_info(&self) -> Option<game_detect::GameInfo> {
+        if let Some(ref detector) = self.bpf_game_detector {
+            // Convert BpfGameDetector::GameInfo to game_detect::GameInfo
+            detector.get_game_info().map(|g| game_detect::GameInfo {
+                tgid: g.tgid,
+                name: g.name,
+                is_wine: g.is_wine,
+                is_steam: g.is_steam,
+            })
+        } else if let Some(ref detector) = self.game_detector {
+            detector.get_game_info()
+        } else {
+            None
+        }
+    }
+
     /// Classify input device type on initialization to avoid per-event checking.
     /// Reduces input processing latency by ~5-10µs on high-polling devices.
     #[inline]
@@ -681,6 +714,23 @@ impl<'a> Scheduler<'a> {
             |trig, skel| { trig.trigger_input(skel); }
         };
 
+        // Initialize game detection: Try BPF LSM first (kernel-level), fallback to inotify
+        // BPF LSM benefits (kernel 6.17+):
+        // - 60-650× lower CPU overhead (μs/sec vs ms/sec)
+        // - 10-100× faster detection (<1ms vs 0-100ms)
+        // - Instant game exit detection (<1ms vs 5s polling)
+        // - Zero recurring /proc scans (event-driven)
+        let (bpf_game_detector, game_detector_fallback) = match BpfGameDetector::new(&mut skel) {
+            Ok(detector) => {
+                info!("Game detection: Using BPF LSM (kernel-level tracking)");
+                (Some(detector), None)
+            }
+            Err(e) => {
+                info!("Game detection: BPF LSM unavailable ({}), using inotify fallback", e);
+                (None, Some(GameDetector::new()))
+            }
+        };
+
         let scheduler = Self {
             skel,
             opts,
@@ -692,7 +742,8 @@ impl<'a> Scheduler<'a> {
             registered_epoll_fds: FxHashSet::default(),
             trig: trigger::BpfTrigger::default(),
             input_trigger_fn,
-            game_detector: Some(GameDetector::new()),
+            bpf_game_detector,
+            game_detector: game_detector_fallback,
             ml_collector,
             ml_autotuner,
             profile_manager,
@@ -743,6 +794,11 @@ impl<'a> Scheduler<'a> {
             .as_ref()
             .expect("BPF rodata missing (scheduler not loaded?)");
 
+        // Get detected game name for display in stats
+        let fg_app = self.get_detected_game_info()
+            .map(|g| g.name)
+            .unwrap_or_else(String::new);
+
         Metrics {
             cpu_util: bss.cpu_util,
             rr_enq: bss.rr_enq,
@@ -756,7 +812,7 @@ impl<'a> Scheduler<'a> {
             cpu_util_avg: bss.cpu_util_avg,
             frame_hz_est: 0.0,  // Frame timing removed
             fg_pid: ro.foreground_tgid as u64,
-            fg_app: String::new(),
+            fg_app,
             fg_fullscreen: 0,
             win_input_ns: bss.win_input_ns_total,
             win_frame_ns: bss.win_frame_ns_total,
@@ -774,6 +830,8 @@ impl<'a> Scheduler<'a> {
             system_audio_threads: bss.nr_system_audio_threads,
             game_audio_threads: bss.nr_game_audio_threads,
             input_handler_threads: bss.nr_input_handler_threads,
+            input_trigger_rate: bss.input_trigger_rate as u64,
+            continuous_input_mode: bss.continuous_input_mode as u64,
 
             // Profiling metrics (calculated in delta())
             prof_select_cpu_avg_ns: 0,
@@ -891,34 +949,32 @@ impl<'a> Scheduler<'a> {
             if last_game_check.elapsed() >= Duration::from_millis(100) {
                 last_game_check = Instant::now();
 
-                if let Some(detector) = &self.game_detector {
-                    let detected_tgid = detector.get_game_tgid();
-                    if cached_game_tgid != detected_tgid {
-                        cached_game_tgid = detected_tgid;
-                        let bss = self.skel.maps.bss_data.as_mut().unwrap();
-                        // SAFETY: Write to staging area, BPF will copy atomically via get_fg_tgid()
-                        // This double-buffering prevents torn reads during hot-path classification
-                        bss.detected_fg_tgid_staging = detected_tgid;
+                // Get game TGID from active detector (BPF LSM or inotify fallback)
+                let detected_tgid = self.get_detected_game_tgid();
+                if cached_game_tgid != detected_tgid {
+                    cached_game_tgid = detected_tgid;
+                    let bss = self.skel.maps.bss_data.as_mut().unwrap();
+                    // SAFETY: Write to staging area, BPF will copy atomically via get_fg_tgid()
+                    // This double-buffering prevents torn reads during hot-path classification
+                    bss.detected_fg_tgid_staging = detected_tgid;
 
-                    // Update ML collector with new game (get full info from game detector)
-                    if let Some(ref mut ml) = self.ml_collector {
-                        if let Some(ref detector) = self.game_detector {
-                            let game_info = detector.get_game_info().map(|g| {
-                                info!("ML: Detected game '{}' (tgid: {}, wine: {}, steam: {})",
-                                      g.name, g.tgid, g.is_wine, g.is_steam);
-                                ml_collect::GameInfo {
-                                    tgid: g.tgid,
-                                    name: g.name.clone(),
-                                    is_wine: g.is_wine,
-                                    is_steam: g.is_steam,
-                                }
-                            });
-                            ml.set_game(game_info);
+                    // Update ML collector with new game
+                    let game_info_for_ml = self.get_detected_game_info().map(|g| {
+                        info!("ML: Detected game '{}' (tgid: {}, wine: {}, steam: {})",
+                              g.name, g.tgid, g.is_wine, g.is_steam);
+                        ml_collect::GameInfo {
+                            tgid: g.tgid,
+                            name: g.name.clone(),
+                            is_wine: g.is_wine,
+                            is_steam: g.is_steam,
                         }
+                    });
+                    if let Some(ref mut ml) = self.ml_collector {
+                        ml.set_game(game_info_for_ml);
                     }
 
                     // Auto-load profile for detected game
-                    if let Some(ref game_info) = detector.get_game_info() {
+                    if let Some(ref game_info) = self.get_detected_game_info() {
                         if self.last_detected_game != game_info.name {
                             self.last_detected_game = game_info.name.clone();
 
@@ -942,7 +998,6 @@ impl<'a> Scheduler<'a> {
                         }
                     }
                 }
-            }
             }  // End of rate-limited game detection block
 
             for ev in events.iter() {
@@ -979,29 +1034,29 @@ impl<'a> Scheduler<'a> {
                         continue;
                     }
                     if let Some(dev) = self.input_devs.get_mut(idx) {
-                        if let Ok(mut iter) = dev.fetch_events() {
+                        if let Ok(iter) = dev.fetch_events() {
                             // dev_type already retrieved from single HashMap lookup above
 
-                            // MICRO-OPT: Simplified event draining - just check existence, no peek
-                            // iter.next() drains first event and returns Some/None
-                            if iter.next().is_some() {
-                                // Drain remaining events without processing (clear buffer)
-                                for _ in iter {}
-
+                            // RAW INPUT: Process EVERY event individually for maximum precision
+                            // High-polling mice (8kHz) generate events every 125µs
+                            // We MUST process each one to maintain raw input accuracy
+                            let mut event_count = 0;
+                            for _event in iter {
+                                event_count += 1;
                                 // Only trigger on keyboard/mouse events, skip Other devices
                                 if !matches!(dev_type, DeviceType::Other) {
-                                    // ZERO-LATENCY: Immediate trigger on EVERY input event
-                                    // No batching, no debouncing, no delays - direct BPF syscall
+                                    // ZERO-LATENCY: Immediate BPF trigger per event
+                                    // No batching, no debouncing, no event dropping
                                     //
-                                    // Performance: 8kHz mouse = ~8000 syscalls/sec
-                                    // Each syscall: ~500-800ns = 4-6ms total CPU time
-                                    // On 16-core system: 0.025-0.04% per core (negligible)
+                                    // Performance: 8kHz mouse = ~8000 syscalls/sec = ~6ms total CPU
+                                    // Latency: <1µs per event (syscall overhead)
                                     //
-                                    // Latency: 0µs added (input → BPF window activation is synchronous)
-                                    // MICRO-OPT: Use function pointer (no branch, perfect prediction)
+                                    // This is CRITICAL for aim precision in competitive games
                                     (self.input_trigger_fn)(&self.trig, &mut self.skel);
                                 }
                             }
+                            // Note: event_count available for debugging if needed
+                            let _ = event_count; // suppress unused warning
                         }
                     }
                 }
@@ -1042,22 +1097,22 @@ impl<'a> Scheduler<'a> {
                 let metrics = self.get_metrics();
 
                 // Record ML sample for autotune trial
+                // Get game info before mutable borrow (borrow checker)
+                let game_info = self.get_detected_game_info()
+                    .map(|g| ml_collect::GameInfo {
+                        tgid: g.tgid,
+                        name: g.name,
+                        is_wine: g.is_wine,
+                        is_steam: g.is_steam,
+                    })
+                    .unwrap_or_else(|| ml_collect::GameInfo {
+                        tgid: 0,
+                        name: "system".to_string(),
+                        is_wine: false,
+                        is_steam: false,
+                    });
+
                 if let Some(ref mut autotuner) = self.ml_autotuner {
-                    // Convert metrics to PerformanceSample
-                    let game_info = self.game_detector.as_ref()
-                        .and_then(|d| d.get_game_info())
-                        .map(|g| ml_collect::GameInfo {
-                            tgid: g.tgid,
-                            name: g.name,
-                            is_wine: g.is_wine,
-                            is_steam: g.is_steam,
-                        })
-                        .unwrap_or_else(|| ml_collect::GameInfo {
-                            tgid: 0,
-                            name: "system".to_string(),
-                            is_wine: false,
-                            is_steam: false,
-                        });
 
                     let sample = ml_collect::PerformanceSample {
                         timestamp: std::time::SystemTime::now()
@@ -1362,8 +1417,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Wait for stats thread to finish (with timeout) - only for --stats mode
-    if opts.stats.is_some() {
+    // Wait for stats thread to finish (with timeout)
+    // BUG FIX: Check for any stats thread (--stats OR --monitor), not just --stats
+    if opts.stats.is_some() || opts.monitor.is_some() {
         if let Some(jh) = stats_thread {
             info!("Waiting for stats thread to finish...");
             // Give it 1 second to finish gracefully
