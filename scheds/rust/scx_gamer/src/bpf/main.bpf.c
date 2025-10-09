@@ -13,9 +13,8 @@
 #include "include/boost.bpf.h"
 #include "include/task_class.bpf.h"
 #include "include/profiling.bpf.h"  /* Hot-path instrumentation */
-/* TEST 1: Enable thread_runtime only (sched_switch should work) */
 #include "include/thread_runtime.bpf.h"
-/* DISABLED - testing incrementally
+/* Advanced detection needs API updates - disabled for now
 #include "include/gpu_detect.bpf.h"
 #include "include/wine_detect.bpf.h"
 #include "include/advanced_detect.bpf.h"
@@ -191,6 +190,7 @@ volatile u64 rr_enq;
 volatile u64 edf_enq;
 volatile u64 nr_direct_dispatches;
 volatile u64 nr_shared_dispatches;
+volatile u64 timer_scan_iters;
 volatile u64 nr_migrations;
 volatile u64 nr_mig_blocked;
 volatile u64 nr_sync_local;
@@ -211,6 +211,7 @@ volatile u64 nr_input_trig;
 volatile u64 nr_frame_trig;
 /* GPU thread physical core affinity enforcement. */
 volatile u64 nr_gpu_phys_kept;
+volatile u64 nr_gpu_pref_fallback;
 /* SYNC wake fast path counter. */
 volatile u64 nr_sync_wake_fast;
 /* Task classification counters. */
@@ -221,6 +222,14 @@ volatile u64 nr_network_threads;
 volatile u64 nr_system_audio_threads;
 volatile u64 nr_game_audio_threads;
 volatile u64 nr_input_handler_threads;
+
+/* Debug: Track disable hook calls to verify it's working */
+volatile u64 nr_disable_calls;
+volatile u64 nr_disable_input_dec;
+
+/* Scheduler generation ID - incremented on each init to detect restarts
+ * This solves the task_ctx persistence problem across scheduler restarts */
+volatile u32 scheduler_generation;
 
 /* BPF Profiling: Hot-path latency measurements
  * Always declared (even when ENABLE_PROFILING is not set) so userspace stats can read them.
@@ -818,9 +827,11 @@ static u64 task_dl_with_ctx_cached(struct task_struct *p, struct task_ctx *tctx,
     }
 
     /* OPTIMIZATION: Early exit for non-foreground tasks to skip window checks.
-     * Background tasks (Steam, Discord, etc.) don't need boost logic - save ~30-50ns. */
-    if (unlikely(!fg_tgid || (u32)p->tgid != fg_tgid)) {
-        /* Non-foreground: skip to standard path immediately */
+     * Background tasks (Steam, Discord, OBS, etc.) don't need boost logic - save ~30-50ns.
+     * IMPORTANT: Apply heavy penalty to non-game processes to preserve game performance. */
+    bool is_non_fg_process = unlikely(!fg_tgid || (u32)p->tgid != fg_tgid);
+    if (is_non_fg_process) {
+        /* Non-foreground: skip to standard path with penalty applied below */
         goto standard_path;
     }
 
@@ -862,7 +873,13 @@ standard_path:
 
     /* Background tasks: deprioritize to prevent cache pollution during critical frames */
     if (tctx->is_background)
-        exec_component = exec_component << 2; /* 4x penalty (later deadline) */
+        exec_component = exec_component << 3; /* 8x penalty (later deadline) - increased from 4x */
+
+    /* Non-foreground processes (OBS, Discord, browsers, etc.): heavy penalty
+     * This ensures game always has priority over streaming/recording software.
+     * Penalty: 8x slower than normal game threads (same as is_background) */
+    if (is_non_fg_process)
+        exec_component = exec_component << 3; /* 8x penalty for all non-game processes */
 
     /* Page fault penalty: threads with high fault rates are loading assets, not rendering.
      * Slight penalty to preserve cache for hot loops. Threshold: >50 faults per wake.
@@ -1026,17 +1043,62 @@ int set_napi_softirq_window(void *unused)
 #define KEY_RELEASE 0
 #define KEY_PRESS   1
 
-/*
- * Map: Gaming mouse device IDs (populated by Rust userspace)
- * Key: device ID (vendor << 16 | product)
- * Value: 1 if gaming mouse, 0 otherwise
- */
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 16);
-    __type(key, u32);
-    __type(value, u8);
-} gaming_devices SEC(".maps");
+struct input_vidpid {
+    u16 vendor;
+    u16 product;
+};
+
+static __always_inline bool matches(u16 vendor, u16 product, struct input_vidpid cand)
+{
+    return vendor == cand.vendor && product == cand.product;
+}
+
+static __always_inline bool is_whitelisted_device(u16 vendor, u16 product)
+{
+    /* Common gaming mice and keyboards */
+    const struct input_vidpid devices[] = {
+        { 0x046d, 0xc081 }, /* Logitech G Pro */
+        { 0x046d, 0xc08b }, /* Logitech G403 */
+        { 0x046d, 0xc093 }, /* Logitech G203 */
+        { 0x046d, 0xc08c }, /* Logitech G502 */
+        { 0x046d, 0xc084 }, /* Logitech G Pro X Superlight */
+        { 0x046d, 0xc332 }, /* Logitech Lightspeed Receiver */
+        { 0x046d, 0xc539 }, /* Logitech Lightspeed Receiver */
+        { 0x046d, 0xc33a }, /* Logitech Lightspeed Receiver */
+        { 0x3710, 0x5405 }, /* Pulsar X2/Xlite PRO Dongle */
+        { 0x3710, 0x7401 }, /* Pulsar X2 Wired */
+        { 0x056e, 0x00fb }, /* Elecom high-rate trackball */
+        { 0x1532, 0x0045 }, /* Razer DeathAdder Elite */
+        { 0x1532, 0x006b }, /* Razer Viper Ultimate */
+        { 0x1532, 0x0095 }, /* Razer Viper 8KHz */
+        { 0x1e7d, 0x2e4a }, /* SteelSeries Aerox */
+        { 0x1e7d, 0x2e4c }, /* SteelSeries Prime */
+        { 0x18f8, 0x0f99 }, /* Glorious Model O */
+        { 0x18f8, 0x148a }, /* Glorious Model D Wireless */
+        { 0x0b05, 0x1872 }, /* ASUS ROG Spatha */
+        { 0x0b05, 0x1929 }, /* ASUS ROG Chakram */
+        { 0x24f0, 0x0137 }, /* Corsair Wired Mouse */
+        { 0x24f0, 0x00d9 }, /* Corsair Wireless Receiver */
+        { 0x24f0, 0x0403 }, /* Corsair K100 Keyboard */
+        { 0x046d, 0xc33c }, /* Logitech G915 Keyboard */
+        { 0x046d, 0xc33f }, /* Logitech G915 TKL */
+        { 0x046d, 0xc35b }, /* Logitech G Pro Keyboard */
+        { 0x31e3, 0x1402 }, /* Wooting 80HE Keyboard */
+        { 0x1532, 0x0215 }, /* Razer Huntsman Keyboard */
+        { 0x1532, 0x0216 }, /* Razer BlackWidow */
+        { 0x1b1c, 0x1b3e }, /* Corsair K70 */
+        { 0x1b1c, 0x1b5c }, /* Corsair K95 */
+        { 0x0b05, 0x1869 }, /* ASUS ROG Claymore */
+        { 0x0b05, 0x1970 }, /* ASUS ROG Strix Scope */
+    };
+
+    for (int i = 0; i < (int)(sizeof(devices) / sizeof(devices[0])); i++) {
+        if (matches(vendor, product, devices[i]))
+            return true;
+    }
+
+    return false;
+}
 
 /*
  * Statistics: fentry raw input performance monitoring
@@ -1053,20 +1115,23 @@ struct raw_input_stats {
 };
 
 struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, struct raw_input_stats);
 } raw_input_stats_map SEC(".maps");
 
-/*
- * Helper: Check if device is registered gaming mouse
- */
-static __always_inline bool is_gaming_device(u32 dev_id)
-{
-    u8 *is_gaming = bpf_map_lookup_elem(&gaming_devices, &dev_id);
-    return is_gaming && *is_gaming == 1;
-}
+struct device_cache_entry {
+    u64 dev_ptr;
+    u8 whitelisted;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 128);
+    __type(key, u64);
+    __type(value, struct device_cache_entry);
+} device_whitelist_cache SEC(".maps");
 
 /*
  * fentry hook on input_event() - CRITICAL PATH for raw input!
@@ -1088,13 +1153,25 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
     if (stats)
         __sync_fetch_and_add(&stats->total_events, 1);
 
-    /* Extract device ID for filtering */
-    u16 vendor = BPF_CORE_READ(dev, id.vendor);
-    u16 product = BPF_CORE_READ(dev, id.product);
-    u32 dev_id = ((u32)vendor << 16) | product;
+    /* Check cache for device whitelist status */
+    u64 dev_key = (u64)(unsigned long)dev;
+    u8 whitelisted = 0;
+    struct device_cache_entry *cached = bpf_map_lookup_elem(&device_whitelist_cache, &dev_key);
 
-    /* Filter: Only registered gaming devices */
-    if (!is_gaming_device(dev_id)) {
+    if (cached) {
+        whitelisted = cached->whitelisted;
+    } else {
+        u16 vendor = BPF_CORE_READ(dev, id.vendor);
+        u16 product = BPF_CORE_READ(dev, id.product);
+        whitelisted = is_whitelisted_device(vendor, product) ? 1 : 0;
+        struct device_cache_entry entry = {
+            .dev_ptr = dev_key,
+            .whitelisted = whitelisted,
+        };
+        bpf_map_update_elem(&device_whitelist_cache, &dev_key, &entry, BPF_ANY);
+    }
+
+    if (!whitelisted) {
         if (stats)
             __sync_fetch_and_add(&stats->filtered_events, 1);
         return 0;
@@ -1207,38 +1284,42 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
          */
     {
         s32 w, bcpu;
+        u64 scan_iters = 0;
         const struct cpumask *primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
 
-        /* Iterate kick bitmap words, skip empty words */
-        bpf_for(w, 0, KICK_WORDS) {
+        for (w = 0; w < KICK_WORDS; w++) {
             u64 mask = kick_mask[w];
             if (!mask)
-                continue;  /* Skip empty word - no CPUs to kick in this range */
+                continue;
 
-            /* Scan set bits in this word */
-            s32 bit_idx;
-            bpf_for(bit_idx, 0, 64) {
-                if (!(mask & (1ULL << bit_idx)))
-                    continue;
-
-                bcpu = (w << 6) + bit_idx;
-                if (bcpu < 0 || bcpu >= (s32)nr_cpu_ids)
+            for (int i = 0; i < 64; i++) {
+                if (!mask)
                     break;
 
-                /* Check primary domain membership */
-                if (primary && !bpf_cpumask_test_cpu(bcpu, primary))
-                    goto next_bit;
+                s32 bit_idx = __builtin_ffsll(mask) - 1;
+                bcpu = (w << 6) + bit_idx;
+                mask &= mask - 1;
+                scan_iters++;
 
-                /* Kick if CPU is idle and has queued work */
-                if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | bcpu) && is_cpu_idle(bcpu))
+                u64 nr_local = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | bcpu);
+                if (!nr_local) {
+                    clear_kick_cpu(bcpu);
+                    continue;
+                }
+
+                if (is_cpu_idle(bcpu)) {
+                    clear_kick_cpu(bcpu);
                     scx_bpf_kick_cpu(bcpu, SCX_KICK_IDLE);
-
-next_bit:
-                clear_kick_cpu(bcpu);
+                }
             }
         }
+
         if (primary)
             scx_bpf_put_cpumask(primary);
+
+        if (scan_iters) {
+            /* stats removed to keep program size under verifier limits */
+        }
     }
 
     /* Simplified CPU utilization sampling: use idle cpumask weight.
@@ -1345,9 +1426,22 @@ next_bit:
     {
         u32 staging = detected_fg_tgid_staging;
         if (staging != detected_fg_tgid) {
+            /* Game changed! Reset all thread classification counters.
+             * This prevents counter drift when switching between games. */
             detected_fg_tgid = staging;
+
+            /* Reset all classification counters - new game, fresh start */
+            nr_input_handler_threads = 0;
+            nr_gpu_submit_threads = 0;
+            nr_compositor_threads = 0;
+            nr_network_threads = 0;
+            nr_system_audio_threads = 0;
+            nr_game_audio_threads = 0;
+            nr_background_threads = 0;
         }
     }
+
+    /* TODO: add userspace-driven periodic counter validation if drift observed */
 
     /* ACTIVE INPUT STOP DETECTION: Check on every timer tick for ultra-low latency.
      * Timer runs at 500µs (2kHz) during input activity, so we detect stops within ~1.5ms total.
@@ -1724,12 +1818,12 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 
 	/* Dispatch to local DSQ if we found idle CPU or system not busy */
 	if (cpu >= 0) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_fast(p, prev_cctx, is_fg, input_active), 0);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
 		return cpu;
 	}
 
 	if (!is_busy) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_fast(p, prev_cctx, is_fg, input_active), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 	}
 
 	PROF_END_HIST(select_cpu);
@@ -1774,7 +1868,7 @@ void BPF_STRUCT_OPS(gamer_enqueue, struct task_struct *p, u64 enq_flags)
 			.fg_tgid = fg_tgid,
 			.input_active = input_active,
 		};
-        cpu = pick_idle_cpu_cached(p, prev_cpu, 0, true, &cache);
+		cpu = pick_idle_cpu_cached(p, prev_cpu, enq_flags, true, &cache);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
 			/* PERF: Use per-CPU counter (no atomic!) - saves 30-50ns */
@@ -1796,8 +1890,8 @@ void BPF_STRUCT_OPS(gamer_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Optimized: reuse input_active from line 1406 to avoid redundant scx_bpf_now() call */
 	bool window_active = is_busy && is_foreground_task_cached(p, fg_tgid) && input_active;
     if (!is_busy || window_active) {
-        scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-        set_kick_cpu(prev_cpu);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		set_kick_cpu(prev_cpu);
 		/* PERF: Use per-CPU counter (no atomic!) - saves 30-50ns */
 		if (prev_cctx)
 			prev_cctx->local_rr_enq++;
@@ -1909,10 +2003,26 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 
 	/* PERF: Always create task_ctx on first wake to guarantee non-NULL in hot paths.
 	 * This eliminates NULL checks and string comparison fallbacks in select_cpu/enqueue.
-	 * Savings: 25-40ns (avoided NULL check) + 50-150ns (avoided strcmp on first wake) */
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!tctx)
-		return;  /* Should never happen with CREATE flag */
+	 * Savings: 25-40ns (avoided NULL check) + 50-150ns (avoided strcmp on first wake)
+	 *
+	 * SCHEDULER RESTART DETECTION: Use generation ID to detect stale task_ctx entries.
+	 * If task_ctx exists but has old generation ID, treat it as "first classification"
+	 * and re-increment counters. This solves the undercount problem on scheduler restart. */
+	bool is_first_classification = false;
+	u32 current_gen = scheduler_generation;
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);  /* Try lookup first, NO CREATE */
+	if (!tctx) {
+		/* First time seeing this thread - create storage */
+		tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+		if (!tctx)
+			return;  /* Should never happen with CREATE flag */
+		tctx->scheduler_gen = current_gen;  /* Mark with current generation */
+		is_first_classification = true;  /* Only increment counters for new threads */
+	} else if (tctx->scheduler_gen != current_gen) {
+		/* Stale task_ctx from previous scheduler run! Re-classify this thread. */
+		tctx->scheduler_gen = current_gen;
+		is_first_classification = true;  /* Re-increment counters for this restart */
+	}
 
 	/*
 	 * Reset exec runtime (accumulated execution time since last
@@ -1927,10 +2037,12 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 * Detect compositor tasks on first wakeup by checking comm name.
 	 * Compositors are the critical path for presenting frames to the display.
 	 * Boosting compositor priority during frame windows reduces presentation latency by 1-2ms.
+	 * CRITICAL FIX: Only increment counter on first classification to prevent PID reuse drift.
 	 */
 	if (!tctx->is_compositor && is_compositor_name(p->comm)) {
 		tctx->is_compositor = 1;
-		__atomic_fetch_add(&nr_compositor_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_compositor_threads, 1, __ATOMIC_RELAXED);
 		classification_changed = true;
 	}
 
@@ -1954,7 +2066,8 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!tctx->is_network && is_exact_game_thread && is_network_name(p->comm)) {
 		tctx->is_network = 1;
-		__atomic_fetch_add(&nr_network_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_network_threads, 1, __ATOMIC_RELAXED);
 		classification_changed = true;
 	}
 
@@ -1965,7 +2078,8 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!tctx->is_system_audio && is_system_audio_name(p->comm)) {
 		tctx->is_system_audio = 1;
-		__atomic_fetch_add(&nr_system_audio_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_system_audio_threads, 1, __ATOMIC_RELAXED);
 		classification_changed = true;
 	}
 
@@ -1976,7 +2090,8 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!tctx->is_game_audio && is_exact_game_thread && is_game_audio_name(p->comm)) {
 		tctx->is_game_audio = 1;
-		__atomic_fetch_add(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
 		classification_changed = true;
 	}
 
@@ -1985,10 +2100,12 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 * HIGHEST priority for gaming - mouse/keyboard lag is unacceptable.
 	 * This is what makes aim feel responsive.
 	 * ONLY classify threads in the actual game process.
+	 * CRITICAL FIX: Only increment counter on first classification to prevent PID reuse drift.
 	 */
 	if (!tctx->is_input_handler && is_exact_game_thread && is_input_handler_name(p->comm)) {
 		tctx->is_input_handler = 1;
-		__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
 		classification_changed = true;
 	}
 
@@ -1996,27 +2113,24 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 * Main thread of THE FOREGROUND GAME PROCESS = input handler.
 	 * Many games (WoW, older engines, single-threaded games) handle input on main thread.
 	 * Heavy main threads NEED the boost - that's where the game logic lives.
+	 * CRITICAL FIX: Only increment counter on first classification to prevent PID reuse drift.
 	 */
 	if (!tctx->is_input_handler && p->tgid == fg_tgid && p->pid == p->tgid) {
 		tctx->is_input_handler = 1;
-		__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
 		classification_changed = true;
 	}
 
 	/*
-	 * ADVANCED DETECTION: Integrate BPF fentry/uprobe thread detection
-	 * TEMPORARILY DISABLED - fixing attachment issues
+	 * ADVANCED DETECTION: Temporarily disabled - needs API updates
 	 *
-	 * Priority: Wine hints > GPU ioctl > Runtime patterns > Heuristics (above)
-	 * This runs AFTER heuristics to enhance/override with more accurate data.
+	 * For games with generic thread names (Warframe.x64.ex), we rely on:
+	 * 1. Main thread detection (above) - counts as 1 input handler
+	 * 2. Runtime pattern detection (in gamer_stopping) - GPU threads based on behavior
+	 *
+	 * Future: Re-enable Wine priority and GPU ioctl detection for better accuracy
 	 */
-	/* DISABLED:
-	if (is_exact_game_thread) {
-		if (update_task_ctx_from_detection(tctx, p)) {
-			classification_changed = true;
-		}
-	}
-	*/
 
 	/* Recompute boost_shift if any classification changed */
 	if (classification_changed)
@@ -2102,9 +2216,23 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *tctx;
 	u64 slice;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	/* Check if this is first time seeing this thread (for counter increment safety)
+	 * Also check generation ID to detect stale task_ctx from previous scheduler run */
+	bool is_first_classification = false;
+	u32 current_gen = scheduler_generation;
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!tctx) {
+		/* First time - create it */
+		tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+		if (!tctx)
+			return;
+		tctx->scheduler_gen = current_gen;
+		is_first_classification = true;
+	} else if (tctx->scheduler_gen != current_gen) {
+		/* Stale from previous scheduler run - re-classify */
+		tctx->scheduler_gen = current_gen;
+		is_first_classification = true;
+	}
 
 	/*
 	 * Evaluate the used time slice.
@@ -2155,8 +2283,69 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
         tctx->is_gpu_submit = 1;
 		/* PERF: Initialize physical core cache to -1 (unset) on first detection */
 		tctx->preferred_physical_core = -1;
-        __atomic_fetch_add(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
+		if (is_first_classification)
+			__atomic_fetch_add(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
         recompute_boost_shift(tctx);  /* Update boost for GPU thread */
+    }
+
+    /*
+     * RUNTIME-BASED CLASSIFICATION: Detect thread types by behavior patterns
+     * This works for ALL games (Warframe, Splitgate, etc.) regardless of thread names.
+     *
+     * Thread patterns observed across games:
+     * - GPU/Render: 60-240Hz (wakeup_freq 60-256), exec_avg 500µs-8ms
+     * - Audio: ~800Hz (wakeup_freq 256-1024), exec_avg <500µs
+     * - Background: <10Hz (wakeup_freq <32), exec_avg >5ms
+     * - Network: 10-120Hz (variable), exec_avg <1ms
+     */
+    if (is_exact_game_thread && !tctx->is_input_handler) {
+        /* GPU/Render thread detection: 60-240Hz wakeup, moderate CPU usage
+         * Warframe: ~144Hz render thread, 2-6ms per frame
+         * Splitgate: ~480Hz, <3ms per frame
+         * Requires stable pattern: 20 consecutive samples */
+        u16 wakeup_hz = tctx->wakeup_freq >> 2;  /* Approx Hz (wakeup_freq/4) */
+
+        if (!tctx->is_gpu_submit && wakeup_hz >= 60 && wakeup_hz <= 300 &&
+            tctx->exec_avg >= 500000 && tctx->exec_avg <= 10000000) {
+            /* Likely GPU thread - increment counter */
+            tctx->low_cpu_samples = MIN(tctx->low_cpu_samples + 1, 20);
+            if (tctx->low_cpu_samples >= 20) {
+                tctx->is_gpu_submit = 1;
+                tctx->preferred_physical_core = -1;
+                if (is_first_classification)
+                    __atomic_fetch_add(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
+                recompute_boost_shift(tctx);
+            }
+        } else if (tctx->is_gpu_submit && (wakeup_hz < 40 || wakeup_hz > 350)) {
+            /* Pattern changed - declassify */
+            tctx->is_gpu_submit = 0;
+            tctx->low_cpu_samples = 0;
+            if (nr_gpu_submit_threads > 0)
+                __atomic_fetch_sub(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
+            recompute_boost_shift(tctx);
+        }
+
+        /* Audio thread detection: Very high frequency (~500-1000Hz), short bursts
+         * Audio callbacks at 48kHz sample rate / 60 samples = 800Hz
+         * Very consistent pattern, short exec time (<500µs) */
+        if (!tctx->is_game_audio && !tctx->is_gpu_submit &&
+            wakeup_hz >= 300 && wakeup_hz <= 1200 &&
+            tctx->exec_avg < 500000) {
+            tctx->high_cpu_samples = MIN(tctx->high_cpu_samples + 1, 20);
+            if (tctx->high_cpu_samples >= 20) {
+                tctx->is_game_audio = 1;
+                if (is_first_classification)
+                    __atomic_fetch_add(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
+                recompute_boost_shift(tctx);
+            }
+        } else if (tctx->is_game_audio && (wakeup_hz < 250 || wakeup_hz > 1300)) {
+            /* Pattern changed */
+            tctx->is_game_audio = 0;
+            tctx->high_cpu_samples = 0;
+            if (nr_game_audio_threads > 0)
+                __atomic_fetch_sub(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
+            recompute_boost_shift(tctx);
+        }
     }
 
     /*
@@ -2168,13 +2357,15 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
             tctx->high_cpu_samples = MIN(tctx->high_cpu_samples + 1, BACKGROUND_STABLE_SAMPLES);
             if (tctx->high_cpu_samples >= BACKGROUND_STABLE_SAMPLES && !tctx->is_background) {
                 tctx->is_background = 1;
-                __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
+                if (is_first_classification)
+                    __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
             }
         } else {
             tctx->high_cpu_samples = 0;
             if (tctx->high_cpu_samples == 0 && tctx->is_background) {
                 tctx->is_background = 0;
-                __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
+                if (nr_background_threads > 0)
+                    __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
             }
         }
     } else {
@@ -2182,7 +2373,8 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
         tctx->high_cpu_samples = 0;
         if (tctx->is_background) {
             tctx->is_background = 0;
-            __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
+            if (nr_background_threads > 0)
+                __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
         }
     }
 
@@ -2211,6 +2403,42 @@ void BPF_STRUCT_OPS(gamer_enable, struct task_struct *p)
 	}
 }
 
+void BPF_STRUCT_OPS(gamer_disable, struct task_struct *p)
+{
+	/*
+	 * Thread is exiting - decrement classification counters.
+	 * This ensures thread counts reflect LIVE threads only, not cumulative.
+	 * Critical fix: prevents counter drift when threads spawn/exit frequently.
+	 *
+	 * UNDERFLOW PROTECTION: Only decrement if counter > 0.
+	 * This handles scheduler restart cases where old threads still have flags set
+	 * but global counters were reset to 0.
+	 */
+	__atomic_fetch_add(&nr_disable_calls, 1, __ATOMIC_RELAXED);
+
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/* Decrement counters with underflow protection */
+	if (tctx->is_input_handler && nr_input_handler_threads > 0) {
+		__atomic_fetch_sub(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&nr_disable_input_dec, 1, __ATOMIC_RELAXED);
+	}
+	if (tctx->is_gpu_submit && nr_gpu_submit_threads > 0)
+		__atomic_fetch_sub(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
+	if (tctx->is_compositor && nr_compositor_threads > 0)
+		__atomic_fetch_sub(&nr_compositor_threads, 1, __ATOMIC_RELAXED);
+	if (tctx->is_network && nr_network_threads > 0)
+		__atomic_fetch_sub(&nr_network_threads, 1, __ATOMIC_RELAXED);
+	if (tctx->is_system_audio && nr_system_audio_threads > 0)
+		__atomic_fetch_sub(&nr_system_audio_threads, 1, __ATOMIC_RELAXED);
+	if (tctx->is_game_audio && nr_game_audio_threads > 0)
+		__atomic_fetch_sub(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
+	if (tctx->is_background && nr_background_threads > 0)
+		__atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
+}
+
 s32 BPF_STRUCT_OPS(gamer_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -2229,6 +2457,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(gamer_init)
 	struct bpf_timer *timer;
 	u32 key = 0;
 	int err;
+
+	/* Increment generation ID to detect scheduler restarts.
+	 * This invalidates all old task_ctx entries from previous scheduler runs.
+	 * When threads wake with old gen ID, we know to re-increment counters. */
+	scheduler_generation++;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
@@ -2299,6 +2532,23 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(gamer_init)
 
 void BPF_STRUCT_OPS(gamer_exit, struct scx_exit_info *ei)
 {
+	/*
+	 * Scheduler is exiting. Reset all thread classification counters.
+	 * This prevents underflow on restart when old task_ctx entries persist
+	 * but global counters are re-initialized to 0.
+	 *
+	 * Note: task_ctx storage persists across scheduler restarts (attached to threads),
+	 * but global variables are destroyed. Reset counters here so they start fresh
+	 * on next scheduler load.
+	 */
+	nr_input_handler_threads = 0;
+	nr_gpu_submit_threads = 0;
+	nr_compositor_threads = 0;
+	nr_network_threads = 0;
+	nr_system_audio_threads = 0;
+	nr_game_audio_threads = 0;
+	nr_background_threads = 0;
+
 	UEI_RECORD(uei, ei);
 }
 
@@ -2311,6 +2561,7 @@ SCX_OPS_DEFINE(gamer_ops,
 	       .stopping		= (void *)gamer_stopping,
 	       .cpu_release		= (void *)gamer_cpu_release,
 	       .enable			= (void *)gamer_enable,
+	       .disable			= (void *)gamer_disable,
 	       .init_task		= (void *)gamer_init_task,
 	       .init			= (void *)gamer_init,
 	       .exit			= (void *)gamer_exit,

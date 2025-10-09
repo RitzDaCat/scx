@@ -21,6 +21,8 @@ mod ml_autotune;
 mod ml_bayesian;
 mod ml_profiles;
 mod cpu_detect;
+mod tui;
+mod process_monitor;
 // Thread learning modules removed - experimental, not production-ready
 // mod thread_patterns;
 // mod thread_sampler;
@@ -52,6 +54,7 @@ use clap::Parser;
 use evdev::EventType;
 use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
+use libbpf_rs::MapCore;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::{info, warn};
@@ -103,7 +106,7 @@ struct DeviceInfo {
     dev_type: DeviceType,
 }
 
-#[derive(Debug, clap::Parser)]
+#[derive(Debug, Clone, clap::Parser)]
 #[command(
     name = "scx_gamer",
     version,
@@ -251,6 +254,11 @@ struct Opts {
     #[clap(long)]
     monitor: Option<f64>,
 
+    /// Run in TUI (Terminal UI) mode with the specified interval. Scheduler
+    /// is not launched. Provides interactive dashboard.
+    #[clap(long)]
+    tui: Option<f64>,
+
     /// Enable verbose output, including libbpf details.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
@@ -396,6 +404,32 @@ impl<'a> Scheduler<'a> {
         }
 
         DeviceType::Other
+    }
+
+    /// Register all threads of the detected game in game_threads_map
+    /// This enables BPF thread runtime tracking for accurate role detection
+    fn register_game_threads(skel: &BpfSkel, tgid: u32) {
+        let game_threads_map = &skel.maps.game_threads_map;
+        let task_dir = format!("/proc/{}/task", tgid);
+
+        let mut thread_count = 0;
+        if let Ok(entries) = std::fs::read_dir(&task_dir) {
+            for entry in entries.flatten() {
+                if let Ok(tid_str) = entry.file_name().into_string() {
+                    if let Ok(tid) = tid_str.parse::<u32>() {
+                        let marker: u8 = 1;
+                        // Register thread in BPF map for tracking
+                        if game_threads_map.update(&tid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY).is_ok() {
+                            thread_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if thread_count > 0 {
+            info!("Thread tracking: Registered {} game threads for TGID {}", thread_count, tgid);
+        }
     }
 
     #[inline]
@@ -625,6 +659,8 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             }
+
+            info!("Found {} input devices for raw input monitoring", input_devs.len());
         }
 
         // Initialize ML autotuner if enabled
@@ -799,6 +835,50 @@ impl<'a> Scheduler<'a> {
             .map(|g| g.name)
             .unwrap_or_else(String::new);
 
+        // Use detected_fg_tgid if available, fallback to foreground_tgid
+        let fg_pid = if bss.detected_fg_tgid > 0 {
+            bss.detected_fg_tgid as u64
+        } else {
+            ro.foreground_tgid as u64
+        };
+
+        // Read fentry raw input stats (kernel-level input detection)
+        // This shows if fentry hooks are active vs falling back to userspace evdev
+        let (fentry_total, fentry_triggers, fentry_gaming, fentry_filtered) = {
+            let stats_map = &self.skel.maps.raw_input_stats_map;
+            let key = 0u32;
+
+            let per_cpu_stats = match stats_map.lookup_percpu(&key.to_ne_bytes(), libbpf_rs::MapFlags::ANY) {
+                Ok(Some(per_cpu)) => per_cpu,
+                _ => Vec::new(),
+            };
+
+            if per_cpu_stats.is_empty() {
+                (0, 0, 0, 0)
+            } else {
+                let mut total = 0u64;
+                let mut gaming = 0u64;
+                let mut filtered = 0u64;
+                let mut triggers = 0u64;
+
+                for bytes in per_cpu_stats {
+                    if bytes.len() < 64 {
+                        continue;
+                    }
+                    let parse_u64 = |offset: usize| -> u64 {
+                        u64::from_ne_bytes(bytes[offset..offset+8].try_into().unwrap_or([0u8; 8]))
+                    };
+
+                    total = total.saturating_add(parse_u64(0));
+                    gaming = gaming.saturating_add(parse_u64(40));
+                    filtered = filtered.saturating_add(parse_u64(48));
+                    triggers = triggers.saturating_add(parse_u64(56));
+                }
+
+                (total, triggers, gaming, filtered)
+            }
+        };
+
         Metrics {
             cpu_util: bss.cpu_util,
             rr_enq: bss.rr_enq,
@@ -811,7 +891,7 @@ impl<'a> Scheduler<'a> {
             frame_mig_block: bss.nr_frame_mig_block,
             cpu_util_avg: bss.cpu_util_avg,
             frame_hz_est: 0.0,  // Frame timing removed
-            fg_pid: ro.foreground_tgid as u64,
+            fg_pid,
             fg_app,
             fg_fullscreen: 0,
             win_input_ns: bss.win_input_ns_total,
@@ -832,6 +912,12 @@ impl<'a> Scheduler<'a> {
             input_handler_threads: bss.nr_input_handler_threads,
             input_trigger_rate: bss.input_trigger_rate as u64,
             continuous_input_mode: bss.continuous_input_mode as u64,
+
+            // Fentry hook stats (cumulative totals from kernel hooks)
+            fentry_total_events: fentry_total,
+            fentry_boost_triggers: fentry_triggers,
+            fentry_gaming_events: fentry_gaming,
+            fentry_filtered_events: fentry_filtered,
 
             // Profiling metrics (calculated in delta())
             prof_select_cpu_avg_ns: 0,
@@ -879,7 +965,7 @@ impl<'a> Scheduler<'a> {
         let epfd = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).map_err(|e| anyhow::anyhow!(e))?;
 
         // Register input devices on epoll and cache device types
-        for (idx, dev) in self.input_devs.iter().enumerate() {
+        for (idx, dev) in self.input_devs.iter_mut().enumerate() {
             let fd = dev.as_raw_fd();
             if fd < 0 {
                 warn!("Invalid fd {} for input device {}", fd, idx);
@@ -931,9 +1017,10 @@ impl<'a> Scheduler<'a> {
         // Every mouse/keyboard event triggers fanout_set_input_window() synchronously
         // BPF input window (default 2ms) provides natural priority boost coalescing
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Use 1-second timeout to check shutdown flag regularly without busy-polling.
-            // This ensures Ctrl+C is handled within 1s even on idle systems.
-            const EPOLL_TIMEOUT_MS: u16 = 1000;
+            // Use 100ms timeout to check shutdown flag regularly without busy-polling.
+            // This ensures Ctrl+C is handled within 100ms even on idle systems.
+            // Lower timeout = faster Ctrl+C response with negligible overhead.
+            const EPOLL_TIMEOUT_MS: u16 = 100;
             match self.epoll_fd.as_ref().unwrap().wait(&mut events, Some(EPOLL_TIMEOUT_MS)) {
                 Ok(_) => { /* Process events below */ },
                 Err(e) if e == nix::errno::Errno::EINTR => continue,  // Interrupted by signal
@@ -957,6 +1044,11 @@ impl<'a> Scheduler<'a> {
                     // SAFETY: Write to staging area, BPF will copy atomically via get_fg_tgid()
                     // This double-buffering prevents torn reads during hot-path classification
                     bss.detected_fg_tgid_staging = detected_tgid;
+
+                    // Populate game_threads_map for BPF thread tracking
+                    if detected_tgid > 0 {
+                        Self::register_game_threads(&self.skel, detected_tgid);
+                    }
 
                     // Update ML collector with new game
                     let game_info_for_ml = self.get_detected_game_info().map(|g| {
@@ -1035,28 +1127,14 @@ impl<'a> Scheduler<'a> {
                     }
                     if let Some(dev) = self.input_devs.get_mut(idx) {
                         if let Ok(iter) = dev.fetch_events() {
-                            // dev_type already retrieved from single HashMap lookup above
-
-                            // RAW INPUT: Process EVERY event individually for maximum precision
-                            // High-polling mice (8kHz) generate events every 125µs
-                            // We MUST process each one to maintain raw input accuracy
                             let mut event_count = 0;
                             for _event in iter {
                                 event_count += 1;
-                                // Only trigger on keyboard/mouse events, skip Other devices
                                 if !matches!(dev_type, DeviceType::Other) {
-                                    // ZERO-LATENCY: Immediate BPF trigger per event
-                                    // No batching, no debouncing, no event dropping
-                                    //
-                                    // Performance: 8kHz mouse = ~8000 syscalls/sec = ~6ms total CPU
-                                    // Latency: <1µs per event (syscall overhead)
-                                    //
-                                    // This is CRITICAL for aim precision in competitive games
                                     (self.input_trigger_fn)(&self.trig, &mut self.skel);
                                 }
                             }
-                            // Note: event_count available for debugging if needed
-                            let _ = event_count; // suppress unused warning
+                            let _ = event_count;
                         }
                     }
                 }
@@ -1262,6 +1340,18 @@ fn get_ml_data_dir() -> Result<std::path::PathBuf> {
         .join(&cpu_id))
 }
 
+fn collect_input_devices(opts: &Opts) -> Vec<String> {
+    let mut open_object = MaybeUninit::uninit();
+    let result = Scheduler::init(opts, &mut open_object).map(|sched| {
+        sched
+            .input_devs
+            .iter()
+            .filter_map(|dev| dev.name().map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+    });
+    result.unwrap_or_default()
+}
+
 fn main() -> Result<()> {
     let opts = Opts::parse();
 
@@ -1382,6 +1472,30 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
+    let input_device_names = if opts.tui.is_some() {
+        collect_input_devices(&opts)
+    } else {
+        Vec::new()
+    };
+
+    let tui_thread = if let Some(intv) = opts.tui {
+        let shutdown_copy = shutdown.clone();
+        let opts_copy = opts.clone();
+        let devices_copy = input_device_names.clone();
+        Some(std::thread::spawn(move || {
+            match tui::monitor_tui(Duration::from_secs_f64(intv), shutdown_copy, &opts_copy, devices_copy) {
+                Ok(_) => {
+                    info!("TUI exited normally");
+                }
+                Err(e) => {
+                    log::warn!("TUI monitor thread finished because of an error {}", e)
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let stats_thread = if let Some(intv) = opts.monitor.or(opts.stats) {
         let shutdown_copy = shutdown.clone();
         Some(std::thread::spawn(move || {
@@ -1417,24 +1531,29 @@ fn main() -> Result<()> {
         }
     }
 
+    // Wait for TUI thread to finish cleanup (if it was running)
+    // This ensures terminal is properly restored before we exit
+    if let Some(jh) = tui_thread {
+        info!("Waiting for TUI thread to finish cleanup...");
+        let _ = jh.join();
+        // Give terminal a moment to fully restore
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
     // Wait for stats thread to finish (with timeout)
-    // BUG FIX: Check for any stats thread (--stats OR --monitor), not just --stats
-    if opts.stats.is_some() || opts.monitor.is_some() {
-        if let Some(jh) = stats_thread {
-            info!("Waiting for stats thread to finish...");
-            // Give it 1 second to finish gracefully
-            let mut joined = false;
-            for _ in 0..10 {
-                if jh.is_finished() {
-                    let _ = jh.join();
-                    joined = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
+    if let Some(jh) = stats_thread {
+        info!("Waiting for stats thread to finish...");
+        let mut joined = false;
+        for _ in 0..10 {
+            if jh.is_finished() {
+                let _ = jh.join();
+                joined = true;
+                break;
             }
-            if !joined {
-                warn!("Stats thread didn't finish in time, detaching");
-            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !joined {
+            warn!("Stats thread didn't finish in time, detaching");
         }
     }
 

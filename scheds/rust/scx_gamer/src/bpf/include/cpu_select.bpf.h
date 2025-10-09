@@ -21,8 +21,8 @@ extern const volatile bool flat_idle_scan;
 extern const volatile bool smt_enabled;
 extern const volatile bool preferred_idle_scan;
 extern const volatile bool avoid_smt;
-extern const volatile u64 preferred_cpus[MAX_CPUS];
 extern volatile u64 interactive_sys_avg;
+extern const volatile u64 preferred_cpus[MAX_CPUS];
 
 /* External stats counters */
 extern volatile u64 nr_idle_cpu_pick;
@@ -68,27 +68,55 @@ static bool is_smt_contended(s32 cpu)
  */
 static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu)
 {
-	const struct cpumask *allowed = p->cpus_ptr;
-	u32 nr_cores = nr_cpu_ids / 2;  /* Assumes symmetric SMT */
-	s32 cpu;
+    const struct cpumask *allowed = p->cpus_ptr;
+    u32 i;
 
-	/* First try prev_cpu if it's a physical core */
-	if (prev_cpu >= 0 && (u32)prev_cpu < nr_cores &&
-	    bpf_cpumask_test_cpu(prev_cpu, allowed) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		return prev_cpu;
-	}
+    /* Try cached preferred CPU when available */
+    struct task_ctx *tctx = try_lookup_task_ctx(p);
+    if (tctx && tctx->preferred_physical_core >= 0) {
+        s32 cached = tctx->preferred_physical_core;
+        u64 now = scx_bpf_now();
+        if (cached >= 0 && (u32)cached < nr_cpu_ids &&
+            bpf_cpumask_test_cpu(cached, allowed) &&
+            scx_bpf_test_and_clear_cpu_idle(cached)) {
+            tctx->preferred_core_hits++;
+            tctx->preferred_core_last_hit = now;
+            return cached;
+        }
+        if (now - tctx->preferred_core_last_hit > PREF_CORE_MAX_AGE_NS) {
+            tctx->preferred_physical_core = -1;
+            tctx->preferred_core_hits = 0;
+            __atomic_fetch_add(&nr_gpu_pref_fallback, 1, __ATOMIC_RELAXED);
+        }
+    }
 
-	/* Scan physical cores (lower half of CPU IDs) */
-	bpf_for(cpu, 0, nr_cores) {
-		if (cpu >= MAX_CPUS)
-			break;
+    /* Fallback to preferred CPU ordering provided by userspace */
+    bpf_for(i, 0, MAX_CPUS) {
+        s32 candidate = (s32)preferred_cpus[i];
+        if (candidate < 0 || (u32)candidate >= nr_cpu_ids)
+            break;
+        if (!bpf_cpumask_test_cpu(candidate, allowed))
+            continue;
+        if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
+            if (tctx) {
+                tctx->preferred_physical_core = candidate;
+                tctx->preferred_core_hits = 1;
+                tctx->preferred_core_last_hit = scx_bpf_now();
+            }
+            return candidate;
+        }
+    }
 
-		if (bpf_cpumask_test_cpu(cpu, allowed) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			return cpu;
-		}
-	}
+    /* As a last resort, try prev_cpu to preserve locality even if sibling is busy */
+    if (prev_cpu >= 0 && prev_cpu < nr_cpu_ids && bpf_cpumask_test_cpu(prev_cpu, allowed) &&
+        scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+        if (tctx) {
+            tctx->preferred_physical_core = prev_cpu;
+            tctx->preferred_core_hits = 1;
+            tctx->preferred_core_last_hit = scx_bpf_now();
+        }
+        return prev_cpu;
+    }
 
 	return -ENOENT;
 }

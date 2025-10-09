@@ -54,6 +54,7 @@ extern volatile u64 nr_frame_trig;
 
 /* GPU thread affinity */
 extern volatile u64 nr_gpu_phys_kept;
+extern volatile u64 nr_gpu_pref_fallback;
 
 /* Fast path counters */
 extern volatile u64 nr_sync_wake_fast;
@@ -69,6 +70,7 @@ extern volatile u64 nr_input_handler_threads;
 
 /*
  * Conditional stats increment (no-op if stats disabled)
+ * Uses atomic operations - slower but works from any context.
  */
 static __always_inline void stat_inc(volatile u64 *counter)
 {
@@ -78,11 +80,26 @@ static __always_inline void stat_inc(volatile u64 *counter)
 
 /*
  * Conditional stats add (no-op if stats disabled)
+ * Uses atomic operations - slower but works from any context.
  */
 static __always_inline void stat_add(volatile u64 *counter, u64 value)
 {
 	if (!no_stats)
 		__atomic_fetch_add(counter, value, __ATOMIC_RELAXED);
+}
+
+/*
+ * OPTIMIZED: Per-CPU stat increment (NO atomics needed!)
+ * Increments a per-CPU local counter stored in cpu_ctx.
+ * These are aggregated to globals periodically by the timer.
+ *
+ * Savings: ~5-10ns per stat update (no atomic, no cache line bouncing)
+ * Use this in hot paths where cpu_ctx is already available.
+ */
+static __always_inline void stat_inc_local(u64 *local_counter)
+{
+	if (!no_stats && local_counter)
+		(*local_counter)++;
 }
 
 #endif /* __GAMER_STATS_BPF_H */

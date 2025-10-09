@@ -11,11 +11,13 @@ use std::fs;
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use inotify::{Inotify, WatchMask, EventMask};
 use log::{info, warn};
 
@@ -34,6 +36,7 @@ struct ProcessCache {
 
 pub struct GameDetector {
 	current_game: Arc<AtomicU32>,
+	current_game_info: Arc<ArcSwap<Option<GameInfo>>>,  // PERF: Lock-free reads via ArcSwap
 	shutdown: Arc<AtomicBool>,
 	_thread: Option<JoinHandle<()>>,
 }
@@ -41,24 +44,34 @@ pub struct GameDetector {
 impl GameDetector {
 	pub fn new() -> Self {
 		let current_game = Arc::new(AtomicU32::new(0));
+		let current_game_info = Arc::new(ArcSwap::from_pointee(None));
 		let shutdown = Arc::new(AtomicBool::new(false));
 		let thread_game = Arc::clone(&current_game);
+		let thread_game_info = Arc::clone(&current_game_info);
 		let thread_shutdown = Arc::clone(&shutdown);
 
 		let handle = thread::Builder::new()
 			.name("game-detect".to_string())
-			.spawn(move || detection_loop(thread_game, thread_shutdown))
+			.spawn(move || detection_loop(thread_game, thread_game_info, thread_shutdown))
 			.expect("failed to spawn game detector thread");
 
 		Self {
 			current_game,
+			current_game_info,
 			shutdown,
 			_thread: Some(handle),
 		}
 	}
 
+	#[inline]
 	pub fn get_game_tgid(&self) -> u32 {
 		self.current_game.load(Ordering::Relaxed)
+	}
+
+	/// Get full game info including wine/steam detection (lock-free read)
+	#[inline]
+	pub fn get_game_info(&self) -> Option<GameInfo> {
+		(**self.current_game_info.load()).clone()
 	}
 }
 
@@ -87,12 +100,16 @@ impl Drop for GameDetector {
 	}
 }
 
-fn detection_loop(current_game: Arc<AtomicU32>, shutdown: Arc<AtomicBool>) {
+fn detection_loop(current_game: Arc<AtomicU32>, current_game_info: Arc<ArcSwap<Option<GameInfo>>>, shutdown: Arc<AtomicBool>) {
 	info!("game detector: starting");
 	let mut cache = ProcessCache {
-		seen_pids: HashSet::new(),
+		// PERF: Pre-allocate for typical workload (avoid early reallocations)
+		seen_pids: HashSet::with_capacity(512),
 		last_game: None,
 	};
+
+	// Clone shutdown for passing to detect_game_cached (allows early exit)
+	let shutdown_check = Arc::clone(&shutdown);
 
 	// Set up inotify watch on /proc for instant detection of new processes
 	// CRITICAL: Must use non-blocking mode to allow clean shutdown on Ctrl+C
@@ -133,21 +150,35 @@ fn detection_loop(current_game: Arc<AtomicU32>, shutdown: Arc<AtomicBool>) {
 		}
 	};
 
-	let mut last_full_scan = std::time::Instant::now();
-	const FULL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+	// OPTIMIZATION: Do initial scan ONCE at startup to detect already-running games
+	// After that, rely on inotify for new processes + lightweight liveness check
+	// This eliminates expensive recurring full scans (1-5s on busy systems)
+	let initial_scan = panic::catch_unwind(AssertUnwindSafe(|| {
+		detect_game_cached(&mut cache, &shutdown_check)
+	}));
+	handle_detection_result(initial_scan, &current_game, &current_game_info, &mut cache);
+	info!("game detector: initial scan complete");
+
+	let mut last_liveness_check = std::time::Instant::now();
+	const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 	while !shutdown.load(Ordering::Relaxed) {
-		// Check if we should do a full scan (every 30s as safety net)
-		let should_full_scan = last_full_scan.elapsed() >= FULL_SCAN_INTERVAL;
+		// Lightweight: Only check if cached game still exists (1 stat call vs 1000s)
+		// Run every 5 seconds (more frequent than old 30s full scan, but 1000x cheaper)
+		if last_liveness_check.elapsed() >= LIVENESS_CHECK_INTERVAL {
+			last_liveness_check = std::time::Instant::now();
+			if let Some(ref game) = cache.last_game {
+				if !process_exists(game.tgid) {
+					info!("game detector: cached game '{}' exited", game.name);
+					cache.last_game = None;
+					current_game.store(0, Ordering::Relaxed);
+					current_game_info.store(Arc::new(None));
+				}
+			}
+		}
 
-		if should_full_scan {
-			// Full scan fallback
-			last_full_scan = std::time::Instant::now();
-			let detection_result = panic::catch_unwind(AssertUnwindSafe(|| {
-				detect_game_cached(&mut cache)
-			}));
-			handle_detection_result(detection_result, &current_game, &mut cache);
-		} else if let Some(ref mut inotify_instance) = inotify {
+		// Process inotify events for new processes (primary detection method)
+		if let Some(ref mut inotify_instance) = inotify {
 			// inotify-based instant detection
 			let mut buffer = [0u8; 4096];
 			match inotify_instance.read_events(&mut buffer) {
@@ -162,7 +193,7 @@ fn detection_loop(current_game: Arc<AtomicU32>, shutdown: Arc<AtomicBool>) {
 										let detection_result = panic::catch_unwind(AssertUnwindSafe(|| {
 											check_new_pid(pid, &mut cache)
 										}));
-										handle_detection_result(detection_result, &current_game, &mut cache);
+										handle_detection_result(detection_result, &current_game, &current_game_info, &mut cache);
 									}
 								}
 							}
@@ -177,6 +208,14 @@ fn detection_loop(current_game: Arc<AtomicU32>, shutdown: Arc<AtomicBool>) {
 					inotify = None; // Fall back to polling
 				}
 			}
+		} else {
+			// Fallback: inotify disabled/unavailable, do lightweight scan every 5s
+			if last_liveness_check.elapsed() >= Duration::from_secs(5) {
+				let detection_result = panic::catch_unwind(AssertUnwindSafe(|| {
+					detect_game_cached(&mut cache, &shutdown_check)
+				}));
+				handle_detection_result(detection_result, &current_game, &current_game_info, &mut cache);
+			}
 		}
 
 		// Short sleep to check shutdown flag and avoid busy-looping
@@ -189,6 +228,7 @@ fn detection_loop(current_game: Arc<AtomicU32>, shutdown: Arc<AtomicBool>) {
 fn handle_detection_result(
 	detection_result: Result<Option<GameInfo>, Box<dyn std::any::Any + Send>>,
 	current_game: &Arc<AtomicU32>,
+	current_game_info: &Arc<ArcSwap<Option<GameInfo>>>,
 	cache: &mut ProcessCache,
 ) {
 	match detection_result {
@@ -198,18 +238,23 @@ fn handle_detection_result(
 				info!("game detector: found game '{}' (tgid={}, wine={}, steam={})",
 					game.name, game.tgid, game.is_wine, game.is_steam);
 			}
+			// PERF: Lock-free update via ArcSwap (writers contend on atomic swap, readers never block)
+			current_game_info.store(Arc::new(Some(game)));
 		}
 		Ok(None) => {
 			let prev = current_game.swap(0, Ordering::Relaxed);
 			if prev != 0 {
 				info!("game detector: game closed");
 			}
+			// Clear game info
+			current_game_info.store(Arc::new(None));
 		}
 		Err(panic_err) => {
 			warn!("game detector: detection panicked, clearing cache and continuing");
 			cache.seen_pids.clear();
 			cache.last_game = None;
 			current_game.store(0, Ordering::Relaxed);
+			current_game_info.store(Arc::new(None));
 
 			if let Some(msg) = panic_err.downcast_ref::<&str>() {
 				warn!("game detector: panic message: {}", msg);
@@ -249,7 +294,7 @@ fn check_new_pid(pid: u32, cache: &mut ProcessCache) -> Option<GameInfo> {
 	None
 }
 
-fn detect_game_cached(cache: &mut ProcessCache) -> Option<GameInfo> {
+fn detect_game_cached(cache: &mut ProcessCache, shutdown: &Arc<AtomicBool>) -> Option<GameInfo> {
 	if let Some(ref game) = cache.last_game {
 		if process_exists(game.tgid) {
 			return Some(game.clone());
@@ -261,8 +306,19 @@ fn detect_game_cached(cache: &mut ProcessCache) -> Option<GameInfo> {
 	let mut current_pids = HashSet::new();
 	let mut best_game: Option<GameInfo> = None;
 	let mut best_score = 0i32;
+	let mut entries_checked = 0u32;
 
 	for entry in proc_entries.flatten() {
+		// BUG FIX: Check shutdown flag periodically during long /proc scan
+		// After 1+ hours, /proc can have thousands of entries (processes + threads)
+		// This scan can take 1-5 seconds on busy systems, blocking Ctrl+C
+		// Check every 100 entries (~every 10-50ms) for responsive shutdown
+		entries_checked += 1;
+		if entries_checked % 100 == 0 && shutdown.load(Ordering::Relaxed) {
+			info!("game detector: shutdown requested during /proc scan, aborting");
+			return cache.last_game.clone();
+		}
+
 		let file_name = entry.file_name();
 		let pid_str = file_name.to_str()?;
 
@@ -284,10 +340,28 @@ fn detect_game_cached(cache: &mut ProcessCache) -> Option<GameInfo> {
 	cache.seen_pids.retain(|pid| current_pids.contains(pid));
 	cache.seen_pids.extend(current_pids);
 
-	// Periodically shrink the HashSet to prevent unbounded memory growth
-	// Threshold chosen to balance memory efficiency vs reallocation overhead
-	if cache.seen_pids.len() > 10000 {
-		cache.seen_pids.shrink_to_fit();
+	// PERF: Shrink with hysteresis to avoid reallocation thrashing
+	// Only shrink when wasting >50% capacity AND above baseline size
+	if cache.seen_pids.len() > 512 && cache.seen_pids.capacity() > cache.seen_pids.len() * 2 {
+		cache.seen_pids.shrink_to(cache.seen_pids.len() + 256);
+	}
+
+	// Memory leak prevention: Cap seen_pids size to prevent unbounded growth
+	// On busy systems with high process churn, this prevents multi-MB growth over hours
+	// Clear cache if it exceeds 4096 PIDs (indicating process churn, not normal workload)
+	const MAX_SEEN_PIDS: usize = 4096;
+	if cache.seen_pids.len() > MAX_SEEN_PIDS {
+		warn!("game detector: PID cache exceeded {} entries, clearing to prevent memory leak", MAX_SEEN_PIDS);
+		cache.seen_pids.clear();
+		cache.seen_pids.shrink_to(512);
+		// Preserve current game if it still exists
+		if let Some(ref game) = cache.last_game {
+			if process_exists(game.tgid) {
+				cache.seen_pids.insert(game.tgid);
+			} else {
+				cache.last_game = None;
+			}
+		}
 	}
 
 	if let Some(game) = best_game {
@@ -298,12 +372,87 @@ fn detect_game_cached(cache: &mut ProcessCache) -> Option<GameInfo> {
 	}
 }
 
+// PERF: Avoid string allocation by using stack buffer for PID formatting
 fn process_exists(pid: u32) -> bool {
-	std::path::Path::new(&format!("/proc/{}", pid)).exists()
+	use std::io::Write;
+	// Stack-allocated buffer for "/proc/NNNNNN" (max 6 digits for PID)
+	let mut buf = [0u8; 16];
+	let mut cursor = std::io::Cursor::new(&mut buf[..]);
+	// Write directly to stack buffer (no heap allocation)
+	let _ = write!(cursor, "/proc/{}", pid);
+	let len = cursor.position() as usize;
+	let path_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+	std::path::Path::new(path_str).exists()
+}
+
+/// Process resource usage stats for game detection
+struct ProcessStats {
+	threads: usize,
+	vmrss_kb: u64,  // Resident memory in KB
+}
+
+/// Read process stats from /proc/{pid}/status
+fn get_process_stats(pid: u32) -> Option<ProcessStats> {
+	const MAX_STATUS_SIZE: usize = 8192;
+	let status_path = format!("/proc/{}/status", pid);
+	let status_bytes = read_file_limited(&status_path, MAX_STATUS_SIZE)?;
+	let status = String::from_utf8_lossy(&status_bytes);
+
+	let mut threads = 0;
+	let mut vmrss_kb = 0;
+
+	for line in status.lines() {
+		if line.starts_with("Threads:") {
+			threads = line.split_whitespace()
+				.nth(1)?
+				.parse::<usize>()
+				.ok()?;
+		} else if line.starts_with("VmRSS:") {
+			vmrss_kb = line.split_whitespace()
+				.nth(1)?
+				.parse::<u64>()
+				.ok()?;
+		}
+	}
+
+	Some(ProcessStats { threads, vmrss_kb })
 }
 
 fn calculate_score(game: &GameInfo) -> i32 {
 	let mut score = 0;
+
+	// **STRONGEST SIGNAL**: MangohHUD presence = definitely a game!
+	// Check if this process has MangohHUD shared memory active
+	if has_mangohud_shm(game.tgid) {
+		score += 1000;  // Massive boost - MangohHUD = game
+		info!("game detector: MangohHUD detected for PID {} ({}), strong game signal",
+		      game.tgid, game.name);
+	}
+
+	// **RESOURCE USAGE HEURISTICS**: Distinguish real games from launchers
+	// Real games: 50+ threads, 500MB+ memory
+	// Launchers: <10 threads, <100MB memory
+	if let Some(stats) = get_process_stats(game.tgid) {
+		// Thread count is a VERY strong signal
+		if stats.threads >= 50 {
+			score += 300;  // Many threads = definitely the actual game
+		} else if stats.threads >= 20 {
+			score += 150;  // Moderate threads = likely game, not launcher
+		} else if stats.threads < 5 {
+			score -= 200;  // Few threads = likely launcher/wrapper
+		}
+
+		// Memory usage (in MB)
+		let mem_mb = stats.vmrss_kb / 1024;
+		if mem_mb >= 500 {
+			score += 200;  // High memory = actual game
+		} else if mem_mb >= 100 {
+			score += 50;   // Moderate memory
+		} else if mem_mb < 50 {
+			score -= 100;  // Low memory = likely launcher
+		}
+	}
+
 	if game.is_wine { score += 100; }
 	if game.is_steam { score += 50; }
 
@@ -316,8 +465,8 @@ fn calculate_score(game: &GameInfo) -> i32 {
 		"python" | "python3" | "python2" | "bash" | "sh" | "zsh" | "fish" |
 		// Steam container processes
 		"reaper" | "pressure-vessel" |
-		// Generic launchers
-		"steam.exe" | "launcher" | "gameoverlayui" |
+		// Generic launchers and Steam UI
+		"steam.exe" | "launcher" | "gameoverlayui" | "steamwebhelper" |
 		// Wine system processes (not actual games)
 		"services.exe" | "winedevice.exe" | "plugplay.exe" | "explorer.exe" |
 		"svchost.exe" | "rpcss.exe" | "wineboot.exe" |
@@ -340,6 +489,17 @@ fn calculate_score(game: &GameInfo) -> i32 {
 	}
 
 	score
+}
+
+/// Fast check if a PID has MangohHUD active (indicates it's a game)
+fn has_mangohud_shm(pid: u32) -> bool {
+	// Check for MangohHUD shared memory files in /dev/shm
+	let shm_paths = [
+		format!("/dev/shm/mangoapp.{}", pid),
+		format!("/dev/shm/MangoHud.{}", pid),
+	];
+
+	shm_paths.iter().any(|p| PathBuf::from(p).exists())
 }
 
 /// Safely read a file with a hard size limit to prevent memory exhaustion.

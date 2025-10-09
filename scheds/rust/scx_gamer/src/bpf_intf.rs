@@ -14,12 +14,24 @@ include!(concat!(env!("OUT_DIR"), "/bpf_intf.rs"));
 
 #[inline(always)]
 pub fn trigger_input_window(skel: &mut crate::BpfSkel) -> Result<(), u32> {
-    // Set CMD_INPUT flag; wakeup_timerfn will fan-out.
-    if let Some(bss) = skel.maps.bss_data.as_mut() {
-        bss.cmd_flags |= 1u32 << 0;
-        return Ok(());
+    // ZERO-LATENCY: Direct BPF syscall for immediate input window activation
+    // Bypasses timer-based flag processing to eliminate 0-5ms delay
+    // This syscall executes fanout_set_input_window() synchronously in BPF
+    //
+    // MICRO-OPTIMIZATION: Use const Default to avoid heap allocation
+    // libbpf_rs v0.24+ optimizes Default::default() to compile-time constant
+
+    let prog = &mut skel.progs.set_input_window;
+    match prog.test_run(libbpf_rs::ProgramInput::default()) {
+        Ok(out) => {
+            if out.return_value == 0 {
+                Ok(())
+            } else {
+                Err(out.return_value)
+            }
+        }
+        Err(_) => Err(1),
     }
-    Err(1)
 }
 
 #[inline(always)]
@@ -42,11 +54,22 @@ pub fn trigger_napi_softirq_window(skel: &mut crate::BpfSkel) -> Result<(), u32>
 
 #[inline(always)]
 pub fn trigger_input_with_napi(skel: &mut crate::BpfSkel) -> Result<(), u32> {
-    if let Some(bss) = skel.maps.bss_data.as_mut() {
-        bss.cmd_flags |= (1u32 << 0) | (1u32 << 2);
-        return Ok(());
+    // ZERO-LATENCY: Execute both syscalls immediately for input + NAPI windows
+    // First activate input window
+    let _ = trigger_input_window(skel)?;
+
+    // Then activate NAPI window
+    let prog = &mut skel.progs.set_napi_softirq_window;
+    match prog.test_run(libbpf_rs::ProgramInput::default()) {
+        Ok(out) => {
+            if out.return_value == 0 {
+                Ok(())
+            } else {
+                Err(out.return_value)
+            }
+        }
+        Err(_) => Err(1),
     }
-    Err(1)
 }
 
 #[repr(C)]

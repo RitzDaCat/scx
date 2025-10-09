@@ -206,35 +206,28 @@ static __always_inline bool is_system_audio_name(const char *comm)
 static __always_inline bool is_game_audio_name(const char *comm)
 {
 	/* Unreal Engine audio threads */
-	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' &&
-	    comm[4] == 'o' && comm[5] == 'D' && comm[6] == 'e' && comm[7] == 'v')
-		return true;  /* AudioDeviceBuff */
-
-	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' &&
-	    comm[4] == 'o' && comm[5] == 'E' && comm[6] == 'n' && comm[7] == 'c')
-		return true;  /* AudioEncoder */
+	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o')
+		return true;  /* AudioDeviceBuff, AudioThread0, etc. */
 
 	if (comm[0] == 'F' && comm[1] == 'A' && comm[2] == 'u' && comm[3] == 'd')
 		return true;  /* FAudio_AudioCli */
 
 	/* Bink audio (common video codec in games) */
-	if (comm[0] == 'B' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'k' &&
-	    comm[4] == ' ' && comm[5] == 'S' && comm[6] == 'n' && comm[7] == 'd')
+	if (comm[0] == 'B' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'k')
 		return true;  /* Bink Snd */
 
 	/* Generic game audio threads: "audio", "sound", "snd_" */
-	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i')
+	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o')
 		return true;
 
-	if (comm[0] == 's' && comm[1] == 'o' && comm[2] == 'u' && comm[3] == 'n')
+	if (comm[0] == 's' && comm[1] == 'o' && comm[2] == 'u' && comm[3] == 'n' && comm[4] == 'd')
 		return true;
 
 	if (comm[0] == 's' && comm[1] == 'n' && comm[2] == 'd' && comm[3] == '_')
 		return true;
 
 	/* OpenAL (common game audio library) */
-	if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' &&
-	    comm[4] == 'a' && comm[5] == 'l')
+	if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 'a')
 		return true;
 
 	/* FMOD (game audio engine) */
@@ -242,7 +235,7 @@ static __always_inline bool is_game_audio_name(const char *comm)
 		return true;
 
 	/* Wwise (game audio engine) */
-	if (comm[0] == 'w' && comm[1] == 'w' && comm[2] == 'i' && comm[3] == 's')
+	if (comm[0] == 'w' && comm[1] == 'w' && comm[2] == 'i' && comm[3] == 's' && comm[4] == 'e')
 		return true;
 
 	return false;
@@ -268,10 +261,10 @@ static __always_inline bool is_input_handler_name(const char *comm)
 		return true;
 
 	/* Input/event processing threads */
-	if (comm[0] == 'i' && comm[1] == 'n' && comm[2] == 'p' && comm[3] == 'u')
+	if (comm[0] == 'i' && comm[1] == 'n' && comm[2] == 'p' && comm[3] == 'u' && comm[4] == 't')
 		return true;
 
-	if (comm[0] == 'e' && comm[1] == 'v' && comm[2] == 'e' && comm[3] == 'n')
+	if (comm[0] == 'e' && comm[1] == 'v' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 't')
 		return true;
 
 	/* GLFW input (common game library) */
@@ -283,31 +276,49 @@ static __always_inline bool is_input_handler_name(const char *comm)
 		return true;
 
 	/* Wine XInput controller handling (critical for gamepad input latency) */
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'x' && comm[6] == 'i' && comm[7] == 'n')
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' && comm[4] == '_' &&
+	    comm[5] == 'x' && comm[6] == 'i' && comm[7] == 'n')
 		return true;  /* wine_xinput_hid */
 
 	/* Wine Windows Gaming Input (WGI) worker threads - critical for Sea of Thieves input */
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'w' && comm[6] == 'g')
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' && comm[4] == '_' &&
+	    comm[5] == 'w' && comm[6] == 'g' && comm[7] == 'i')
 		return true;  /* wine_wginput_worker, wine_wginput_wo, etc. */
 
-	/* Wine DirectInput worker threads - critical for Warframe and legacy games
-	 * DirectInput is the legacy Windows input API (pre-XInput/WGI) used by:
-	 * - Older games (pre-2010): CS:GO, TF2, Portal 2, L4D2
-	 * - Games prioritizing mouse precision: Warframe, Counter-Strike series
-	 * - Games with complex input configurations: MMOs, simulators
-	 * - Games that need raw input data without XInput abstraction
-	 */
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'd' && comm[6] == 'i' && comm[7] == 'n')
-		return true;  /* wine_dinput_worker, wine_dinput_wor, etc. */
+	/* Wine Raw Input dispatcher */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' && comm[4] == '_' &&
+	    comm[5] == 'd' && comm[6] == 'i' && comm[7] == 'n')
+		return true;  /* wine_dinput_worker */
 
-	/* Wine raw input threads (Windows Raw Input API)
-	 * Used by competitive FPS games for unfiltered mouse input */
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'r' && comm[6] == 'a' && comm[7] == 'w')
-		return true;  /* wine_rawinput_*, wine_raw_*, etc. */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' && comm[4] == '_' &&
+	    comm[5] == 'r' && comm[6] == 'a' && comm[7] == 'w')
+		return true;  /* wine_rawinput_* */
+
+	return false;
+}
+
+static __always_inline bool is_background_name(const char *comm)
+{
+	/* GPU render threads often treated as background when they go idle */
+	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd' &&
+	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'T')
+		return true;
+
+	if (comm[0] == 'v' && comm[1] == 'k' && comm[2] == 'd' && comm[3] == '3')
+		return true;
+
+	if (comm[0] == '[' && comm[1] == 'v' && comm[2] == 'k')
+		return true;
+
+	if (comm[0] == 'U' && comm[1] == 'n' && comm[2] == 'i' && comm[3] == 't' &&
+	    comm[4] == 'y' && comm[5] == 'G' && comm[6] == 'f' && comm[7] == 'x')
+		return true;
+
+	if (comm[0] == 'r' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd')
+		return true;
+
+	if (comm[0] == 'g' && comm[1] == 'p' && comm[2] == 'u')
+		return true;
 
 	return false;
 }

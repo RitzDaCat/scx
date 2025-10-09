@@ -1,3 +1,4 @@
+#define PREF_CORE_MAX_AGE_NS (25ULL * NSEC_PER_MSEC) /* 25ms grace before re-evaluating */
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scx_gamer: Gaming-optimized scheduler for low-latency input and frame delivery
