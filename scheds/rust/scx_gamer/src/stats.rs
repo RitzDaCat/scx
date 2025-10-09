@@ -90,6 +90,16 @@ pub struct Metrics {
     #[stat(desc = "Continuous input mode active (1=yes, 0=no)")]
     pub continuous_input_mode: u64,
 
+    /* Fentry Hook Monitoring: Kernel-level input detection */
+    #[stat(desc = "fentry total input events seen")]
+    pub fentry_total_events: u64,
+    #[stat(desc = "fentry boost triggers activated")]
+    pub fentry_boost_triggers: u64,
+    #[stat(desc = "fentry events from gaming devices")]
+    pub fentry_gaming_events: u64,
+    #[stat(desc = "fentry events filtered (non-gaming)")]
+    pub fentry_filtered_events: u64,
+
     /* BPF Profiling: Hot-path latency measurements */
     #[stat(desc = "select_cpu avg latency (ns)")]
     pub prof_select_cpu_avg_ns: u64,
@@ -210,6 +220,12 @@ impl Metrics {
             input_handler_threads: self.input_handler_threads,  // live count, not delta
             input_trigger_rate: self.input_trigger_rate,  // live rate (EMA), not delta
             continuous_input_mode: self.continuous_input_mode,  // live flag, not delta
+
+            // Fentry stats: cumulative totals (show growth over time, not delta)
+            fentry_total_events: self.fentry_total_events,
+            fentry_boost_triggers: self.fentry_boost_triggers,
+            fentry_gaming_events: self.fentry_gaming_events,
+            fentry_filtered_events: self.fentry_filtered_events,
 
             // Profiling: calculate averages from deltas
             prof_select_cpu_avg_ns: if self.prof_select_cpu_calls > prev.prof_select_cpu_calls {

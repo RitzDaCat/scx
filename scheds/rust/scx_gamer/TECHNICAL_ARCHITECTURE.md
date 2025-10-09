@@ -78,6 +78,84 @@ scx_gamer is a hybrid kernel/userspace CPU scheduler built on Linux's sched_ext 
 
 ---
 
+### CachyOS/Arch Linux Integration
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CACHYOS SYSTEM INTEGRATION                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+User Space:
+┌─────────────────────────────────────────────────────────────────────┐
+│  CachyOS Kernel Manager (GUI)                                       │
+│  ┌──────────────────┐  ┌──────────────┐  ┌───────────────────────┐ │
+│  │  Scheduler       │  │  Profile     │  │  Custom Flags         │ │
+│  │  [scx_gamer ▼]   │  │  [Gaming ▼]  │  │  --ml-autotune        │ │
+│  └────────┬─────────┘  └──────┬───────┘  └───────────┬───────────┘ │
+│           │                    │                      │             │
+│           └────────────────────┴──────────────────────┘             │
+│                                │                                    │
+│                           [Apply Button]                            │
+└───────────────────────────────┼─────────────────────────────────────┘
+                                │
+                                ▼
+                       Writes configuration:
+                                │
+        ┌───────────────────────┴────────────────────────┐
+        │                                                 │
+        ▼                                                 ▼
+/etc/default/scx                              /etc/scx_loader.toml
+┌──────────────────────┐                      ┌─────────────────────────┐
+│ SCX_SCHEDULER=       │                      │ [scheds.scx_gamer]      │
+│   scx_gamer          │                      │ gaming_mode = [         │
+│                      │                      │   "--slice-us", "10",   │
+│ SCX_FLAGS=           │                      │   "--mm-affinity",      │
+│   --slice-us 10      │                      │   "--input-window-us",  │
+│   --mm-affinity ...  │                      │   "2000" ]              │
+└──────────┬───────────┘                      └─────────────────────────┘
+           │
+           │ systemctl restart scx.service
+           ▼
+/usr/lib/systemd/system/scx.service
+┌─────────────────────────────────────────┐
+│ [Service]                               │
+│ Type=simple                             │
+│ EnvironmentFile=/etc/default/scx        │
+│ ExecStart=/usr/bin/scx_gamer $SCX_FLAGS │
+│ Restart=on-failure                      │
+└────────────────┬────────────────────────┘
+                 │
+                 │ Spawns process:
+                 ▼
+        /usr/bin/scx_gamer (binary)
+                 │
+        ┌────────┴────────────────────────────────────────┐
+        │                                                  │
+        ▼                                                  ▼
+  Parse CLI args                                   Load BPF programs
+        │                                                  │
+        ▼                                                  ▼
+  Detect topology                                  Attach to kernel
+  (CPU, NUMA, SMT)                                sched_ext ops
+        │                                                  │
+        └──────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+                    Event loop starts
+                 (epoll, input, ringbuf)
+                           │
+                           ▼
+                 Scheduler running!
+
+Monitoring:
+┌─────────────────────────────────────────────────────────────────────┐
+│  scxstats -s scx_gamer          │  journalctl -u scx.service -f     │
+│  (JSON-RPC stats client)        │  (systemd journal logs)           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Component Breakdown
 
 ### 1. BPF Scheduler Core (main.bpf.c)
@@ -525,6 +603,981 @@ Trial timer expires (120s)
         ↓
   Generate final report
     Top 3 configs ranked by score
+```
+
+---
+
+### Detailed Input Processing Pipeline
+
+This diagram shows the complete input processing flow including device classification, continuous mode detection, and sensor stop detection:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                   PHYSICAL INPUT DEVICES                            │
+├─────────────────────────────────────────────────────────────────────┤
+│  8kHz Gaming Mouse    │  Mechanical Keyboard  │  Other Devices      │
+│  125µs event rate     │  Variable rate        │  (touchpad, etc)    │
+└────────┬──────────────┴───────────┬───────────┴─────────────────────┘
+         │                          │
+         ▼                          ▼
+   RELATIVE events            KEY events
+   (REL_X, REL_Y)            (KEY_DOWN, KEY_UP)
+   + BTN events              (A, W, S, D, ESC, ...)
+   (BTN_LEFT, RIGHT, ...)
+         │                          │
+         └──────────┬───────────────┘
+                    │
+                    ▼
+         Linux Kernel Input Subsystem
+                    │
+                    ▼
+         /dev/input/event{0-31} (evdev interface)
+                    │
+                    ▼
+┌───────────────────┴──────────────────────────────────────────────────┐
+│              USERSPACE EVENT LOOP (main.rs:929-1300)                 │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Initialization Phase (main.rs:675-691):                            │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  for /dev/input/event* {                                       │ │
+│  │    dev = evdev::Device::open(path)                             │ │
+│  │    dev_type = classify_device_type(dev)  ← OPTIMIZATION        │ │
+│  │      ├─ Check EventType::KEY + alphanumeric → Keyboard         │ │
+│  │      ├─ Check EventType::RELATIVE → Mouse                      │ │
+│  │      └─ Else → Other (ignore)                                  │ │
+│  │    Register in epoll + HashMap<fd, DeviceInfo>                 │ │
+│  │  }                                                              │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                      │
+│  Runtime Phase (main.rs:1007-1138):                                 │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │  epoll.wait(100ms)  ← Non-blocking for Ctrl+C responsiveness   │ │
+│  │      ↓                                                          │ │
+│  │  Event received on fd                                          │ │
+│  │      ↓                                                          │ │
+│  │  HashMap lookup: fd → DeviceInfo{idx, dev_type}                │ │
+│  │      ↓                                                          │ │
+│  │  if dev_type == Other: skip (touchpad, virtual device)         │ │
+│  │      ↓                                                          │ │
+│  │  dev.fetch_events() → Iterator of input_event structs          │ │
+│  │      ↓                                                          │ │
+│  │  for _event in iter {  ← ZERO-LATENCY: No batching!            │ │
+│  │      trigger_input_window(&skel)  ← Immediate BPF syscall      │ │
+│  │  }                                                              │ │
+│  │      ↓                                                          │ │
+│  │  Performance:                                                   │ │
+│  │    - Mouse movement (REL_X/REL_Y): BPF trigger per axis        │ │
+│  │    - Mouse click (BTN_LEFT): BPF trigger on press & release    │ │
+│  │    - Keyboard (KEY_W): BPF trigger on press & release          │ │
+│  │    - 8kHz mouse moving: ~8000 triggers/sec = ~6ms CPU          │ │
+│  │    - Latency per event: <1µs (syscall overhead)                │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                             │                                        │
+│                             ▼                                        │
+│                  BPF Syscall (bpf_intf.rs:16)                        │
+│                 trigger_input_window(skel)                           │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│               BPF KERNEL SPACE (main.bpf.c:943-994)                  │
+├──────────────────────────────────────────────────────────────────────┤
+│  SEC("syscall") set_input_window()  ← BPF syscall entry point       │
+│      ↓                                                               │
+│  fanout_set_input_window()                                          │
+│    input_until_global = now + input_window_ns (5ms default)         │
+│      ↓                                                               │
+│  Calculate inter-event delta (main.bpf.c:958-991):                  │
+│    delta_ns = now - last_input_trigger_ns                           │
+│      ↓                                                               │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  MOUSE STOP DETECTION (main.bpf.c:970):                      │   │
+│  │  if (delta_ns > 1ms) {  ← 8x safety for 8kHz (125µs spacing) │   │
+│  │      input_trigger_rate = 0                                   │   │
+│  │      continuous_input_mode = 0                                │   │
+│  │      // Mouse stopped! Reset rate tracking                    │   │
+│  │  }                                                             │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│      ↓                                                               │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  CONTINUOUS MODE DETECTION (main.bpf.c:973-991):             │   │
+│  │  instant_rate = 1000000000 / delta_ns  (events/sec)          │   │
+│  │  input_trigger_rate = EMA(instant_rate, 7/8 weight)          │   │
+│  │      ↓                                                         │   │
+│  │  if (input_trigger_rate > 150/sec):                           │   │
+│  │      continuous_input_mode = 1  ← AIM TRAINER MODE            │   │
+│  │  else if (input_trigger_rate < 75/sec):                       │   │
+│  │      continuous_input_mode = 0  ← DISCRETE INPUT MODE         │   │
+│  │                                                                │   │
+│  │  Hysteresis: 150/75 = 2:1 ratio prevents mode flapping        │   │
+│  │  Effect: Latency variance 123ns → 105ns during transitions    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│      ↓                                                               │
+│  last_input_trigger_ns = now  ← Update for next delta calculation   │
+│      ↓                                                               │
+│  nr_input_trig++  ← Statistics counter                              │
+│                                                                      │
+│  Result: input_until_global timestamp set (affects all CPUs)        │
+└──────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│          SCHEDULER HOT PATH (BPF enqueue - main.bpf.c:686-718)       │
+├──────────────────────────────────────────────────────────────────────┤
+│  Task wakes up (game render thread, input handler, etc.)            │
+│      ↓                                                               │
+│  Check: is_input_active()? (boost.bpf.h:48)                         │
+│    → time_before(now, input_until_global)?                          │
+│      ↓                                                               │
+│  YES - Input window active:                                         │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  if (continuous_input_mode == 0) {  ← DISCRETE MODE          │   │
+│  │      slice = slice >> 1  (10µs → 5µs)                        │   │
+│  │      // Aggressive preemption for clicks, bursts              │   │
+│  │  } else {  ← CONTINUOUS MODE (aim trainer)                    │   │
+│  │      slice = slice  (keep 10µs)                               │   │
+│  │      // Stable timing for smooth tracking                     │   │
+│  │  }                                                             │   │
+│  │                                                                │   │
+│  │  Migration limits relaxed (allow responsive CPU changes)      │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│      ↓                                                               │
+│  Task enqueued with boost parameters                                │
+│      ↓                                                               │
+│  Result: Faster preemption during input window                      │
+│          (5µs discrete, 10µs continuous)                             │
+└──────────────────────────────────────────────────────────────────────┘
+
+Event Type Detection (what we monitor):
+┌──────────────────────────────────────────────────────────────────────┐
+│  MOUSE EVENTS:                                                       │
+│  ├─ REL_X, REL_Y: Movement (X/Y axis) → Immediate trigger           │
+│  ├─ REL_WHEEL: Scroll wheel → Immediate trigger                     │
+│  ├─ BTN_LEFT: Left click press/release → Immediate trigger          │
+│  ├─ BTN_RIGHT: Right click → Immediate trigger                      │
+│  └─ BTN_MIDDLE: Middle click → Immediate trigger                    │
+│                                                                      │
+│  KEYBOARD EVENTS:                                                    │
+│  ├─ KEY_W, A, S, D: Movement keys → Immediate trigger               │
+│  ├─ KEY_SPACE: Jump → Immediate trigger                             │
+│  ├─ KEY_ESC: Menu → Immediate trigger                               │
+│  ├─ KEY_1-9: Weapon switch → Immediate trigger                      │
+│  └─ All KEY_DOWN and KEY_UP: Symmetric latency                      │
+│                                                                      │
+│  IGNORED EVENTS (no trigger):                                       │
+│  └─ EventType::SYNC, ABS (touchpad absolute positioning)            │
+└──────────────────────────────────────────────────────────────────────┘
+
+Timing Analysis (8kHz mouse moving diagonally):
+┌──────────────────────────────────────────────────────────────────────┐
+│  Time   │ Event     │ Action              │ Cumulative Latency      │
+│─────────┼───────────┼─────────────────────┼─────────────────────────│
+│  T+0µs  │ REL_X     │ Sensor reports      │ 0µs (hardware)          │
+│  T+50µs │           │ Kernel driver evdev │ +50µs (driver latency)  │
+│  T+150µs│           │ epoll wake userspace│ +100µs (scheduler)      │
+│  T+200µs│           │ fetch_events()      │ +50µs (syscall)         │
+│  T+201µs│           │ trigger_input_window│ +1µs (function call)    │
+│  T+401µs│           │ BPF window set      │ +200ns (map write)      │
+│         │           │                     │                         │
+│  T+426µs│ REL_Y     │ Sensor reports      │ (same event)            │
+│  T+476µs│           │ Kernel driver       │ +50µs                   │
+│  T+576µs│           │ epoll wake          │ +100µs                  │
+│  T+626µs│           │ fetch_events()      │ +50µs                   │
+│  T+627µs│           │ trigger_input_window│ +1µs                    │
+│  T+827µs│           │ BPF window set      │ +200ns                  │
+│         │           │                     │                         │
+│  Total per axis: ~400-800µs sensor-to-boost                         │
+│  Diagonal movement: Two triggers (X + Y) within ~400µs              │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Complete Task Lifecycle
+
+This diagram shows the full path from task wakeup to CPU execution:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                     TASK WAKEUP EVENT                                │
+│  (Game render thread wakes after vsync, input handler after event)  │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  KERNEL: wake_up_process() / try_to_wake_up()                       │
+│  Standard Linux wakeup path                                         │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  BPF: select_cpu(task, prev_cpu, wake_flags)                        │
+│  Location: main.bpf.c:1474-1650                                     │
+│  Latency: 200-800ns                                                 │
+├──────────────────────────────────────────────────────────────────────┤
+│  Decision Tree:                                                      │
+│                                                                      │
+│  1. Per-CPU kthread? (task->flags & PF_NO_SETAFFINITY)              │
+│     YES → return prev_cpu (keep kernel threads local)               │
+│      │                                                               │
+│      NO                                                              │
+│      ↓                                                               │
+│  2. Check mm_hint cache (LRU, 8192 entries):                        │
+│      key = task->mm (address space pointer)                         │
+│      if (cache hit && CPU idle && same NUMA):                       │
+│          return cached_cpu  ← 88% hit rate observed                │
+│      ↓                                                               │
+│  3. Idle CPU scan:                                                  │
+│      if (flat_idle_scan):                                           │
+│          Linear search CPUs 0-255 → first idle                      │
+│      else if (preferred_idle_scan):                                 │
+│          Search preferred_cpus[] array (high-capacity first)        │
+│          if (avoid_smt): Skip CPU if sibling busy                   │
+│      ↓                                                               │
+│  4. Wake sync optimization (producer-consumer):                     │
+│      if (wake_flags & SCX_WAKE_SYNC && waker CPU idle):            │
+│          return waker_cpu  ← Keep producer/consumer together        │
+│      ↓                                                               │
+│  5. Fallback:                                                       │
+│      return prev_cpu  ← Stay where we were                          │
+│                                                                      │
+│  Result: cpu_id (0-255)                                             │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  BPF: enqueue(task, enq_flags)                                      │
+│  Location: main.bpf.c:1652-1850                                     │
+│  Latency: 150-400ns                                                 │
+├──────────────────────────────────────────────────────────────────────┤
+│  1. Update vtime (virtual time for fairness):                       │
+│      vtime += runtime_since_last_sleep                              │
+│      vtime = min(vtime, global_vtime + slice_lag)                   │
+│      ↓                                                               │
+│  2. Check system load (cpu_util_avg from BPF sampling):             │
+│      ↓                                                               │
+│      if (cpu_util_avg < 80%):  ← LIGHT LOAD                         │
+│      ┌─────────────────────────────────────────────────────────┐   │
+│      │  LOCAL MODE (Per-CPU DSQ):                              │   │
+│      │  target_dsq = cpu_id  (0-255)                            │   │
+│      │  scx_bpf_dispatch(task, target_dsq, slice, 0)            │   │
+│      │  → Task goes to per-CPU round-robin queue                │   │
+│      │  → Preserves cache locality                              │   │
+│      └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                               │
+│      else:  ← HEAVY LOAD                                            │
+│      ┌─────────────────────────────────────────────────────────┐   │
+│      │  GLOBAL MODE (EDF):                                      │   │
+│      │  target_dsq = SHARED_DSQ (0)                             │   │
+│      │  scx_bpf_dispatch(task, SHARED_DSQ, slice, vtime)        │   │
+│      │  → Task goes to global deadline-sorted queue             │   │
+│      │  → Better load balancing under pressure                  │   │
+│      └─────────────────────────────────────────────────────────┘   │
+│      ↓                                                               │
+│  3. Input window adjustments:                                       │
+│      if (is_input_active() && is_foreground_task()):               │
+│          if (continuous_input_mode == 0):                           │
+│              slice >>= 1  (10µs → 5µs)                              │
+│          // else: keep slice stable for aim smoothness              │
+│      ↓                                                               │
+│  4. Migration limiting:                                             │
+│      Check per-task token bucket:                                   │
+│      if (migrations_in_window >= mig_max):                          │
+│          Block migration (nr_mig_blocked++)                         │
+│      ↓                                                               │
+│  5. Wake sync fast path:                                            │
+│      if (SCX_ENQ_WAKEUP && sync wakeup):                            │
+│          scx_bpf_dispatch(task, SCX_DSQ_LOCAL, ...)                 │
+│          // Direct dispatch, skip queue (nr_sync_wake_fast++)       │
+│                                                                      │
+│  Result: Task in DSQ, ready for dispatch()                          │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  BPF: dispatch(cpu, prev_task)                                      │
+│  Location: main.bpf.c:1852-1950                                     │
+│  Latency: 100-300ns                                                 │
+│  Called when: CPU becomes idle or prev_task exhausts slice          │
+├──────────────────────────────────────────────────────────────────────┤
+│  1. Try per-CPU DSQ first (locality):                               │
+│      scx_bpf_consume(cpu_dsq)                                       │
+│      if (task found):                                               │
+│          Update CPU frequency based on load                         │
+│          return  ← Task runs on CPU                                 │
+│      ↓                                                               │
+│  2. Try global SHARED_DSQ (load balancing):                         │
+│      scx_bpf_consume(SHARED_DSQ)                                    │
+│      if (task found):                                               │
+│          Update CPU frequency                                       │
+│          return  ← Task runs on CPU                                 │
+│      ↓                                                               │
+│  3. No work available:                                              │
+│      CPU goes idle                                                  │
+│                                                                      │
+│  Result: Task executes on CPU                                       │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                     TASK EXECUTION                                   │
+│  CPU runs task for slice duration (5-20µs)                          │
+│  Task performs work (render frame, process input, etc.)             │
+└──────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                        [Preemption or Sleep]
+                                 │
+                ┌────────────────┴────────────────┐
+                │                                 │
+                ▼                                 ▼
+        Slice exhausted                   Task sleeps (I/O wait)
+                │                                 │
+                └──────────────┬──────────────────┘
+                               │
+                               ▼
+                     Return to enqueue()
+                  (cycle repeats for next wake)
+```
+
+---
+
+### BPF Program Interactions
+
+This diagram shows how all BPF programs and maps interact:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    BPF PROGRAMS AND MAPS                             │
+└──────────────────────────────────────────────────────────────────────┘
+
+Main Scheduler (sched_ext ops):
+┌─────────────────────────────────────────────────────────────────────┐
+│  struct_ops/gamer_ops                                               │
+│  ├─ select_cpu() ──────┬─────────────────────────────────────────┐  │
+│  ├─ enqueue() ──────────┼──────────────┬──────────────────────────┤  │
+│  ├─ dispatch() ─────────┼──────────────┼────┬─────────────────────┤  │
+│  ├─ running() ──────────┼──────────────┼────┼──────────────────┐  │  │
+│  ├─ stopping() ─────────┼──────────────┼────┼──────────────────┤  │  │
+│  └─ quiescent() ────────┼──────────────┼────┼──────────────────┤  │  │
+└────────────────────────┼──────────────┼────┼──────────────────┼──┘  │
+                         │              │    │                  │     │
+         Reads/Writes:   │              │    │                  │     │
+                         ▼              ▼    ▼                  ▼     ▼
+┌────────────────────┬─────────────┬────────┬──────────────┬──────────┐
+│  BPF MAPS:         │             │        │              │          │
+├────────────────────┼─────────────┼────────┼──────────────┼──────────┤
+│  task_ctx_stor     │ ✓ (R/W)     │ ✓(R/W) │ ✓(R/W)       │ ✓(R/W)   │
+│  (task metadata)   │             │        │              │          │
+├────────────────────┼─────────────┼────────┼──────────────┼──────────┤
+│  cpu_ctx_stor      │ ✓ (R/W)     │ ✓(R/W) │ ✓(R/W)       │ ✓(R)     │
+│  (CPU load, vtime) │             │        │              │          │
+├────────────────────┼─────────────┼────────┼──────────────┼──────────┤
+│  mm_recent_cpu     │ ✓ (R/W)     │ ✓(R)   │              │          │
+│  (cache affinity)  │  LRU 8192   │        │              │          │
+├────────────────────┼─────────────┼────────┼──────────────┼──────────┤
+│  primary_cpumask   │ ✓ (R)       │        │              │          │
+│  (CPU priority)    │             │        │              │          │
+└────────────────────┴─────────────┴────────┴──────────────┴──────────┘
+
+Detection Hooks (run in parallel with scheduler):
+┌─────────────────────────────────────────────────────────────────────┐
+│  LSM Hook: bprm_committed_creds                                     │
+│  Trigger: Every exec() syscall                                      │
+│      ↓                                                               │
+│  Read task->comm, task->tgid                                        │
+│  Classify: is_system_binary()? → 90% filtered                      │
+│      ↓                                                               │
+│  Ring buffer push → process_events                                  │
+│      ↓                                                               │
+│  Userspace consumer: game_detect_bpf.rs                             │
+│      ↓                                                               │
+│  Update: current_game_map (TGID)                                    │
+│      ↓                                                               │
+│  Scheduler reads: detected_fg_tgid (via BSS map)                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  Tracepoint: tp_btf/sched_switch                                    │
+│  Trigger: Every context switch (~1000-10000/sec)                    │
+│      ↓                                                               │
+│  Update thread_runtime_map:                                         │
+│    - total_runtime_ns, total_sleeptime_ns                           │
+│    - wakeup_count, avg_exec_ns                                      │
+│    - wakeup_freq (EMA)                                              │
+│      ↓                                                               │
+│  Classify thread role:                                              │
+│    - GPU submit: <100µs exec, >50Hz freq                            │
+│    - Background: >5ms exec, <10Hz freq                              │
+│    - CPU-bound: >1ms exec, >50Hz freq                               │
+│      ↓                                                               │
+│  Scheduler reads: thread_runtime_map in enqueue()                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  fentry: drm_ioctl / kprobe: nvidia_ioctl                           │
+│  Trigger: GPU command submission (~60-500/sec)                      │
+│      ↓                                                               │
+│  Check ioctl cmd:                                                   │
+│    - DRM_I915_GEM_EXECBUFFER2 (Intel)                               │
+│    - DRM_AMDGPU_CS (AMD)                                            │
+│    - NVIDIA private ioctls                                          │
+│      ↓                                                               │
+│  Update gpu_threads_map:                                            │
+│    - Mark TID as GPU submit thread                                  │
+│    - Track submit frequency                                         │
+│      ↓                                                               │
+│  Scheduler reads: gpu_threads_map in select_cpu()                   │
+│  Effect: GPU threads prefer physical cores (avoid SMT)              │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  uprobe: /usr/lib/wine/.../ntdll.so:NtSetInformationThread          │
+│  Trigger: Game sets thread priority (~10-100/sec during startup)    │
+│      ↓                                                               │
+│  Read priority value from userspace:                                │
+│    bpf_probe_read_user(&priority, ...)                              │
+│      ↓                                                               │
+│  Classify:                                                          │
+│    - TIME_CRITICAL + REALTIME → Audio (99% accurate)                │
+│    - TIME_CRITICAL → Render thread                                  │
+│    - HIGHEST → Input handler                                        │
+│    - ABOVE_NORMAL → Physics                                         │
+│      ↓                                                               │
+│  Update wine_threads_map                                            │
+│      ↓                                                               │
+│  Scheduler reads: wine_threads_map in enqueue()                     │
+└─────────────────────────────────────────────────────────────────────┘
+
+Map Sharing (how userspace and BPF communicate):
+┌─────────────────────────────────────────────────────────────────────┐
+│  Userspace → BPF (configuration):                                   │
+│  ├─ rodata map (read-only from BPF, writable from userspace):       │
+│  │   - slice_ns, input_window_ns, mig_max, ...                      │
+│  │   - Hot-reload: Userspace updates, BPF reads new values          │
+│  │                                                                   │
+│  ├─ BSS map (globals, bidirectional):                               │
+│  │   - detected_fg_tgid (userspace writes, BPF reads)               │
+│  │   - cmd_flags (userspace sets, BPF clears)                       │
+│  │                                                                   │
+│  BPF → Userspace (monitoring):                                      │
+│  ├─ BSS map (statistics):                                           │
+│  │   - nr_input_trig, nr_migrations, cpu_util, ...                  │
+│  │   - Read by scx_stats every 1-5 seconds                          │
+│  │                                                                   │
+│  └─ Ring buffers (events):                                          │
+│      - process_events: Game launches/exits                          │
+│      - Polled by userspace at 100ms intervals                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Scheduler State Machine
+
+This diagram shows the local/EDF mode transitions based on system load:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│              SCHEDULER MODE STATE MACHINE                            │
+└──────────────────────────────────────────────────────────────────────┘
+
+Initial State: LOCAL_MODE (per-CPU DSQs)
+┌────────────────────────────────────┐
+│         LOCAL MODE                 │
+│  (Light Load: <80% CPU util)       │
+│                                    │
+│  Dispatch Strategy:                │
+│  └─ Per-CPU DSQs (0-255)           │
+│  └─ Round-robin within queue       │
+│  └─ Preserves cache locality       │
+│                                    │
+│  Characteristics:                  │
+│  ├─ Low migration rate             │
+│  ├─ High mm_hint hit rate (88%)    │
+│  ├─ Low dispatch latency (150ns)   │
+│  └─ May cause load imbalance       │
+└────────────┬───────────────────────┘
+             │
+             │ cpu_util_avg >= 80%
+             │ (EMA crosses threshold)
+             ▼
+┌────────────────────────────────────┐
+│         EDF MODE                   │
+│  (Heavy Load: ≥80% CPU util)       │
+│                                    │
+│  Dispatch Strategy:                │
+│  └─ SHARED_DSQ (global queue)      │
+│  └─ Deadline-sorted (vtime)        │
+│  └─ Better load balancing          │
+│                                    │
+│  Characteristics:                  │
+│  ├─ Higher migration rate          │
+│  ├─ Lower mm_hint hit rate         │
+│  ├─ Slightly higher latency (200ns)│
+│  └─ Prevents CPU starvation        │
+└────────────┬───────────────────────┘
+             │
+             │ cpu_util_avg < 75%
+             │ (Hysteresis: 5% gap)
+             ▼
+        Return to LOCAL MODE
+
+Load Measurement (in-kernel, no userspace syscalls):
+┌─────────────────────────────────────────────────────────────────────┐
+│  Wakeup Timer: Periodic sampling (500µs - 2ms depending on load)    │
+│      ↓                                                               │
+│  For each CPU:                                                       │
+│    idle_pct = (idle_time / total_time) * 100                        │
+│    util_pct = 100 - idle_pct                                        │
+│      ↓                                                               │
+│  Average across all CPUs:                                           │
+│    cpu_util = Σ(util_pct) / nr_cpus                                 │
+│      ↓                                                               │
+│  Exponential moving average (smoothing):                            │
+│    cpu_util_avg = (cpu_util_avg * 7 + cpu_util) >> 3               │
+│      ↓                                                               │
+│  Mode decision:                                                     │
+│    if (cpu_util_avg >= 80%): use SHARED_DSQ (EDF)                   │
+│    if (cpu_util_avg < 75%): use per-CPU DSQs (LOCAL)                │
+│    (Hysteresis prevents mode flapping)                              │
+└─────────────────────────────────────────────────────────────────────┘
+
+Impact on Different Workloads:
+┌─────────────────────────────────────────────────────────────────────┐
+│  Game only (20-40% CPU):                                            │
+│  └─ Stays in LOCAL mode → Maximum cache locality                    │
+│                                                                      │
+│  Game + OBS capture (60-75% CPU):                                   │
+│  └─ Stays in LOCAL mode → Cache locality preserved                  │
+│                                                                      │
+│  Game + OBS + browser (80-90% CPU):                                 │
+│  └─ Switches to EDF mode → Load balancing, prevents starvation      │
+│                                                                      │
+│  Kernel compile while gaming (95-100% CPU):                         │
+│  └─ EDF mode → Fair distribution, game maintains responsiveness     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Thread Classification Pipeline
+
+This diagram shows how multiple detection systems combine to classify threads:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│         THREAD CLASSIFICATION: MULTI-SOURCE DETECTION                │
+└──────────────────────────────────────────────────────────────────────┘
+
+Thread: TID 12345 (e.g., game render thread)
+                               │
+       ┌───────────────────────┼───────────────────────┐
+       │                       │                       │
+       ▼                       ▼                       ▼
+┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────┐
+│ GPU Detection   │  │ Wine Priority    │  │ Runtime Pattern         │
+│ (fentry/kprobe) │  │ (uprobe)         │  │ (sched_switch)          │
+└─────────────────┘  └──────────────────┘  └─────────────────────────┘
+       │                       │                       │
+       ▼                       ▼                       ▼
+  drm_ioctl()          NtSetInformationThread   Context switch tracking
+  called by TID        (priority=TIME_CRITICAL) (exec=80µs, freq=120Hz)
+       │                       │                       │
+       ▼                       ▼                       ▼
+  gpu_threads_map       wine_threads_map       thread_runtime_map
+  [12345] = {           [12345] = {            [12345] = {
+    vendor: NVIDIA,       role: RENDER,          avg_exec: 80000ns,
+    is_render: 1          priority: 15,          wakeup_freq: 120,
+  }                       is_realtime: 0         role: GPU_SUBMIT
+                        }                       }
+       │                       │                       │
+       └───────────────────────┼───────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  UNIFIED CLASSIFICATION (advanced_detect.bpf.h:update_task_ctx)     │
+├──────────────────────────────────────────────────────────────────────┤
+│  Priority (highest accuracy first):                                 │
+│  1. Wine priority map → ROLE_RENDER (99% accurate for audio)        │
+│  2. GPU threads map → GPU_SUBMIT (100% accurate, actual ioctls)     │
+│  3. Runtime patterns → Heuristic classification                     │
+│  4. Process name → Fallback (compositor, network)                   │
+│                                                                      │
+│  Result: task_ctx->detected_role = RENDER                           │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  SCHEDULER DECISIONS BASED ON ROLE                                  │
+├──────────────────────────────────────────────────────────────────────┤
+│  RENDER thread (TID 12345):                                         │
+│  ├─ select_cpu(): Prefer physical cores (avoid SMT)                 │
+│  ├─ enqueue(): Input window boost applied                           │
+│  ├─ dispatch(): Higher priority during input                        │
+│  └─ migration: Relaxed limits (allow responsive placement)          │
+│                                                                      │
+│  AUDIO thread:                                                      │
+│  ├─ select_cpu(): Prefer idle CPU (minimize preemption)             │
+│  ├─ enqueue(): Never migrate (preserve cache for audio buffers)     │
+│  └─ dispatch(): Highest priority (prevent audio glitches)           │
+│                                                                      │
+│  BACKGROUND thread (shader compilation, asset streaming):           │
+│  ├─ select_cpu(): Any available CPU (no preference)                 │
+│  ├─ enqueue(): No input boost                                       │
+│  └─ dispatch(): Lowest priority                                     │
+└──────────────────────────────────────────────────────────────────────┘
+
+Detection Accuracy Comparison:
+┌─────────────────────────────────────────────────────────────────────┐
+│  Method              │ Latency   │ Accuracy │ CPU Overhead          │
+│──────────────────────┼───────────┼──────────┼───────────────────────│
+│  GPU ioctl hooks     │ <1ms      │ 100%     │ 0 (only on 1st call)  │
+│  Wine priority       │ <1ms      │ 99%*     │ 1-2µs per change      │
+│  Runtime patterns    │ 1-5 frames│ 70-85%   │ 100-200ns per switch  │
+│  Process name        │ Instant   │ 50-60%   │ 0 (one-time)          │
+│                                                                      │
+│  * 99% for audio threads (TIME_CRITICAL+REALTIME unique signature)  │
+│    95% for render threads (TIME_CRITICAL or HIGHEST)                │
+│    80% for input threads (HIGHEST, overlaps with render)            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Input Event Detailed Flow (8kHz Mouse Movement)
+
+This diagram shows microsecond-level timing for a single mouse movement:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│        8KHZ MOUSE DIAGONAL MOVEMENT (Single Frame Analysis)         │
+│                    Time: T+0µs to T+900µs                            │
+└──────────────────────────────────────────────────────────────────────┘
+
+T+0µs: Mouse sensor detects movement (X: +5, Y: +3)
+│
+├─ Sensor digitizes movement
+│  Polling rate: 8000Hz = 125µs between reports
+│
+▼
+T+20µs: USB transaction start
+│  ├─ USB packet: HID report with X/Y delta
+│  └─ USB latency: ~20-40µs (USB 2.0 Full Speed)
+│
+▼
+T+50µs: Kernel USB/HID driver receives packet
+│
+├─ HID parser extracts X/Y deltas
+│  └─ Creates input_event structs: {type: RELATIVE, code: REL_X, value: 5}
+│                                   {type: RELATIVE, code: REL_Y, value: 3}
+▼
+T+60µs: evdev layer generates events
+│
+├─ Events written to /dev/input/event{N} ring buffer
+│  └─ epoll notification sent to waiting process
+│
+▼
+T+150µs: scx_gamer process wakes from epoll
+│
+├─ Kernel scheduler selects scx_gamer process
+│  └─ Latency: ~90µs (depends on CPU load, pinned to low-capacity core)
+│
+▼
+T+200µs: dev.fetch_events() called (main.rs:1112)
+│
+├─ Read events from kernel ring buffer
+│  └─ Returns iterator with 2 events (REL_X, REL_Y)
+│
+▼
+T+201µs: First event processed (REL_X)
+│
+├─ HashMap lookup: fd → DeviceInfo{idx=0, dev_type=Mouse}
+│  └─ Latency: ~15-30ns (FxHashMap, warm cache)
+│
+├─ Check: dev_type != Other? → Yes (Mouse)
+│
+├─ Call: trigger_input_window(&skel)  ← SYSCALL
+│  └─ Latency: ~200-400ns (BPF prog execution)
+│
+▼
+T+201.4µs: BPF set_input_window() executes
+│
+├─ fanout_set_input_window():
+│    input_until_global = now + 5000000ns (5ms)
+│
+├─ Calculate delta_ns = now - last_input_trigger_ns
+│    delta_ns = 201400 - 0 = 201400ns (201µs since last event)
+│
+├─ instant_rate = 1000000000 / 201400 ≈ 4965 events/sec
+│
+├─ Update EMA:
+│    input_trigger_rate = (0 * 7 + 4965) >> 3 ≈ 620/sec
+│
+├─ Check continuous mode:
+│    if (620 > 150): continuous_input_mode = 1  ← ENTERED CONTINUOUS
+│
+└─ last_input_trigger_ns = 201400
+│
+▼
+T+401µs: Return to userspace
+│
+│
+▼
+T+402µs: Second event processed (REL_Y)
+│
+├─ Same path as REL_X
+│
+├─ trigger_input_window(&skel)  ← SECOND SYSCALL
+│
+▼
+T+402.4µs: BPF set_input_window() executes again
+│
+├─ delta_ns = 402400 - 201400 = 201000ns (201µs)
+│
+├─ instant_rate = 1000000000 / 201000 ≈ 4975/sec
+│
+├─ EMA update:
+│    input_trigger_rate = (620 * 7 + 4975) >> 3 ≈ 1162/sec
+│
+├─ continuous_input_mode already 1 (stays in continuous mode)
+│
+└─ input_until_global extended (now + 5ms from T+402µs)
+│
+▼
+T+602µs: Return to userspace, event processing complete
+│
+└─ Total processing: 602µs for 2-axis mouse movement
+
+Next Task Wake (e.g., game render thread at T+800µs):
+│
+▼
+T+800µs: Game render thread wakes
+│
+├─ enqueue() called
+│
+├─ Check: is_input_active()?
+│    now = T+800µs
+│    input_until_global = T+402µs + 5000µs = T+5402µs
+│    time_before(800, 5402)? → YES, input window active
+│
+├─ Check: continuous_input_mode?
+│    continuous_input_mode = 1
+│
+├─ Slice decision:
+│    if (continuous_input_mode): slice = 10µs  (stable)
+│    else: slice = 5µs  (halved for discrete input)
+│
+└─ Task enqueued with 10µs slice (continuous mode)
+│
+▼
+Result: Render thread gets stable 10µs slice for smooth aim tracking
+        Input boost window remains active until T+5402µs
+
+Comparison: Without Continuous Mode
+│
+├─ Every mouse movement would halve slice: 10µs → 5µs
+│
+├─ Rapid slice changes (every 125µs for 8kHz mouse)
+│
+├─ Causes timing jitter: render thread preemption varies
+│
+└─ Effect: Aim feels "stuttery" during tracking (inconsistent frame pacing)
+```
+
+---
+
+### Thread Classification Decision Tree
+
+This diagram shows the multi-source priority for thread role classification:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│           THREAD ROLE CLASSIFICATION ALGORITHM                       │
+│              (advanced_detect.bpf.h:230-280)                         │
+└──────────────────────────────────────────────────────────────────────┘
+
+Thread wakes up (TID received in enqueue/select_cpu)
+│
+▼
+┌────────────────────────────────────────────────────────────────────┐
+│  PRIORITY 1: Wine Thread Priority (99% accuracy for audio)         │
+├────────────────────────────────────────────────────────────────────┤
+│  wine_info = bpf_map_lookup_elem(&wine_threads_map, &tid)          │
+│  if (wine_info):                                                    │
+│      ├─ wine_info->role == WINE_ROLE_AUDIO?                         │
+│      │   └─ return ROLE_AUDIO  ✓ 99% accurate                       │
+│      ├─ wine_info->role == WINE_ROLE_RENDER?                        │
+│      │   └─ return ROLE_RENDER  ✓ 95% accurate                      │
+│      └─ wine_info->role == WINE_ROLE_INPUT?                         │
+│          └─ return ROLE_INPUT  ✓ 80% accurate                       │
+│                                                                      │
+│  Detection: NtSetInformationThread(ThreadBasePriority)             │
+│  Examples:                                                          │
+│    - UE4 audio: SetThreadPriority(TIME_CRITICAL + REALTIME)        │
+│    - Unity render: SetThreadPriority(HIGHEST)                      │
+│    - Source input: SetThreadPriority(ABOVE_NORMAL)                 │
+└────────────────────────────────┬───────────────────────────────────┘
+                                 │ No Wine info found
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  PRIORITY 2: GPU ioctl Detection (100% accuracy)                   │
+├────────────────────────────────────────────────────────────────────┤
+│  gpu_info = bpf_map_lookup_elem(&gpu_threads_map, &tid)            │
+│  if (gpu_info && gpu_info->is_render_thread):                      │
+│      └─ return ROLE_GPU_SUBMIT  ✓ 100% accurate                    │
+│                                                                      │
+│  Detection: drm_ioctl() / nvidia_ioctl() calls                     │
+│  Examples:                                                          │
+│    - Vulkan: vkQueueSubmit() → ioctl(DRM_I915_GEM_EXECBUFFER2)    │
+│    - OpenGL: glFlush() → ioctl(DRM_AMDGPU_CS)                      │
+│    - D3D11/DXVK: Present() → ioctl(NVIDIA_SUBMIT)                  │
+└────────────────────────────────┬───────────────────────────────────┘
+                                 │ No GPU info found
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  PRIORITY 3: Runtime Patterns (70-85% accuracy)                    │
+├────────────────────────────────────────────────────────────────────┤
+│  runtime_info = bpf_map_lookup_elem(&thread_runtime_map, &tid)     │
+│  if (runtime_info):                                                 │
+│      ├─ avg_exec < 100µs && wakeup_freq > 50Hz?                    │
+│      │   └─ return ROLE_GPU_SUBMIT  (heuristic)                    │
+│      ├─ avg_exec > 5ms && wakeup_freq < 10Hz?                      │
+│      │   └─ return ROLE_BACKGROUND  (long CPU-bound tasks)         │
+│      └─ avg_exec > 1ms && wakeup_freq > 50Hz?                      │
+│          └─ return ROLE_CPU_BOUND  (physics, AI)                   │
+│                                                                      │
+│  Detection: sched_switch tracepoint                                │
+│  Metrics:                                                           │
+│    - total_runtime_ns / wakeup_count = avg_exec_ns                 │
+│    - wakeup_count per second = wakeup_freq                         │
+│    - Pattern matching over 8 wakeups (stable classification)       │
+└────────────────────────────────┬───────────────────────────────────┘
+                                 │ No runtime pattern match
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  PRIORITY 4: Process Name Heuristics (50-60% accuracy)             │
+├────────────────────────────────────────────────────────────────────┤
+│  Read task->comm (16-byte process name)                             │
+│  if (contains "kwin" || contains "composit"):                       │
+│      └─ return ROLE_COMPOSITOR                                     │
+│  if (contains "pipewire" || contains "pulse"):                      │
+│      └─ return ROLE_SYSTEM_AUDIO                                   │
+│  if (contains "Chrome_" || contains "firefox"):                     │
+│      └─ return ROLE_NETWORK (browser renderer)                     │
+│                                                                      │
+│  Detection: task_class.bpf.h:is_compositor_name(), etc.            │
+└────────────────────────────────┬───────────────────────────────────┘
+                                 │ No match
+                                 ▼
+                          ROLE_UNKNOWN
+                    (Use default scheduling)
+
+Example: Warframe Render Thread Classification
+┌─────────────────────────────────────────────────────────────────────┐
+│  Thread: "Warframe.x64 Render" (TID 5432)                           │
+│      ↓                                                               │
+│  1. Wine priority check:                                            │
+│      wine_threads_map[5432] = { priority: TIME_CRITICAL, ... }      │
+│      → Classified as WINE_ROLE_RENDER  ✓ (from Windows API)         │
+│      ↓                                                               │
+│  2. GPU ioctl check:                                                │
+│      gpu_threads_map[5432] = { vendor: AMD, is_render: 1 }          │
+│      → Confirms GPU_SUBMIT  ✓ (from actual DRM calls)               │
+│      ↓                                                               │
+│  3. Runtime patterns check:                                         │
+│      thread_runtime_map[5432] = { avg_exec: 85µs, freq: 144Hz }    │
+│      → Matches GPU submit pattern  ✓ (heuristic)                    │
+│      ↓                                                               │
+│  Final: ROLE_RENDER (triple-confirmed, 100% confident)              │
+│      ↓                                                               │
+│  Scheduler decisions:                                               │
+│    - select_cpu(): Prefer physical core (CPU 0, 2, 4, ... not 1,3)  │
+│    - enqueue(): Apply input window boost (slice 10µs → 5µs)         │
+│    - migration: Allow moves during input (responsive placement)     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Scheduler Dispatch Queue Organization
+
+This diagram shows how tasks are organized in DSQs and consumed by CPUs:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                  DISPATCH QUEUE ARCHITECTURE                         │
+└──────────────────────────────────────────────────────────────────────┘
+
+Light Load (<80% util) - LOCAL MODE:
+┌─────────────────────────────────────────────────────────────────────┐
+│  Per-CPU DSQs (Round-Robin)                                         │
+│                                                                      │
+│  CPU 0 DSQ:  [TaskA] → [TaskB] → [TaskC]  ← FIFO within CPU        │
+│  CPU 1 DSQ:  [TaskD] → [TaskE]                                      │
+│  CPU 2 DSQ:  [TaskF]                                                │
+│  ...                                                                 │
+│  CPU 15 DSQ: [TaskZ] → [TaskY]                                      │
+│                                                                      │
+│  Enqueue decision:                                                  │
+│    task->cpu = select_cpu(...)  ← Chosen based on cache/idle/NUMA  │
+│    scx_bpf_dispatch(task, cpu_dsq, ...)                             │
+│                                                                      │
+│  Dispatch (per CPU):                                                │
+│    CPU 0: Consume from CPU 0 DSQ only → TaskA                       │
+│    CPU 1: Consume from CPU 1 DSQ only → TaskD                       │
+│    No cross-CPU stealing (maximize cache locality)                  │
+│                                                                      │
+│  Benefits: High cache hit rate, low migration rate                  │
+│  Risks: Load imbalance if some CPUs overloaded                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+Heavy Load (≥80% util) - EDF MODE:
+┌─────────────────────────────────────────────────────────────────────┐
+│  Global SHARED_DSQ (Deadline-Sorted)                                │
+│                                                                      │
+│  SHARED_DSQ (DSQ 0):                                                │
+│    [Task1:vtime=1000] → [Task2:vtime=1050] → [Task3:vtime=1100]    │
+│           ▲                  ▲                      ▲               │
+│       Earliest           Second                  Latest             │
+│      (runs first)                                                   │
+│                                                                      │
+│  Enqueue decision:                                                  │
+│    scx_bpf_dispatch(task, SHARED_DSQ, slice, vtime)                 │
+│    → Inserted in vtime order (earliest deadline first)              │
+│                                                                      │
+│  Dispatch (any CPU):                                                │
+│    CPU 0: Consume SHARED_DSQ → Task1 (lowest vtime)                 │
+│    CPU 1: Consume SHARED_DSQ → Task2                                │
+│    CPU 2: Consume SHARED_DSQ → Task3                                │
+│    Any idle CPU can steal work from global queue                    │
+│                                                                      │
+│  Benefits: Fair load distribution, prevents CPU starvation          │
+│  Risks: More migrations, lower cache hit rate                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+Mode Transition Visualization:
+┌─────────────────────────────────────────────────────────────────────┐
+│  Time →                                                              │
+│                                                                      │
+│  CPU Utilization:                                                   │
+│  100% ┤                                     ╱╲                       │
+│   90% ┤                                   ╱    ╲                     │
+│   80% ┼━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▶━━━━━━◀━━━━━━━━━━━━━━    │
+│   70% ┤                                 ╱          ╲                 │
+│   50% ┤              ╱╲               ╱              ╲               │
+│   30% ┤            ╱    ╲          ╱                  ╲             │
+│   10% ┤     ╱╲  ╱        ╲      ╱                      ╲            │
+│    0% ┼────────────────────────────────────────────────────────────  │
+│       │                                                              │
+│  Mode:│                                                              │
+│       LOCAL  LOCAL  LOCAL   EDF    EDF    EDF   LOCAL  LOCAL        │
+│                              ↑enter      ↑exit                       │
+│                            (≥80%)      (<75%)                        │
+│                                                                      │
+│  Hysteresis prevents rapid mode switching (5% gap: 75%-80%)         │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---

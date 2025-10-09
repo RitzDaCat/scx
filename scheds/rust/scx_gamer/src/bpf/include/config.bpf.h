@@ -12,7 +12,7 @@
 /*
  * CPU Configuration
  */
-#define MAX_CPUS	1024
+#define MAX_CPUS	256
 
 /*
  * Dispatch Queue IDs
@@ -54,8 +54,9 @@
 
 /*
  * Memory Management
+ * Optimized for high refresh rate gaming (240Hz+ = 2-4ms frame budget)
  */
-#define MM_HINT_UPDATE_INTERVAL_NS	10000000ULL	/* 10ms - rate limit MM hint updates */
+#define MM_HINT_UPDATE_INTERVAL_NS	2000000ULL	/* 2ms (was 10ms) - allows ~2 updates per 240Hz frame */
 
 /*
  * Migration Control

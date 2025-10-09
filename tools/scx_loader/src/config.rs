@@ -236,18 +236,28 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
             SchedMode::Auto => vec!["-d"],
         },
         SupportedSched::Gamer => match sched_mode {
-            // Favor fast cores, immediate wakeups; avoid SMT; enable short input window
+            // Gaming: Optimized for 4K 240Hz / 1080p 480Hz gaming
+            // 10μs slices, MM affinity for cache, 100μs wakeup timer for low jitter
             SchedMode::Gaming => vec![
-                "-m", "performance", "-d", "-a", "-P", "-S",
-                "-s", "10", "-l", "20000", "--input-window-us", "2000"
+                "--slice-us", "10", "--mm-affinity", "--wakeup-timer-us", "100", "--stats", "0"
             ],
+            // LowLatency: Ultra-low latency for esports/competitive (480Hz+)
+            // 5μs slices, 50μs wakeup timer for minimal jitter
             SchedMode::LowLatency => vec![
-                "-m", "performance", "-d", "-a", "-P", "-S",
-                "-s", "10", "-l", "15000", "--input-window-us", "2500"
+                "--slice-us", "5", "--mm-affinity", "--wakeup-timer-us", "50", "--stats", "0"
             ],
-            SchedMode::PowerSave => vec!["-m", "powersave", "-d"],
-            SchedMode::Server => vec!["-a", "-s", "20000"],
-            SchedMode::Auto => vec![],
+            // PowerSave: Battery-friendly, reduced overhead
+            SchedMode::PowerSave => vec![
+                "--slice-us", "20", "--stats", "0"
+            ],
+            // Server: Balanced for background tasks
+            SchedMode::Server => vec![
+                "--slice-us", "15", "--stats", "0"
+            ],
+            // Auto: Same as Gaming (default)
+            SchedMode::Auto => vec![
+                "--slice-us", "10", "--mm-affinity", "--wakeup-timer-us", "100", "--stats", "0"
+            ],
         },
     }
 }

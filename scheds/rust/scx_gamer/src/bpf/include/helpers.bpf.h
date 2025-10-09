@@ -12,6 +12,8 @@
 #include "config.bpf.h"
 #include "types.bpf.h"
 
+/* Branch prediction hints already defined in bpf_helpers.h - no need to redefine */
+
 /* External tunables */
 extern const volatile bool numa_enabled;
 
@@ -64,36 +66,44 @@ static inline bool is_pcpu_task(const struct task_struct *p)
  *
  * This gives ~75% weight to old value, ~25% to new value,
  * providing smooth averaging without expensive FP math.
+ *
+ * OPTIMIZATION: Force inline to eliminate function call overhead (~5-10ns).
+ * Called ~200× per frame in hot paths (runnable, stopping, deadline calc).
  */
-static inline u64 calc_avg(u64 old_avg, u64 new_val)
+static __always_inline u64 calc_avg(u64 old_avg, u64 new_val)
 {
 	return ((old_avg << 1) + old_avg + new_val) >> 2;
 }
 
-static inline u32 calc_avg32(u32 old_avg, u32 new_val)
+static __always_inline u32 calc_avg32(u32 old_avg, u32 new_val)
 {
 	return ((old_avg << 1) + old_avg + new_val) >> 2;
 }
 
 /*
- * Scale value by task weight
+ * Update frequency estimation
  *
- * Used for time slice scaling: higher nice = lower weight = shorter slice.
+ * Computes event frequency (events per 100ms) from inter-event interval,
+ * then updates the exponential moving average.
+ *
+ * Returns unchanged frequency if interval is zero (prevents division by zero).
+ *
+ * OPTIMIZATION: Force inline - called in runnable() hot path.
  */
-static u64 scale_by_task_weight(const struct task_struct *p, u64 value)
+static __always_inline u64 update_freq(u64 freq, u64 interval)
 {
-	return (value * p->scx.weight) / 100;
+	u64 new_freq;
+
+	/* Guard against division by zero from same-nanosecond events or clock skew */
+	if (!interval)
+		return freq;
+
+	/* Frequency = events per 100ms */
+	new_freq = (100 * NSEC_PER_MSEC) / interval;
+	return calc_avg(freq, new_freq);
 }
 
-/*
- * Scale value inversely by task weight
- *
- * Used for deadline/vtime scaling: higher nice = lower weight = later deadline.
- */
-static u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 value)
-{
-	return (value * 100) / p->scx.weight;
-}
+/* scale_by_task_weight() and scale_by_task_weight_inverse() provided by scx/common.bpf.h */
 
 /*
  * Kick Bitmap Helpers
