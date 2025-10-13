@@ -6,6 +6,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use udev;
+
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
@@ -45,6 +47,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::path::Path;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -93,17 +96,36 @@ static CPU_INFO: Lazy<CpuInfo> = Lazy::new(|| {
 
 /// Cached device type to avoid per-event type checking
 #[derive(Debug, Clone, Copy)]
+#[repr(u32)]
 enum DeviceType {
-    Keyboard,
-    Mouse,
-    Other,
+    Keyboard = 0,
+    Mouse = 1,
+    Other = 2,
+}
+
+impl DeviceType {
+    const fn lane(self) -> InputLane {
+        match self {
+            DeviceType::Mouse => InputLane::Mouse,
+            DeviceType::Keyboard => InputLane::Keyboard,
+            DeviceType::Other => InputLane::Other,
+        }
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone)]
+pub enum InputLane {
+    Keyboard = 0,
+    Mouse = 1,
+    Other = 2,
 }
 
 /// Combined device info to avoid double HashMap lookups in hot path
 #[derive(Debug, Clone, Copy)]
 struct DeviceInfo {
     idx: usize,
-    dev_type: DeviceType,
+    lane: InputLane,
 }
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -259,6 +281,11 @@ struct Opts {
     #[clap(long)]
     tui: Option<f64>,
 
+    /// Watch input boost state (keyboard/mouse lanes) at the specified interval.
+    /// Prints ON/OFF per lane and trigger rates without launching the TUI.
+    #[clap(long)]
+    watch_input: Option<f64>,
+
     /// Enable verbose output, including libbpf details.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
@@ -331,15 +358,13 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     opts: &'a Opts,
     struct_ops: Option<libbpf_rs::Link>,
-    stats_server: StatsServer<(), Metrics>,
+    stats_server: Option<StatsServer<(), Metrics>>,
     input_devs: Vec<evdev::Device>,
-    input_fd_info: FxHashMap<i32, DeviceInfo>,  // PERF: Combined idx+type to avoid double hash lookup
-    registered_epoll_fds: FxHashSet<i32>,
     epoll_fd: Option<Epoll>,
+    input_fd_info: FxHashMap<i32, DeviceInfo>,
+    registered_epoll_fds: FxHashSet<i32>,
     trig: trigger::BpfTrigger,
-    // MICRO-OPTIMIZATION: Function pointer selected at init time to avoid runtime branch
-    // Saves 10-20ns per input event (branch misprediction cost)
-    input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel),
+    input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane),
     bpf_game_detector: Option<BpfGameDetector>,    // BPF LSM game detection (kernel-level, preferred)
     game_detector: Option<GameDetector>,           // Fallback inotify detection (if BPF unavailable)
     ml_collector: Option<MLCollector>,  // ML data collection for per-game tuning
@@ -380,30 +405,213 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Classify input device type on initialization to avoid per-event checking.
-    /// Reduces input processing latency by ~5-10µs on high-polling devices.
+    /// Smart device detection using udev properties and USB interface analysis.
+    /// Replaces hardcoded device lists with dynamic detection.
     #[inline]
-    fn classify_device_type(dev: &evdev::Device) -> DeviceType {
+    fn classify_device_type(dev: &evdev::Device, dev_path: &Path) -> DeviceType {
         let supported = dev.supported_events();
+        let has_rel = supported.contains(EventType::RELATIVE);
+        let has_key = supported.contains(EventType::KEY);
 
-        // Check for keyboard: has KEY events and common keyboard keys
-        if supported.contains(EventType::KEY) {
-            // Keyboard devices typically support alphanumeric keys
-            if let Some(keys) = dev.supported_keys() {
-                // Check for common keyboard keys (A, ESC, ENTER)
-                if keys.contains(evdev::Key::KEY_A) ||
-                   keys.contains(evdev::Key::KEY_ESC) ||
-                   keys.contains(evdev::Key::KEY_ENTER) {
-                    return DeviceType::Keyboard;
+        // Step 1: Use udev properties (most reliable)
+        if let Ok(device_type) = Self::detect_via_udev_properties(dev_path) {
+            return device_type;
+        }
+
+        // Step 2: Analyze USB interface patterns for wireless dongles
+        if let Ok(device_type) = Self::detect_via_usb_interfaces(dev_path) {
+            return device_type;
+        }
+
+        // Step 3: Fallback to event capabilities and name analysis
+        Self::detect_via_capabilities_and_name(dev, has_rel, has_key)
+    }
+
+    /// Detect device type using udev properties (most reliable method)
+    /// OPTIMIZATION: Use direct udev device lookup instead of scanning all devices
+    fn detect_via_udev_properties(dev_path: &Path) -> Result<DeviceType, std::io::Error> {
+        // OPTIMIZATION: Direct device lookup instead of scanning all devices
+        // This reduces lookup time from O(n) to O(1) for device enumeration
+        let device = udev::Device::from_syspath(dev_path)?;
+        
+        // Check explicit udev classifications first (fastest path)
+        if device.property_value("ID_INPUT_MOUSE").map(|v| v == "1").unwrap_or(false) {
+            return Ok(DeviceType::Mouse);
+        }
+        if device.property_value("ID_INPUT_KEYBOARD").map(|v| v == "1").unwrap_or(false) {
+            return Ok(DeviceType::Keyboard);
+        }
+        
+        // Check for wireless dongle patterns (medium cost)
+        if let Some(usb_interfaces) = device.property_value("ID_USB_INTERFACES") {
+            let interfaces = usb_interfaces.to_string_lossy();
+            if Self::is_wireless_dongle_pattern(&interfaces) {
+                // For wireless dongles, prefer mouse classification unless explicitly keyboard
+                if device.property_value("ID_INPUT_KEYBOARD").map(|v| v == "1").unwrap_or(false) {
+                    return Ok(DeviceType::Keyboard);
+                } else {
+                    return Ok(DeviceType::Mouse);
                 }
             }
         }
-
-        // Check for mouse: has RELATIVE events (mouse movement)
-        if supported.contains(EventType::RELATIVE) {
-            return DeviceType::Mouse;
+        
+        // Check for device grouping (highest cost - only if needed)
+        if let Some(device_group) = device.property_value("LIBINPUT_DEVICE_GROUP") {
+            // OPTIMIZATION: Only do expensive group analysis if no other classification found
+            if let Ok(group_device_type) = Self::detect_device_group_primary_type_cached(&device_group.to_string_lossy()) {
+                return Ok(group_device_type);
+            }
         }
+        
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Device not found in udev"))
+    }
 
-        DeviceType::Other
+    /// Cached version of device group detection to avoid repeated expensive scans
+    /// OPTIMIZATION: Use static cache to avoid repeated udev enumeration
+    fn detect_device_group_primary_type_cached(device_group: &str) -> Result<DeviceType, std::io::Error> {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        use once_cell::sync::Lazy;
+        
+        // Static cache for device group analysis (expensive operation)
+        static GROUP_CACHE: Lazy<Mutex<HashMap<String, DeviceType>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+        
+        // Check cache first
+        if let Ok(cache) = GROUP_CACHE.lock() {
+            if let Some(&cached_type) = cache.get(device_group) {
+                return Ok(cached_type);
+            }
+        }
+        
+        // Cache miss - perform expensive scan
+        let device_type = Self::detect_device_group_primary_type_uncached(device_group)?;
+        
+        // Cache the result
+        if let Ok(mut cache) = GROUP_CACHE.lock() {
+            cache.insert(device_group.to_string(), device_type);
+        }
+        
+        Ok(device_type)
+    }
+
+    /// Uncached device group detection (expensive operation)
+    fn detect_device_group_primary_type_uncached(device_group: &str) -> Result<DeviceType, std::io::Error> {
+        let mut enumerator = udev::Enumerator::new()?;
+        enumerator.match_subsystem("input")?;
+        
+        // Find all devices in the same group
+        let mut group_devices = Vec::new();
+        for udev_dev in enumerator.scan_devices()? {
+            if let Some(group) = udev_dev.property_value("LIBINPUT_DEVICE_GROUP") {
+                if group.to_string_lossy() == device_group {
+                    group_devices.push(udev_dev);
+                }
+            }
+        }
+        
+        // Analyze the group to determine primary device type
+        let mut mouse_count = 0;
+        let mut keyboard_count = 0;
+        let mut controller_count = 0;
+        
+        for device in &group_devices {
+            if device.property_value("ID_INPUT_MOUSE").map(|v| v == "1").unwrap_or(false) {
+                mouse_count += 1;
+            }
+            if device.property_value("ID_INPUT_KEYBOARD").map(|v| v == "1").unwrap_or(false) {
+                keyboard_count += 1;
+            }
+            if device.property_value("ID_INPUT_JOYSTICK").map(|v| v == "1").unwrap_or(false) {
+                controller_count += 1;
+            }
+        }
+        
+        // Return the most common device type in the group
+        if controller_count > mouse_count && controller_count > keyboard_count {
+            Ok(DeviceType::Other) // Controllers are classified as Other in our enum
+        } else if mouse_count >= keyboard_count {
+            Ok(DeviceType::Mouse)
+        } else {
+            Ok(DeviceType::Keyboard)
+        }
+    }
+
+    /// Detect device type by analyzing USB interface patterns
+    /// OPTIMIZATION: Use direct device lookup instead of scanning all devices
+    fn detect_via_usb_interfaces(dev_path: &Path) -> Result<DeviceType, std::io::Error> {
+        // OPTIMIZATION: Direct device lookup instead of scanning all devices
+        let device = udev::Device::from_syspath(dev_path)?;
+        
+        // Check parent USB device for dongle characteristics
+        if let Some(parent) = device.parent() {
+            if let Some(devtype) = parent.attribute_value("devtype") {
+                if devtype == "usb_device" {
+                    // Check for wireless dongle indicators
+                    if let Some(product) = parent.attribute_value("product") {
+                        let product_str = product.to_string_lossy().to_lowercase();
+                        if product_str.contains("dongle") || 
+                           product_str.contains("receiver") || 
+                           product_str.contains("adapter") {
+                            // Dongle detected - classify based on interface
+                            if let Some(usb_interfaces) = device.property_value("ID_USB_INTERFACES") {
+                                let interfaces = usb_interfaces.to_string_lossy();
+                                if interfaces.contains("030102") { // HID mouse interface
+                                    return Ok(DeviceType::Mouse);
+                                } else if interfaces.contains("030101") { // HID keyboard interface
+                                    return Ok(DeviceType::Keyboard);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "USB interface analysis failed"))
+    }
+
+    /// Detect device type using event capabilities and name analysis (fallback)
+    fn detect_via_capabilities_and_name(dev: &evdev::Device, has_rel: bool, has_key: bool) -> DeviceType {
+        let name_lc = dev.name().unwrap_or(" ").to_ascii_lowercase();
+        
+        // Name-based detection with better heuristics
+        if name_lc.contains("mouse") || name_lc.contains("trackball") || name_lc.contains("trackpad") {
+            DeviceType::Mouse
+        } else if name_lc.contains("keyboard") || name_lc.contains("keypad") {
+            DeviceType::Keyboard
+        } else if name_lc.contains("dongle") || name_lc.contains("receiver") {
+            // Wireless dongles - prefer mouse unless keyboard-specific
+            if name_lc.contains("keyboard") {
+                DeviceType::Keyboard
+            } else {
+                DeviceType::Mouse
+            }
+        } else if has_rel {
+            // Relative movement = mouse
+            DeviceType::Mouse
+        } else if has_key {
+            // Check if it's a real keyboard (has letter keys)
+            if let Some(keys) = dev.supported_keys() {
+                if keys.iter().any(|key| key.code() < 0x100) {
+                    DeviceType::Keyboard
+                } else {
+                    DeviceType::Other
+                }
+            } else {
+                DeviceType::Other
+            }
+        } else {
+            DeviceType::Other
+        }
+    }
+
+    /// Check if USB interface pattern indicates a wireless dongle
+    fn is_wireless_dongle_pattern(interfaces: &str) -> bool {
+        // Common wireless dongle interface patterns:
+        // 030102 = HID mouse interface
+        // 030101 = HID keyboard interface  
+        // 030000 = HID generic interface
+        interfaces.contains("030102") || interfaces.contains("030101") || interfaces.contains("030000")
     }
 
     /// Register all threads of the detected game in game_threads_map
@@ -579,7 +787,8 @@ impl<'a> Scheduler<'a> {
         rodata.mm_hint_enabled = !opts.disable_mm_hint;
         rodata.wakeup_timer_ns = if opts.wakeup_timer_us == 0 { 0 } else { opts.wakeup_timer_us.max(250) * 1000 };
         rodata.foreground_tgid = opts.foreground_pid;
-        rodata.no_stats = opts.stats.is_none() && opts.monitor.is_none();
+        // Enable stats collection when any consumer is active (stats, monitor, or TUI)
+        rodata.no_stats = !(opts.stats.is_some() || opts.monitor.is_some() || opts.tui.is_some());
 
         // Configure mm_last_cpu LRU size before load
         let mm_size = opts.mm_hint_size.clamp(128, 65536);
@@ -644,8 +853,8 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, gamer_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
-        // Initialize input devices for input-active window if enabled
-        let mut input_devs = Vec::new();
+        let mut input_devs: Vec<evdev::Device> = Vec::new();
+        let mut input_fd_info = FxHashMap::default();
         if opts.input_window_us > 0 {
             if let Ok(dir) = std::fs::read_dir("/dev/input") {
                 for entry in dir.flatten() {
@@ -653,7 +862,30 @@ impl<'a> Scheduler<'a> {
                     if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
                         if name.starts_with("event") {
                             if let Ok(dev) = evdev::Device::open(&path) {
-                                input_devs.push(dev);
+                                let dev_type = Self::classify_device_type(&dev, &path);
+                                if matches!(dev_type, DeviceType::Mouse | DeviceType::Keyboard) {
+                                    let fd = dev.as_raw_fd();
+                                    if fd >= 0 {
+                                        // Set O_NONBLOCK for safety
+                                        unsafe {
+                                            let flags = libc::fcntl(fd, libc::F_GETFL);
+                                            if flags >= 0 {
+                                                let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                                            }
+                                        }
+                                        let lane = dev_type.lane();
+                                        let input_id = dev.input_id();
+                                        info!("Registered {:?} device: {} (vendor={:#06x} product={:#06x} fd={} lane={:?})",
+                                              dev_type, 
+                                              dev.name().unwrap_or("unknown"),
+                                              input_id.vendor(),
+                                              input_id.product(),
+                                              fd,
+                                              lane);
+                                        input_fd_info.insert(fd, DeviceInfo { idx: input_devs.len(), lane });
+                                        input_devs.push(dev);
+                                    }
+                                }
                             }
                         }
                     }
@@ -744,10 +976,21 @@ impl<'a> Scheduler<'a> {
 
         // Select input trigger function at init time based on prefer_napi_on_input flag
         // This avoids runtime branching on every input event (saves 10-20ns per event)
-        let input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel) = if opts.prefer_napi_on_input {
-            |trig, skel| { trig.trigger_input_with_napi(skel); }
+        let input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane) = if opts.prefer_napi_on_input {
+            |trig, skel, lane| {
+                match lane {
+                    InputLane::Mouse => {
+                        let _ = trig.trigger_input_with_napi_lane(skel, lane);
+                    }
+                    _ => {
+                        let _ = trig.trigger_input_lane(skel, lane);
+                    }
+                }
+            }
         } else {
-            |trig, skel| { trig.trigger_input(skel); }
+            |trig, skel, lane| {
+                let _ = trig.trigger_input_lane(skel, lane);
+            }
         };
 
         // Initialize game detection: Try BPF LSM first (kernel-level), fallback to inotify
@@ -771,10 +1014,10 @@ impl<'a> Scheduler<'a> {
             skel,
             opts,
             struct_ops,
-            stats_server,
+            stats_server: Some(stats_server),
             input_devs,
             epoll_fd: None,
-            input_fd_info: FxHashMap::default(),
+            input_fd_info,
             registered_epoll_fds: FxHashSet::default(),
             trig: trigger::BpfTrigger::default(),
             input_trigger_fn,
@@ -912,6 +1155,9 @@ impl<'a> Scheduler<'a> {
             input_handler_threads: bss.nr_input_handler_threads,
             input_trigger_rate: bss.input_trigger_rate as u64,
             continuous_input_mode: bss.continuous_input_mode as u64,
+            continuous_input_lane_keyboard: bss.continuous_input_lane_mode[InputLane::Keyboard as usize] as u64,
+            continuous_input_lane_mouse: bss.continuous_input_lane_mode[InputLane::Mouse as usize] as u64,
+            continuous_input_lane_other: bss.continuous_input_lane_mode[InputLane::Other as usize] as u64,
 
             // Fentry hook stats (cumulative totals from kernel hooks)
             fentry_total_events: fentry_total,
@@ -944,7 +1190,11 @@ impl<'a> Scheduler<'a> {
     // Userspace CPU util sampling removed; BPF updates cpu_util and cpu_util_avg.
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let (stats_response_tx, stats_request_rx) = self.stats_server.channels();
+        let (stats_response_tx, stats_request_rx) = self
+            .stats_server
+            .as_ref()
+            .expect("stats server not initialized")
+            .channels();
 
         // Pin the event loop thread: user-specified or auto-select housekeeping CPU.
         let target_cpu = self.opts.event_loop_cpu.or_else(Self::auto_event_loop_cpu);
@@ -964,17 +1214,13 @@ impl<'a> Scheduler<'a> {
         // Create epoll and event/timer fds
         let epfd = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).map_err(|e| anyhow::anyhow!(e))?;
 
-        // Register input devices on epoll and cache device types
+        // Register input devices on epoll; device types already cached during init
         for (idx, dev) in self.input_devs.iter_mut().enumerate() {
             let fd = dev.as_raw_fd();
             if fd < 0 {
                 warn!("Invalid fd {} for input device {}", fd, idx);
                 continue;
             }
-
-            // PERF: Cache both idx and device type together to avoid double hash lookup in hot path
-            let dev_type = Self::classify_device_type(dev);
-            self.input_fd_info.insert(fd, DeviceInfo { idx, dev_type });
 
             // SAFETY: Creating a BorrowedFd from raw fd for epoll registration.
             // - Device owns the fd and remains alive for the entire scheduler lifetime
@@ -983,7 +1229,8 @@ impl<'a> Scheduler<'a> {
             // - BorrowedFd lifetime is scoped to this epoll_add call only (not stored)
             // - Device won't be dropped until Drop impl (cleanup at line 1160+)
             let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-            epfd.add(bfd, EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, fd as u64)).map_err(|e| anyhow::anyhow!(e))?;
+            // Use level-triggered EPOLLIN to allow fair scheduling between input and stats servicing
+            epfd.add(bfd, EpollEvent::new(EpollFlags::EPOLLIN, fd as u64)).map_err(|e| anyhow::anyhow!(e))?;
             self.registered_epoll_fds.insert(fd);
         }
 
@@ -1017,10 +1264,34 @@ impl<'a> Scheduler<'a> {
         // Every mouse/keyboard event triggers fanout_set_input_window() synchronously
         // BPF input window (default 2ms) provides natural priority boost coalescing
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Use 100ms timeout to check shutdown flag regularly without busy-polling.
-            // This ensures Ctrl+C is handled within 100ms even on idle systems.
-            // Lower timeout = faster Ctrl+C response with negligible overhead.
-            const EPOLL_TIMEOUT_MS: u16 = 100;
+            // Early: service pending stats requests to avoid starvation during heavy input
+            while stats_request_rx.try_recv().is_ok() {
+                let metrics = self.get_metrics();
+
+                let game_info = self.get_detected_game_info()
+                    .map(|g| ml_collect::GameInfo { tgid: g.tgid, name: g.name, is_wine: g.is_wine, is_steam: g.is_steam })
+                    .unwrap_or_else(|| ml_collect::GameInfo { tgid: 0, name: "system".to_string(), is_wine: false, is_steam: false });
+
+                if let Some(ref mut autotuner) = self.ml_autotuner {
+                    let sample = ml_collect::PerformanceSample {
+                        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                        config: opts_to_ml_config(self.opts),
+                        metrics: ml_collect::MLCollector::convert_metrics_static(&metrics),
+                        game: game_info,
+                    };
+                    autotuner.record_sample(sample);
+                }
+
+                if let Some(ref mut ml) = self.ml_collector {
+                    if let Err(e) = ml.record_sample(&metrics) {
+                        warn!("ML: Failed to record sample: {}", e);
+                    }
+                }
+
+                stats_response_tx.send(metrics)?;
+            }
+            // Use 50ms timeout to ensure timely stats and shutdown responsiveness even when idle
+            const EPOLL_TIMEOUT_MS: u16 = 50;
             match self.epoll_fd.as_ref().unwrap().wait(&mut events, Some(EPOLL_TIMEOUT_MS)) {
                 Ok(_) => { /* Process events below */ },
                 Err(e) if e == nix::errno::Errno::EINTR => continue,  // Interrupted by signal
@@ -1118,7 +1389,7 @@ impl<'a> Scheduler<'a> {
                 }
 
                 // PERF: Single HashMap lookup gets both idx and dev_type (saves ~15-30ns per event)
-                if let Some(&DeviceInfo { idx, dev_type }) = self.input_fd_info.get(&fd) {
+                if let Some(&DeviceInfo { idx, lane }) = self.input_fd_info.get(&fd) {
                     // Validate idx is within bounds before access (handles vector reallocation)
                     if idx >= self.input_devs.len() {
                         // Stale index, clean it up
@@ -1128,13 +1399,35 @@ impl<'a> Scheduler<'a> {
                     if let Some(dev) = self.input_devs.get_mut(idx) {
                         if let Ok(iter) = dev.fetch_events() {
                             let mut event_count = 0;
-                            for _event in iter {
+                            const MAX_EVENTS_PER_FD: usize = 512;
+                            for event in iter {
                                 event_count += 1;
-                                if !matches!(dev_type, DeviceType::Other) {
-                                    (self.input_trigger_fn)(&self.trig, &mut self.skel);
+                                if event_count > MAX_EVENTS_PER_FD { break; }
+                                
+                                // Only trigger on actual input activity, not SYN or zero-delta events
+                                if !matches!(lane, InputLane::Other) {
+                                    match event.event_type() {
+                                        evdev::EventType::KEY => {
+                                            // Treat press, release, and repeats as activity to sustain boost
+                                            (self.input_trigger_fn)(&self.trig, &mut self.skel, lane);
+                                        }
+                                        evdev::EventType::RELATIVE => {
+                                            // Only trigger on actual mouse movement (non-zero delta)
+                                            // Filters out sensor noise and polling events
+                                            if event.value() != 0 {
+                                                (self.input_trigger_fn)(&self.trig, &mut self.skel, lane);
+                                            }
+                                        }
+                                        evdev::EventType::ABSOLUTE => {
+                                            // Trigger on analog input (touchpads, etc.)
+                                            (self.input_trigger_fn)(&self.trig, &mut self.skel, lane);
+                                        }
+                                        _ => {} // Skip SYN and other non-input events
+                                    }
                                 }
+                                // Note: avoid servicing stats here to prevent borrow conflicts with dev iterator
                             }
-                            let _ = event_count;
+                            // No per-event debug logs in release to avoid overhead under verbose logging
                         }
                     }
                 }
@@ -1283,7 +1576,26 @@ impl<'a> Scheduler<'a> {
         }
 
         info!("Scheduler main loop exited, cleaning up...");
-        let _ = self.struct_ops.take();
+        if let Some(link) = self.struct_ops.take() {
+            drop(link);
+        }
+        // Best-effort cleanup of epoll registrations
+        // Only delete FDs that are still registered (not disconnected)
+        if let Some(ref ep) = self.epoll_fd {
+            for &fd in &self.registered_epoll_fds {
+                // SAFETY: Creating BorrowedFd for cleanup during Drop.
+                // - FDs in registered_epoll_fds were validated >= 0 during registration (line 820)
+                // - FDs removed from this set when device disconnects (line 934), preventing double-delete
+                // - This prevents operating on potentially recycled FDs (TOCTOU protection)
+                // - Cleanup path only, errors are ignored (best-effort)
+                // - BorrowedFd lifetime scoped to this delete call
+                let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+                let _ = ep.delete(bfd);
+            }
+        }
+        self.registered_epoll_fds.clear();
+        self.input_fd_info.clear();
+        self.input_devs.clear();
         uei_report!(&self.skel, uei)
     }
 }
@@ -1446,7 +1758,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let loglevel = if opts.verbose { simplelog::LevelFilter::Debug } else { simplelog::LevelFilter::Info };
+    let loglevel = if opts.verbose {
+        simplelog::LevelFilter::Debug
+    } else {
+        simplelog::LevelFilter::Warn
+    };
 
     let mut lcfg = simplelog::ConfigBuilder::new();
     lcfg.set_time_offset_to_local()
@@ -1472,18 +1788,18 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    let input_device_names = if opts.tui.is_some() {
-        collect_input_devices(&opts)
-    } else {
-        Vec::new()
-    };
+    let input_device_names = opts.tui
+        .map(|_| collect_input_devices(&opts))
+        .unwrap_or_else(Vec::new);
 
     let tui_thread = if let Some(intv) = opts.tui {
         let shutdown_copy = shutdown.clone();
         let opts_copy = opts.clone();
         let devices_copy = input_device_names.clone();
         Some(std::thread::spawn(move || {
-            match tui::monitor_tui(Duration::from_secs_f64(intv), shutdown_copy, &opts_copy, devices_copy) {
+            let tui_interval = Duration::from_secs_f64(intv);
+            let result = tui::monitor_tui(tui_interval, shutdown_copy, &opts_copy, devices_copy);
+            match result {
                 Ok(_) => {
                     info!("TUI exited normally");
                 }
@@ -1499,15 +1815,24 @@ fn main() -> Result<()> {
     let stats_thread = if let Some(intv) = opts.monitor.or(opts.stats) {
         let shutdown_copy = shutdown.clone();
         Some(std::thread::spawn(move || {
-            match stats::monitor(Duration::from_secs_f64(intv), shutdown_copy) {
+            let stats_interval = Duration::from_secs_f64(intv);
+            match stats::monitor(stats_interval, shutdown_copy) {
                 Ok(_) => {}
                 Err(e) => {
-                    log::warn!(
-                        "stats monitor thread finished because of an error {}",
-                        e
-                    )
+                    log::warn!("stats monitor thread finished because of an error {}", e)
                 }
             }
+        }))
+    } else {
+        None
+    };
+
+    // Input watch mode: spawn watcher alongside scheduler so stats server is available
+    let watch_thread = if let Some(intv) = opts.watch_input {
+        let shutdown_copy = shutdown.clone();
+        Some(std::thread::spawn(move || {
+            let stats_interval = Duration::from_secs_f64(intv);
+            let _ = stats::monitor_watch_input(stats_interval, shutdown_copy);
         }))
     } else {
         None
@@ -1555,6 +1880,11 @@ fn main() -> Result<()> {
         if !joined {
             warn!("Stats thread didn't finish in time, detaching");
         }
+    }
+
+    if let Some(jh) = watch_thread {
+        info!("Waiting for watch thread to finish...");
+        let _ = jh.join();
     }
 
     Ok(())

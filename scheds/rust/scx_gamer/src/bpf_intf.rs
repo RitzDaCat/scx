@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 include!(concat!(env!("OUT_DIR"), "/bpf_intf.rs"));
+use crate::InputLane;
 
 #[inline(always)]
 pub fn trigger_input_window(skel: &mut crate::BpfSkel) -> Result<(), u32> {
@@ -70,6 +71,46 @@ pub fn trigger_input_with_napi(skel: &mut crate::BpfSkel) -> Result<(), u32> {
         }
         Err(_) => Err(1),
     }
+}
+
+#[inline(always)]
+pub fn trigger_input_lane(skel: &mut crate::BpfSkel, lane: InputLane) -> Result<(), u32> {
+    let prog = &mut skel.progs.set_input_lane;
+    let raw: u32 = lane as u32;
+    let mut bytes = raw.to_ne_bytes();
+    let prog_input = libbpf_rs::ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(bytes.as_mut_ptr(), bytes.len())
+        }),
+        ..Default::default()
+    };
+    match prog.test_run(prog_input) {
+        Ok(out) => {
+            if out.return_value == 0 {
+                Ok(())
+            } else {
+                Err(out.return_value)
+            }
+        }
+        Err(_) => Err(1),
+    }
+}
+
+#[inline(always)]
+pub fn trigger_input_with_napi_lane(skel: &mut crate::BpfSkel, lane: InputLane) -> Result<(), u32> {
+    trigger_input_lane(skel, lane)?;
+    if matches!(lane, InputLane::Mouse) {
+        let prog = &mut skel.progs.set_napi_softirq_window;
+        match prog.test_run(libbpf_rs::ProgramInput::default()) {
+            Ok(out) => {
+                if out.return_value != 0 {
+                    return Err(out.return_value);
+                }
+            }
+            Err(_) => return Err(1),
+        }
+    }
+    Ok(())
 }
 
 #[repr(C)]

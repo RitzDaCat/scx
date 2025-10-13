@@ -5,10 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BIN_PATH="${REPO_ROOT}/target/release/scx_gamer"
 
-SCX_EXTRA_ARGS=()
-
 build_scx() {
-    echo "[scx_gamer] Building release binary (cargo build -p scx_gamer --release)..."
+    echo
+    echo "[scx_gamer] Building release binary..."
     cargo -C "${REPO_ROOT}" build -p scx_gamer --release
 }
 
@@ -18,82 +17,274 @@ ensure_binary() {
     fi
 }
 
-read_extra_args() {
-    SCX_EXTRA_ARGS=()
+prompt_extra_flags() {
+    EXTRA_FLAGS=()
     local line
-    read -rp "Additional scx_gamer args (optional): " line
+    read -rp "Additional flags (optional): " line
     if [[ -n "${line}" ]]; then
-        # shellcheck disable=SC2206
-        SCX_EXTRA_ARGS=(${line})
+        read -ra EXTRA_FLAGS <<<"${line}"
     fi
 }
 
-run_silent() {
+launch_scx() {
     ensure_binary
+    local mode_desc="$1"
+    shift
+
+    local -a env_vars=()
+    local -a base_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --env)
+                env_vars+=("$2")
+                shift 2
+                ;;
+            --arg)
+                base_args+=("$2")
+                shift 2
+                ;;
+            *)
+                echo "Internal error: unknown launch_scx flag '$1'" >&2
+                return 1
+                ;;
+        esac
+    done
+
     echo
-    echo "=== Running scx_gamer (silent baseline) ==="
-    echo "Press Ctrl+C to stop the scheduler and return to this menu."
-    read_extra_args
-    sudo "${BIN_PATH}" "${SCX_EXTRA_ARGS[@]}"
+    echo "=== Launching scx_gamer (${mode_desc}) ==="
+    echo "Press Ctrl+C to stop and return to the menu."
+    prompt_extra_flags
+
+    if (( ${#env_vars[@]} > 0 )); then
+        sudo env "${env_vars[@]}" "${BIN_PATH}" "${base_args[@]}" "${EXTRA_FLAGS[@]}"
+    else
+        sudo "${BIN_PATH}" "${base_args[@]}" "${EXTRA_FLAGS[@]}"
+    fi
+}
+
+run_standard() {
+    while true; do
+        cat <<'PROFILE'
+
+Standard Profiles:
+  1) Baseline      - Minimal changes (no additional flags)
+  2) Casual        - Balanced responsiveness + locality
+  3) Esports       - Maximum responsiveness, aggressive tuning
+  4) NAPI Prefer   - Test prefer-napi-on-input bias
+  q) Back
+PROFILE
+        read -rp "Select profile: " profile_choice
+        case "${profile_choice}" in
+            1)
+                launch_scx "Standard - Baseline" \
+                    --env "RUST_LOG=warn"
+                return
+                ;;
+            2)
+                launch_scx "Standard - Casual" \
+                    --env "RUST_LOG=warn" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--mm-affinity" \
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--wakeup-timer-us" \
+                    --arg "400"
+                return
+                ;;
+            3)
+                launch_scx "Standard - Esports" \
+                    --env "RUST_LOG=warn" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--disable-smt" \
+                    --arg "--avoid-smt" \
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--input-window-us" \
+                    --arg "8000" \
+                    --arg "--wakeup-timer-us" \
+                    --arg "250" \
+                    --arg "--mig-max" \
+                    --arg "2"
+                return
+                ;;
+            4)
+                launch_scx "Standard - NAPI Prefer" \
+                    --env "RUST_LOG=warn" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--stats" \
+                    --arg "1.0"
+                return
+                ;;
+            q|Q|0)
+                return
+                ;;
+            *)
+                echo "Invalid profile: ${profile_choice}"
+                ;;
+        esac
+    done
 }
 
 run_verbose() {
-    ensure_binary
-    echo
-    echo "=== Running scx_gamer with verbose logging ==="
-    echo "Press Ctrl+C to stop the scheduler and return to this menu."
-    read_extra_args
-    sudo env RUST_LOG=info "${BIN_PATH}" --verbose "${SCX_EXTRA_ARGS[@]}"
+    launch_scx "Verbose" \
+        --env "RUST_LOG=info" \
+        --arg "--stats" \
+        --arg "1.0"
 }
 
 run_tui() {
     ensure_binary
     echo
-    local interval
-    read -rp "TUI update interval in seconds [1.0]: " interval
-    interval="${interval:-1.0}"
-    echo "=== Running scx_gamer TUI (interval ${interval}s) ==="
-    echo "Press Ctrl+C to exit the TUI and return to this menu."
-    read_extra_args
-    sudo "${BIN_PATH}" --tui "${interval}" "${SCX_EXTRA_ARGS[@]}"
+    local interval="0.1"
+    while true; do
+        cat <<'TUI_PROFILE'
+
+TUI Profiles:
+  1) Baseline      - Launch TUI with default scheduler settings
+  2) Casual        - TUI + preferred idle scan, mm affinity
+  3) Esports       - TUI + aggressive competitive tuning
+  4) NAPI Prefer   - TUI + prefer-napi-on-input testing
+  q) Back
+TUI_PROFILE
+        read -rp "Select TUI profile: " profile_choice
+        case "${profile_choice}" in
+            1)
+                launch_scx "TUI - Baseline" \
+                    --env "RUST_LOG=info" \
+                    --arg "--tui" \
+                    --arg "${interval}"
+                return
+                ;;
+            2)
+                launch_scx "TUI - Casual" \
+                    --env "RUST_LOG=info" \
+                    --arg "--tui" \
+                    --arg "${interval}" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--mm-affinity"
+                return
+                ;;
+            3)
+                launch_scx "TUI - Esports" \
+                    --env "RUST_LOG=info" \
+                    --arg "--tui" \
+                    --arg "${interval}" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--disable-smt" \
+                    --arg "--avoid-smt" \
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--input-window-us" \
+                    --arg "8000" \
+                    --arg "--wakeup-timer-us" \
+                    --arg "250" \
+                    --arg "--mig-max" \
+                    --arg "2"
+                return
+                ;;
+            4)
+                launch_scx "TUI - NAPI Prefer" \
+                    --env "RUST_LOG=info" \
+                    --arg "--tui" \
+                    --arg "${interval}" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--prefer-napi-on-input"
+                return
+                ;;
+            q|Q|0)
+                return
+                ;;
+            *)
+                echo "Invalid profile: ${profile_choice}"
+                ;;
+        esac
+    done
 }
 
-run_diagnostics() {
+run_ml_collect() {
+    launch_scx "ML Collect" \
+        --env "RUST_LOG=info" \
+        --arg "--ml-collect" \
+        --arg "--ml-sample-interval" \
+        --arg "5.0" \
+        --arg "--stats" \
+        --arg "2.0"
+}
+
+run_ml_profiles() {
+    launch_scx "ML Profiles" \
+        --env "RUST_LOG=info" \
+        --arg "--ml-profiles"
+}
+
+run_ml_full() {
+    launch_scx "ML Full" \
+        --env "RUST_LOG=info" \
+        --arg "--ml-collect" \
+        --arg "--ml-profiles" \
+        --arg "--ml-autotune" \
+        --arg "--ml-bayesian" \
+        --arg "--stats" \
+        --arg "2.0" \
+        --arg "--verbose"
+}
+
+run_debug() {
+    launch_scx "Debug" \
+        --env "RUST_LOG=debug" \
+        --env "LIBBPF_LOG=debug" \
+        --env "SCX_BPF_LOG=trace" \
+        --arg "--stats" \
+        --arg "1.0" \
+        --arg "--verbose"
+}
+
+run_custom() {
     ensure_binary
     echo
-    echo "=== Running scx_gamer diagnostics (libbpf + debug logging) ==="
-    echo "Press Ctrl+C to stop the scheduler and return to this menu."
-    read_extra_args
-    sudo env RUST_LOG=debug LIBBPF_LOG=debug "${BIN_PATH}" --verbose --stats 1 "${SCX_EXTRA_ARGS[@]}"
+    local line
+    read -rp "Enter custom scx_gamer flags: " line
+    if [[ -z "${line}" ]]; then
+        echo "No flags provided."
+        return
+    fi
+    read -ra CUSTOM_ARGS <<<"${line}"
+    echo "=== Launching scx_gamer (custom flags) ==="
+    sudo "${BIN_PATH}" "${CUSTOM_ARGS[@]}"
 }
 
 show_menu() {
     cat <<'MENU'
+Select launch mode:
 
-scx_gamer launcher
-===================
-1) Run scheduler (silent)
-2) Run scheduler (verbose logging)
-3) Run TUI dashboard
-4) Diagnostics (verbose + libbpf debug)
-5) Build only (cargo build -p scx_gamer --release)
-0) Exit
+  1) Standard        - Silent operation (no output)
+  2) Verbose         - Show stats every 1s (clean output)
+  3) TUI Dashboard   - Interactive terminal UI (recommended)
+  4) ML Collect      - Collect training data (saves to ml_data/)
+  5) ML Profiles     - Auto-load per-game configs
+  6) ML Full         - Collect + Profiles + Verbose stats
+  7) Debug           - Maximum logging (for troubleshooting)
+  8) Custom          - Enter your own flags
+
+  q) Quit
 MENU
 }
 
 while true; do
     show_menu
-    read -rp "Select an option: " choice
+    echo
+    read -rp "Choice: " choice
     case "${choice}" in
-        1) run_silent ;;
+        1) run_standard ;;
         2) run_verbose ;;
         3) run_tui ;;
-        4) run_diagnostics ;;
-        5) build_scx ;;
-        0|q|Q) echo "Exiting."; exit 0 ;;
+        4) run_ml_collect ;;
+        5) run_ml_profiles ;;
+        6) run_ml_full ;;
+        7) run_debug ;;
+        8) run_custom ;;
+        q|Q|0) echo "Exiting."; exit 0 ;;
         *) echo "Invalid choice: ${choice}" ;;
     esac
-
     echo
     read -rp "Press Enter to return to the menu..." _
     echo
