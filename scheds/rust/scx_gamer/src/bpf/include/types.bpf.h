@@ -33,10 +33,17 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_gpu_submit:1;		/* Checked SECOND in select_cpu (line 1414) */
 	u8 is_compositor:1;		/* Window manager/compositor */
 	u8 is_network:1;		/* Network/netcode thread */
+	u8 is_gaming_network:1;		/* Gaming-specific network thread */
 	u8 is_system_audio:1;		/* System audio (PipeWire/ALSA) */
 	u8 is_usb_audio:1;		/* USB audio interface (GoXLR, Focusrite) */
 	u8 is_game_audio:1;		/* Game audio thread */
 	u8 is_nvme_io:1;		/* NVMe I/O thread (asset loading) */
+	u8 is_nvme_hot_path:1;		/* NVMe hot path (sequential streaming) */
+	u8 is_gaming_peripheral:1;	/* Gaming peripheral driver thread */
+	u8 is_gaming_traffic:1;		/* Gaming traffic pattern (high freq, small packets) */
+	u8 is_audio_pipeline:1;		/* Audio pipeline processing thread */
+	u8 is_storage_hot_path:1;	/* Storage hot path (I/O intensive operations) */
+	u8 is_ethernet_nic_interrupt:1;	/* Ethernet NIC interrupt thread */
 	u8 is_background:1;		/* Background/batch work */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
