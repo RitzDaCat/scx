@@ -66,7 +66,7 @@ static bool is_smt_contended(s32 cpu)
  *
  * Returns: CPU ID >= 0 on success, -ENOENT if none found
  */
-static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu)
+static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu, u64 now)
 {
     const struct cpumask *allowed = p->cpus_ptr;
     u32 i;
@@ -75,7 +75,6 @@ static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu)
     struct task_ctx *tctx = try_lookup_task_ctx(p);
     if (tctx && tctx->preferred_physical_core >= 0) {
         s32 cached = tctx->preferred_physical_core;
-        u64 now = scx_bpf_now();
         if (cached >= 0 && (u32)cached < nr_cpu_ids &&
             bpf_cpumask_test_cpu(cached, allowed) &&
             scx_bpf_test_and_clear_cpu_idle(cached)) {
@@ -101,7 +100,7 @@ static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu)
             if (tctx) {
                 tctx->preferred_physical_core = candidate;
                 tctx->preferred_core_hits = 1;
-                tctx->preferred_core_last_hit = scx_bpf_now();
+                tctx->preferred_core_last_hit = now;
             }
             return candidate;
         }
@@ -113,7 +112,7 @@ static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu)
         if (tctx) {
             tctx->preferred_physical_core = prev_cpu;
             tctx->preferred_core_hits = 1;
-            tctx->preferred_core_last_hit = scx_bpf_now();
+            tctx->preferred_core_last_hit = now;
         }
         return prev_cpu;
     }
@@ -137,7 +136,7 @@ static s32 pick_idle_physical_core(const struct task_struct *p, s32 prev_cpu)
  * Returns: CPU ID >= 0, or -EBUSY if no idle CPU found
  */
 static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu,
-			 u64 wake_flags, bool from_enqueue)
+                         u64 wake_flags, bool from_enqueue, u64 now)
 {
 	const struct cpumask *primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
 	struct task_ctx *tctx;
@@ -179,7 +178,7 @@ static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu,
 	 * Solution: Explicitly scan physical cores first, accepting busy siblings.
 	 */
 	if (is_critical_gpu && smt_enabled) {
-		cpu = pick_idle_physical_core(p, prev_cpu);
+        cpu = pick_idle_physical_core(p, prev_cpu, now);
 		if (cpu >= 0) {
 			stat_inc(&nr_idle_cpu_pick);
 			stat_inc(&nr_gpu_phys_kept);

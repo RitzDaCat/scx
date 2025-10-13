@@ -16,7 +16,11 @@
 extern const volatile bool primary_all;
 extern const volatile u64 input_window_ns;
 extern volatile u64 input_until_global;
+extern volatile u64 input_lane_until[INPUT_LANE_MAX];
+extern volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
+extern volatile u64 last_input_trigger_ns;
 extern volatile u64 napi_until_global;
+extern volatile u64 napi_last_softirq_ns[MAX_CPUS];
 extern private(GAMER) struct bpf_cpumask __kptr *primary_cpumask;
 
 /* External stats */
@@ -30,7 +34,7 @@ extern volatile u64 nr_frame_trig;
  * During input window, foreground tasks get shorter slices
  * and higher priority for responsive gameplay.
  */
-static __always_inline bool is_input_active_cpu(s32 cpu)
+static __always_inline bool is_input_active_cpu_now(s32 cpu, u64 now)
 {
 	const struct cpumask *primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
 
@@ -39,15 +43,69 @@ static __always_inline bool is_input_active_cpu(s32 cpu)
 		return false;
 
 	/* Check if we're within the input window */
-	return time_before(scx_bpf_now(), input_until_global);
+    return time_before(now, input_until_global);
 }
 
 /*
  * Check if current CPU is in active input window
  */
-static __always_inline bool is_input_active(void)
+static __always_inline bool is_input_active_cpu(s32 cpu)
 {
-	return is_input_active_cpu(bpf_get_smp_processor_id());
+    return is_input_active_cpu_now(cpu, scx_bpf_now());
+}
+
+static __always_inline bool is_input_active_now(u64 now)
+{
+    return time_before(now, input_until_global);
+}
+
+static __always_inline bool is_input_lane_active(u8 lane, u64 now)
+{
+	if (lane >= INPUT_LANE_MAX)
+		return time_before(now, input_until_global);
+	return time_before(now, input_lane_until[lane]);
+}
+
+static __always_inline void fanout_set_input_lane(u8 lane, u64 now)
+{
+    if (lane >= INPUT_LANE_MAX)
+        lane = INPUT_LANE_OTHER;
+
+    /* Simple model: Each input event extends boost window by fixed duration.
+     * No rate calculation, no EMA - just "input active for next X ms".
+     * 
+     * Per-lane boost durations:
+     * - Mouse: 8ms (covers 1000-8000Hz polling + small movement bursts)
+     * - Keyboard: 1000ms (casual-friendly - covers ability chains and menu navigation)
+     * - Controller: 500ms (console-style games with analog input)
+     * - Other: NO BOOST (non-gaming devices don't need scheduler priority)
+     */
+    u64 boost_duration_ns;
+    
+    if (lane == INPUT_LANE_MOUSE) {
+        boost_duration_ns = 8000000ULL;  /* 8ms - covers high-rate mouse polling */
+    } else if (lane == INPUT_LANE_KEYBOARD) {
+        boost_duration_ns = 1000000000ULL; /* 1000ms - casual gaming window */
+    } else if (lane == INPUT_LANE_CONTROLLER) {
+        boost_duration_ns = 500000000ULL; /* 500ms - console-style games */
+    } else {
+        /* Other devices: no boost. Track event but don't prioritize.
+         * This prevents touchpads, system devices, etc. from affecting game performance. */
+        input_lane_last_trigger_ns[lane] = now;
+        return;  /* Early return - no boost window extension */
+    }
+
+    /* Extend boost window: each input pushes expiry forward */
+    u64 lane_expiry = now + boost_duration_ns;
+    input_lane_until[lane] = lane_expiry;
+    continuous_input_lane_mode[lane] = 1;  /* Mark lane as boosted */
+
+    /* Update global input window if this lane extends it */
+    if (time_before(input_until_global, lane_expiry))
+        input_until_global = lane_expiry;
+    
+    /* Track last trigger time for statistics/debugging */
+    input_lane_last_trigger_ns[lane] = now;
 }
 
 /*
@@ -56,9 +114,9 @@ static __always_inline bool is_input_active(void)
  * Called when input events (keyboard/mouse) are detected.
  * Sets global timestamp for input window expiration.
  */
-static __always_inline void fanout_set_input_window(void)
+static __always_inline void fanout_set_input_window(u64 now)
 {
-	input_until_global = scx_bpf_now() + input_window_ns;
+    input_until_global = now + input_window_ns;
 }
 
 /*
@@ -78,11 +136,16 @@ static __always_inline void fanout_set_napi_window(void)
  * Returns true if this CPU should be preferred for network-related
  * task placement during input windows.
  */
-static __always_inline bool is_napi_softirq_preferred_cpu(s32 cpu)
+static __always_inline bool is_napi_softirq_preferred_cpu(s32 cpu, u64 now)
 {
-	/* NAPI preference tracking would go here */
-	/* For now, just check if we're in the NAPI window */
-	return time_before(scx_bpf_now(), napi_until_global);
+	if (!time_before(now, napi_until_global))
+		return false;
+
+	if (cpu < 0 || (u32)cpu >= MAX_CPUS)
+		return false;
+
+	/* Favor CPUs that handled net softirq within the timeout window */
+	return time_before(now, napi_last_softirq_ns[cpu] + NAPI_PREFER_TIMEOUT_NS);
 }
 
 /*

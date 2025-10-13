@@ -1,10 +1,3 @@
-#define PREF_CORE_MAX_AGE_NS (25ULL * NSEC_PER_MSEC) /* 25ms grace before re-evaluating */
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * scx_gamer: Gaming-optimized scheduler for low-latency input and frame delivery
- * Copyright (c) 2025 RitzDaCat
- */
-
 #ifndef __INTF_H
 #define __INTF_H
 
@@ -21,6 +14,13 @@ enum consts {
     NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
     NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
 };
+
+#define PREF_CORE_MAX_AGE_NS (25ULL * NSEC_PER_MSEC) /* 25ms grace before re-evaluating */
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * scx_gamer: Gaming-optimized scheduler for low-latency input and frame delivery
+ * Copyright (c) 2025 RitzDaCat
+ */
 
 #ifndef __VMLINUX_H__
 typedef unsigned char u8;
@@ -43,6 +43,14 @@ struct mig_limiter_cfg {
 
 struct cpu_arg {
 	s32 cpu_id;
+};
+
+enum input_lane {
+	INPUT_LANE_KEYBOARD = 0,
+	INPUT_LANE_MOUSE = 1,
+	INPUT_LANE_CONTROLLER = 2,
+	INPUT_LANE_OTHER = 3,
+	INPUT_LANE_MAX,
 };
 
 #endif /* __INTF_H */

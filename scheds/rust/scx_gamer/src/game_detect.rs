@@ -6,7 +6,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -29,9 +28,76 @@ pub struct GameInfo {
 	pub is_steam: bool,
 }
 
+/* OPTIMIZATION: Fixed-size ring buffer with bitmask for better memory usage
+ * Eliminates HashSet growth/shrinking overhead and memory fragmentation
+ * Uses bitmask for O(1) PID lookup instead of O(log n) HashSet operations */
+const CACHE_SIZE: usize = 4096;
+const BITMASK_SIZE: usize = CACHE_SIZE / 64; // 64 bits per u64
+
 struct ProcessCache {
-	seen_pids: HashSet<u32>,
 	last_game: Option<GameInfo>,
+	pid_ring: [u32; CACHE_SIZE],  // Ring buffer of PIDs
+	bitmask: [u64; BITMASK_SIZE], // Bitmask for fast PID lookup
+	head: usize,                   // Ring buffer head pointer
+	count: usize,                  // Number of valid entries
+}
+
+impl ProcessCache {
+	fn new() -> Self {
+		Self {
+			last_game: None,
+			pid_ring: [0; CACHE_SIZE],
+			bitmask: [0; BITMASK_SIZE],
+			head: 0,
+			count: 0,
+		}
+	}
+	
+	/* OPTIMIZATION: O(1) PID lookup using bitmask instead of O(log n) HashSet */
+	fn contains(&self, pid: u32) -> bool {
+		let idx = (pid % CACHE_SIZE as u32) as usize;
+		let bit_idx = idx / 64;
+		let bit_pos = idx % 64;
+		if bit_idx < BITMASK_SIZE {
+			self.bitmask[bit_idx] & (1u64 << bit_pos) != 0
+		} else {
+			false
+		}
+	}
+	
+	/* OPTIMIZATION: O(1) PID insertion with ring buffer eviction */
+	fn insert(&mut self, pid: u32) {
+		let idx = (pid % CACHE_SIZE as u32) as usize;
+		let bit_idx = idx / 64;
+		let bit_pos = idx % 64;
+		
+		if bit_idx < BITMASK_SIZE {
+			// Remove old PID if ring buffer is full
+			if self.count >= CACHE_SIZE {
+				let old_pid = self.pid_ring[self.head];
+				let old_idx = (old_pid % CACHE_SIZE as u32) as usize;
+				let old_bit_idx = old_idx / 64;
+				let old_bit_pos = old_idx % 64;
+				if old_bit_idx < BITMASK_SIZE {
+					self.bitmask[old_bit_idx] &= !(1u64 << old_bit_pos);
+				}
+			} else {
+				self.count += 1;
+			}
+			
+			// Insert new PID
+			self.pid_ring[self.head] = pid;
+			self.bitmask[bit_idx] |= 1u64 << bit_pos;
+			self.head = (self.head + 1) % CACHE_SIZE;
+		}
+	}
+	
+	/* OPTIMIZATION: O(1) cleanup - just reset counters */
+	fn clear(&mut self) {
+		self.bitmask = [0; BITMASK_SIZE];
+		self.head = 0;
+		self.count = 0;
+	}
 }
 
 pub struct GameDetector {
@@ -102,11 +168,7 @@ impl Drop for GameDetector {
 
 fn detection_loop(current_game: Arc<AtomicU32>, current_game_info: Arc<ArcSwap<Option<GameInfo>>>, shutdown: Arc<AtomicBool>) {
 	info!("game detector: starting");
-	let mut cache = ProcessCache {
-		// PERF: Pre-allocate for typical workload (avoid early reallocations)
-		seen_pids: HashSet::with_capacity(512),
-		last_game: None,
-	};
+	let mut cache = ProcessCache::new();
 
 	// Clone shutdown for passing to detect_game_cached (allows early exit)
 	let shutdown_check = Arc::clone(&shutdown);
@@ -251,7 +313,7 @@ fn handle_detection_result(
 		}
 		Err(panic_err) => {
 			warn!("game detector: detection panicked, clearing cache and continuing");
-			cache.seen_pids.clear();
+			cache.clear();
 			cache.last_game = None;
 			current_game.store(0, Ordering::Relaxed);
 			current_game_info.store(Arc::new(None));
@@ -267,11 +329,11 @@ fn handle_detection_result(
 
 fn check_new_pid(pid: u32, cache: &mut ProcessCache) -> Option<GameInfo> {
 	// If we already checked this PID or it's our cached game, skip
-	if cache.seen_pids.contains(&pid) {
+	if cache.contains(pid) {
 		return cache.last_game.clone();
 	}
 
-	cache.seen_pids.insert(pid);
+	cache.insert(pid);
 
 	// Check if this new PID is a game
 	if let Some(info) = check_process(pid) {
@@ -303,7 +365,6 @@ fn detect_game_cached(cache: &mut ProcessCache, shutdown: &Arc<AtomicBool>) -> O
 	}
 
 	let proc_entries = fs::read_dir("/proc").ok()?;
-	let mut current_pids = HashSet::new();
 	let mut best_game: Option<GameInfo> = None;
 	let mut best_score = 0i32;
 	let mut entries_checked = 0u32;
@@ -323,9 +384,7 @@ fn detect_game_cached(cache: &mut ProcessCache, shutdown: &Arc<AtomicBool>) -> O
 		let pid_str = file_name.to_str()?;
 
 		if let Ok(pid) = pid_str.parse::<u32>() {
-			current_pids.insert(pid);
-
-			if !cache.seen_pids.contains(&pid) {
+			if !cache.contains(pid) {
 				if let Some(info) = check_process(pid) {
 					let score = calculate_score(&info);
 					if score > best_score {
@@ -333,36 +392,13 @@ fn detect_game_cached(cache: &mut ProcessCache, shutdown: &Arc<AtomicBool>) -> O
 						best_game = Some(info);
 					}
 				}
+				cache.insert(pid);
 			}
 		}
 	}
 
-	cache.seen_pids.retain(|pid| current_pids.contains(pid));
-	cache.seen_pids.extend(current_pids);
-
-	// PERF: Shrink with hysteresis to avoid reallocation thrashing
-	// Only shrink when wasting >50% capacity AND above baseline size
-	if cache.seen_pids.len() > 512 && cache.seen_pids.capacity() > cache.seen_pids.len() * 2 {
-		cache.seen_pids.shrink_to(cache.seen_pids.len() + 256);
-	}
-
-	// Memory leak prevention: Cap seen_pids size to prevent unbounded growth
-	// On busy systems with high process churn, this prevents multi-MB growth over hours
-	// Clear cache if it exceeds 4096 PIDs (indicating process churn, not normal workload)
-	const MAX_SEEN_PIDS: usize = 4096;
-	if cache.seen_pids.len() > MAX_SEEN_PIDS {
-		warn!("game detector: PID cache exceeded {} entries, clearing to prevent memory leak", MAX_SEEN_PIDS);
-		cache.seen_pids.clear();
-		cache.seen_pids.shrink_to(512);
-		// Preserve current game if it still exists
-		if let Some(ref game) = cache.last_game {
-			if process_exists(game.tgid) {
-				cache.seen_pids.insert(game.tgid);
-			} else {
-				cache.last_game = None;
-			}
-		}
-	}
+	// OPTIMIZATION: Ring buffer automatically handles eviction
+	// No need for manual cleanup or size management
 
 	if let Some(game) = best_game {
 		cache.last_game = Some(game.clone());

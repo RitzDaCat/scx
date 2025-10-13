@@ -89,6 +89,12 @@ pub struct Metrics {
     pub input_trigger_rate: u64,
     #[stat(desc = "Continuous input mode active (1=yes, 0=no)")]
     pub continuous_input_mode: u64,
+    #[stat(desc = "Keyboard lane boost active (1=yes, 0=no)")]
+    pub continuous_input_lane_keyboard: u64,
+    #[stat(desc = "Mouse lane continuous input flag")]
+    pub continuous_input_lane_mouse: u64,
+    #[stat(desc = "Other lane continuous input flag")]
+    pub continuous_input_lane_other: u64,
 
     /* Fentry Hook Monitoring: Kernel-level input detection */
     #[stat(desc = "fentry total input events seen")]
@@ -188,7 +194,8 @@ impl Metrics {
 
     fn delta(&self, prev: &Self) -> Self {
         Self {
-            cpu_util: self.cpu_util.saturating_sub(prev.cpu_util),
+            // cpu_util is a live EMA (0..1024), not a counter; keep as-is
+            cpu_util: self.cpu_util,
             rr_enq: self.rr_enq.saturating_sub(prev.rr_enq),
             edf_enq: self.edf_enq.saturating_sub(prev.edf_enq),
             direct: self.direct.saturating_sub(prev.direct),
@@ -220,6 +227,9 @@ impl Metrics {
             input_handler_threads: self.input_handler_threads,  // live count, not delta
             input_trigger_rate: self.input_trigger_rate,  // live rate (EMA), not delta
             continuous_input_mode: self.continuous_input_mode,  // live flag, not delta
+            continuous_input_lane_keyboard: self.continuous_input_lane_keyboard,
+            continuous_input_lane_mouse: self.continuous_input_lane_mouse,
+            continuous_input_lane_other: self.continuous_input_lane_other,
 
             // Fentry stats: cumulative totals (show growth over time, not delta)
             fentry_total_events: self.fentry_total_events,
@@ -327,7 +337,38 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
                 println!();
             }
 
-            metrics.format(&mut std::io::stdout())
+            let mut stdout = std::io::stdout();
+            metrics.format(&mut stdout)
+        },
+    )
+}
+
+pub fn monitor_watch_input(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    // Reflect scheduler state: show boost (input window) based on per-interval window time
+    // and show current lane flags from kernel metrics directly.
+    scx_utils::monitor_stats::<Metrics>(
+        &[],
+        intv,
+        || shutdown.load(Ordering::Relaxed),
+        |m| {
+            // m.win_input_ns and m.timer_elapsed_ns are deltas for this interval
+            let boost_on = m.win_input_ns > 0;
+            let boost_pct = if m.timer_elapsed_ns > 0 {
+                (m.win_input_ns as f64 * 100.0) / (m.timer_elapsed_ns as f64)
+            } else { 0.0 };
+
+            let kbd_lane = if m.continuous_input_lane_keyboard != 0 { "ON" } else { "off" };
+            let mouse_lane = if m.continuous_input_lane_mouse != 0 { "ON" } else { "off" };
+            let other_lane = if m.continuous_input_lane_other != 0 { "ON" } else { "off" };
+            let cont = if m.continuous_input_mode != 0 { "CONT" } else { "edge" };
+
+            println!(
+                "[{}] BOOST:{} ({:>3.0}%)  KBD:{}  MOUSE:{}  OTHER:{}  mode:{}  trig_rate:{}/s",
+                chrono::Local::now().format("%H:%M:%S"),
+                if boost_on { "ON" } else { "off" }, boost_pct,
+                kbd_lane, mouse_lane, other_lane, cont, m.input_trigger_rate
+            );
+            Ok(())
         },
     )
 }

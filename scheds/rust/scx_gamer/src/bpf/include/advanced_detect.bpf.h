@@ -23,14 +23,239 @@
  * 4. Fallback to existing task_ctx flags and heuristics
  */
 
+/*
+ * Unified Thread Classification Result
+ * Combines all detection methods with confidence scoring
+ */
+struct unified_thread_classification {
+	u8 primary_role;      /* Highest confidence role */
+	u8 secondary_role;    /* Second-best role */
+	u8 confidence;        /* 0-100 confidence score */
+	u8 detection_method;  /* Which method detected this role */
+	u32 last_update;     /* Timestamp of last classification */
+};
+
+/* Detection method identifiers */
+#define DETECT_WINE     1
+#define DETECT_GPU      2
+#define DETECT_RUNTIME  3
+#define DETECT_HEURISTIC 4
+
+enum detected_role_type {
+	DETECTED_ROLE_NONE = 0,
+	DETECTED_ROLE_INPUT,
+	DETECTED_ROLE_GPU,
+	DETECTED_ROLE_GAME_AUDIO,
+	DETECTED_ROLE_NETWORK,
+	DETECTED_ROLE_COMPOSITOR,
+	DETECTED_ROLE_BACKGROUND,
+};
+
+static __always_inline bool has_conflicting_roles(
+	const struct task_ctx *tctx,
+	enum detected_role_type keep)
+{
+	if (keep != DETECTED_ROLE_INPUT && tctx->is_input_handler)
+		return true;
+	if (keep != DETECTED_ROLE_GPU && tctx->is_gpu_submit)
+		return true;
+	if (keep != DETECTED_ROLE_GAME_AUDIO && tctx->is_game_audio)
+		return true;
+	if (keep != DETECTED_ROLE_NETWORK && tctx->is_network)
+		return true;
+	if (keep != DETECTED_ROLE_COMPOSITOR && tctx->is_compositor)
+		return true;
+	if (keep != DETECTED_ROLE_BACKGROUND && tctx->is_background)
+		return true;
+
+	return false;
+}
+
+static __always_inline void clear_task_role_flags(struct task_ctx *tctx)
+{
+	tctx->is_input_handler = 0;
+	tctx->is_gpu_submit = 0;
+	tctx->is_compositor = 0;
+	tctx->is_network = 0;
+	tctx->is_game_audio = 0;
+	tctx->is_background = 0;
+}
+
+static __always_inline bool set_task_role(
+	struct task_ctx *tctx,
+	enum detected_role_type role,
+	u8 boost)
+{
+	bool changed = false;
+
+	if (has_conflicting_roles(tctx, role)) {
+		clear_task_role_flags(tctx);
+		changed = true;
+	}
+
+	switch (role) {
+	case DETECTED_ROLE_INPUT:
+		if (!tctx->is_input_handler) {
+			tctx->is_input_handler = 1;
+			changed = true;
+		}
+		break;
+	case DETECTED_ROLE_GPU:
+		if (!tctx->is_gpu_submit) {
+			tctx->is_gpu_submit = 1;
+			changed = true;
+		}
+		break;
+	case DETECTED_ROLE_GAME_AUDIO:
+		if (!tctx->is_game_audio) {
+			tctx->is_game_audio = 1;
+			changed = true;
+		}
+		break;
+	case DETECTED_ROLE_NETWORK:
+		if (!tctx->is_network) {
+			tctx->is_network = 1;
+			changed = true;
+		}
+		break;
+	case DETECTED_ROLE_COMPOSITOR:
+		if (!tctx->is_compositor) {
+			tctx->is_compositor = 1;
+			changed = true;
+		}
+		break;
+	case DETECTED_ROLE_BACKGROUND:
+		if (!tctx->is_background) {
+			tctx->is_background = 1;
+			changed = true;
+		}
+		break;
+	case DETECTED_ROLE_NONE:
+	default:
+		break;
+	}
+
+	if (tctx->boost_shift != boost) {
+		tctx->boost_shift = boost;
+		changed = true;
+	}
+
+	return changed;
+}
+
 /**
- * update_task_ctx_from_detection - Enhance task_ctx with BPF-detected roles
+ * classify_thread_unified - Single-pass thread classification with confidence scoring
+ * @tid: Thread ID
+ * @classification: Output classification result
+ *
+ * Combines all detection methods into a single unified classification.
+ * This reduces overhead and improves accuracy by considering all available signals.
+ *
+ * Returns: true if classification was successful, false otherwise
+ */
+static __always_inline bool classify_thread_unified(
+	u32 tid,
+	struct unified_thread_classification *classification)
+{
+	u8 wine_role = get_wine_thread_role(tid);
+	u8 gpu_role = is_gpu_submit_thread(tid) ? ROLE_RENDER : ROLE_UNKNOWN;
+	u8 runtime_role = get_thread_role(tid);
+	u64 now = bpf_ktime_get_ns();
+	
+	/* Initialize classification */
+	classification->primary_role = DETECTED_ROLE_NONE;
+	classification->secondary_role = DETECTED_ROLE_NONE;
+	classification->confidence = 0;
+	classification->detection_method = DETECT_HEURISTIC;
+	classification->last_update = now;
+	
+	/* PRIORITY 1: Wine thread priority hints
+	 * Highest confidence - explicit signals from game engine */
+	if (wine_role != WINE_ROLE_UNKNOWN) {
+		switch (wine_role) {
+		case WINE_ROLE_RENDER:
+			classification->primary_role = DETECTED_ROLE_GPU;
+			classification->confidence = 95;
+			classification->detection_method = DETECT_WINE;
+			break;
+		case WINE_ROLE_AUDIO:
+			classification->primary_role = DETECTED_ROLE_GAME_AUDIO;
+			classification->confidence = 95;
+			classification->detection_method = DETECT_WINE;
+			break;
+		case WINE_ROLE_INPUT:
+			classification->primary_role = DETECTED_ROLE_INPUT;
+			classification->confidence = 95;
+			classification->detection_method = DETECT_WINE;
+			break;
+		case WINE_ROLE_BACKGROUND:
+			classification->primary_role = DETECTED_ROLE_BACKGROUND;
+			classification->confidence = 90;
+			classification->detection_method = DETECT_WINE;
+			break;
+		}
+		return true;
+	}
+	
+	/* PRIORITY 2: GPU ioctl detection
+	 * 100% accurate for identifying GPU submit threads */
+	if (gpu_role != ROLE_UNKNOWN) {
+		classification->primary_role = DETECTED_ROLE_GPU;
+		classification->confidence = 100;
+		classification->detection_method = DETECT_GPU;
+		return true;
+	}
+	
+	/* PRIORITY 3: Thread runtime pattern detection
+	 * High accuracy after sufficient samples (100+ wakeups) */
+	if (runtime_role != ROLE_UNKNOWN) {
+		u8 runtime_confidence = thread_is_role(tid, runtime_role, 75) ? 75 : 50;
+		
+		switch (runtime_role) {
+		case ROLE_RENDER:
+			classification->primary_role = DETECTED_ROLE_GPU;
+			classification->confidence = runtime_confidence;
+			classification->detection_method = DETECT_RUNTIME;
+			break;
+		case ROLE_INPUT:
+			classification->primary_role = DETECTED_ROLE_INPUT;
+			classification->confidence = runtime_confidence;
+			classification->detection_method = DETECT_RUNTIME;
+			break;
+		case ROLE_AUDIO:
+			classification->primary_role = DETECTED_ROLE_GAME_AUDIO;
+			classification->confidence = runtime_confidence;
+			classification->detection_method = DETECT_RUNTIME;
+			break;
+		case ROLE_NETWORK:
+			classification->primary_role = DETECTED_ROLE_NETWORK;
+			classification->confidence = runtime_confidence;
+			classification->detection_method = DETECT_RUNTIME;
+			break;
+		case ROLE_COMPOSITOR:
+			classification->primary_role = DETECTED_ROLE_COMPOSITOR;
+			classification->confidence = runtime_confidence;
+			classification->detection_method = DETECT_RUNTIME;
+			break;
+		case ROLE_BACKGROUND:
+			classification->primary_role = DETECTED_ROLE_BACKGROUND;
+			classification->confidence = runtime_confidence;
+			classification->detection_method = DETECT_RUNTIME;
+			break;
+		}
+		return true;
+	}
+	
+	return false;  /* No classification available */
+}
+
+/**
+ * update_task_ctx_from_detection - Enhance task_ctx with unified classification
  * @tctx: Task context to update
  * @p: Task struct
  *
- * Called periodically to sync BPF detection results into task_ctx.
- * This allows existing scheduler code to benefit from new detection
- * without major refactoring.
+ * Uses the unified classification system to update task_ctx.
+ * This reduces overhead and improves accuracy.
  *
  * Returns: true if role was updated, false otherwise
  */
@@ -39,132 +264,41 @@ static __always_inline bool update_task_ctx_from_detection(
 	const struct task_struct *p)
 {
 	u32 tid = BPF_CORE_READ(p, pid);
+	struct unified_thread_classification classification;
 	bool updated = false;
 
 	if (!tctx)
 		return false;
 
-	/*
-	 * PRIORITY 1: Wine thread priority hints
-	 * Highest confidence - explicit signals from game engine
-	 */
-	u8 wine_role = get_wine_thread_role(tid);
-	if (wine_role != WINE_ROLE_UNKNOWN) {
-		switch (wine_role) {
-		case WINE_ROLE_RENDER:
-			if (!tctx->is_gpu_submit) {
-				tctx->is_gpu_submit = 1;
-				tctx->boost_shift = 5;  /* High boost for render */
-				updated = true;
-			}
-			break;
+	/* Use unified classification */
+	if (!classify_thread_unified(tid, &classification))
+		return false;
 
-		case WINE_ROLE_AUDIO:
-			if (!tctx->is_game_audio) {
-				tctx->is_game_audio = 1;
-				tctx->boost_shift = 6;  /* Higher boost for audio */
-				updated = true;
-			}
+	/* Apply classification to task_ctx based on confidence */
+	if (classification.confidence >= 75) {
+		u8 boost = 0;
+		
+		switch (classification.primary_role) {
+		case DETECTED_ROLE_INPUT:
+			boost = 7;
 			break;
-
-		case WINE_ROLE_INPUT:
-			if (!tctx->is_input_handler) {
-				tctx->is_input_handler = 1;
-				tctx->boost_shift = 7;  /* Highest boost for input */
-				updated = true;
-			}
+		case DETECTED_ROLE_GAME_AUDIO:
+			boost = 6;
 			break;
-
-		case WINE_ROLE_BACKGROUND:
-			if (!tctx->is_background) {
-				tctx->is_background = 1;
-				tctx->boost_shift = 0;  /* No boost */
-				updated = true;
-			}
+		case DETECTED_ROLE_GPU:
+			boost = 5;
+			break;
+		case DETECTED_ROLE_NETWORK:
+		case DETECTED_ROLE_COMPOSITOR:
+			boost = 4;
+			break;
+		case DETECTED_ROLE_BACKGROUND:
+			boost = 0;
 			break;
 		}
-
-		if (updated)
-			return true;
-	}
-
-	/*
-	 * PRIORITY 2: GPU ioctl detection
-	 * 100% accurate for identifying GPU submit threads
-	 */
-	if (is_gpu_submit_thread(tid)) {
-		if (!tctx->is_gpu_submit) {
-			tctx->is_gpu_submit = 1;
-			tctx->boost_shift = 5;
+		
+		if (set_task_role(tctx, classification.primary_role, boost))
 			updated = true;
-
-			/* Cache preferred physical core for GPU affinity */
-			if (tctx->preferred_physical_core == -1) {
-				/* First time - will be set by select_cpu */
-				tctx->preferred_physical_core = -1;
-			}
-		}
-		return updated;
-	}
-
-	/*
-	 * PRIORITY 3: Thread runtime pattern detection
-	 * High accuracy after sufficient samples (100+ wakeups)
-	 */
-	u8 runtime_role = get_thread_role(tid);
-	if (runtime_role != ROLE_UNKNOWN) {
-		/* Only apply if high confidence (75%+) */
-		if (thread_is_role(tid, runtime_role, 75)) {
-			switch (runtime_role) {
-			case ROLE_RENDER:
-				if (!tctx->is_gpu_submit) {
-					tctx->is_gpu_submit = 1;
-					tctx->boost_shift = 5;
-					updated = true;
-				}
-				break;
-
-			case ROLE_INPUT:
-				if (!tctx->is_input_handler) {
-					tctx->is_input_handler = 1;
-					tctx->boost_shift = 7;
-					updated = true;
-				}
-				break;
-
-			case ROLE_AUDIO:
-				if (!tctx->is_game_audio) {
-					tctx->is_game_audio = 1;
-					tctx->boost_shift = 6;
-					updated = true;
-				}
-				break;
-
-			case ROLE_NETWORK:
-				if (!tctx->is_network) {
-					tctx->is_network = 1;
-					tctx->boost_shift = 4;
-					updated = true;
-				}
-				break;
-
-			case ROLE_COMPOSITOR:
-				if (!tctx->is_compositor) {
-					tctx->is_compositor = 1;
-					tctx->boost_shift = 4;
-					updated = true;
-				}
-				break;
-
-			case ROLE_BACKGROUND:
-				if (!tctx->is_background) {
-					tctx->is_background = 1;
-					tctx->boost_shift = 0;
-					updated = true;
-				}
-				break;
-			}
-		}
 	}
 
 	return updated;
@@ -214,12 +348,14 @@ static __always_inline u8 should_boost_thread(
 	u8 role = get_thread_role(tid);
 	if (role == ROLE_INPUT)
 		return 7;  /* Highest boost */
-	if (role == ROLE_AUDIO)
-		return 6;
 	if (role == ROLE_RENDER)
-		return 5;
-	if (role == ROLE_NETWORK || role == ROLE_COMPOSITOR)
-		return 4;
+		return 6;  /* GPU threads */
+	if (role == ROLE_COMPOSITOR)
+		return 5;  /* Compositor (visual chain) */
+	if (role == ROLE_AUDIO)
+		return 4;  /* Audio threads */
+	if (role == ROLE_NETWORK)
+		return 2;  /* Network threads */
 
 	/*
 	 * FALLBACK: Check task_ctx flags (existing heuristics)
@@ -227,13 +363,21 @@ static __always_inline u8 should_boost_thread(
 	 */
 	if (tctx) {
 		if (tctx->is_input_handler)
-			return 7;
-		if (tctx->is_game_audio)
-			return 6;
+			return 7;  /* Highest boost */
 		if (tctx->is_gpu_submit)
-			return 5;
-		if (tctx->is_network || tctx->is_compositor)
-			return 4;
+			return 6;  /* GPU threads */
+		if (tctx->is_compositor)
+			return 5;  /* Compositor (visual chain) */
+		if (tctx->is_usb_audio)
+			return 4;  /* USB audio */
+		if (tctx->is_system_audio)
+			return 3;  /* System audio */
+		if (tctx->is_network)
+			return 2;  /* Network threads */
+		if (tctx->is_game_audio)
+			return 1;  /* Game audio */
+		if (tctx->is_nvme_io)
+			return 1;  /* NVMe I/O */
 	}
 
 	return 0;  /* No boost */
@@ -290,8 +434,8 @@ static __always_inline bool is_critical_latency_thread(
 	if (thread_is_role(tid, ROLE_INPUT, 90))
 		return true;
 
-	/* Audio threads (both game and system) */
-	if (tctx && (tctx->is_game_audio || tctx->is_system_audio))
+	/* Audio threads (USB, game, and system) */
+	if (tctx && (tctx->is_usb_audio || tctx->is_game_audio || tctx->is_system_audio))
 		return true;
 
 	/* Runtime-detected audio with high confidence */

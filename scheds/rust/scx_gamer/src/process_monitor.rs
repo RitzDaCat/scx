@@ -8,7 +8,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ProcessStats {
@@ -30,6 +30,14 @@ struct ProcStatSnapshot {
 pub struct ProcessMonitor {
     last_snapshots: HashMap<u32, ProcStatSnapshot>,
     system_hz: u64,  // System clock ticks per second
+    // Cached GPU usage per PID with TTL to avoid frequent nvidia-smi calls
+    gpu_cache: HashMap<u32, (f64, Instant)>,
+    gpu_cache_ttl: Duration,
+    // Disable further nvidia-smi attempts after first failure
+    nvidia_available: bool,
+    // Throttle /proc sampling per PID to reduce contention (esp. under input spam)
+    stats_sample_ttl: Duration,
+    last_stats_sample: HashMap<u32, Instant>,
 }
 
 impl ProcessMonitor {
@@ -40,7 +48,26 @@ impl ProcessMonitor {
         Ok(Self {
             last_snapshots: HashMap::new(),
             system_hz,
+            gpu_cache: HashMap::new(),
+            gpu_cache_ttl: Duration::from_secs(2),
+            nvidia_available: true,
+            stats_sample_ttl: Duration::from_millis(1000),
+            last_stats_sample: HashMap::new(),
         })
+    }
+
+    /// Get CPU/GPU stats but throttle sampling frequency to once per `stats_sample_ttl`.
+    /// Returns None if throttled; caller can keep previous stats.
+    pub fn get_process_stats_throttled(&mut self, pid: u32) -> Option<ProcessStats> {
+        let now = Instant::now();
+        if let Some(last) = self.last_stats_sample.get(&pid).copied() {
+            if now.duration_since(last) < self.stats_sample_ttl {
+                return None;
+            }
+        }
+        let stats = self.get_process_stats(pid);
+        self.last_stats_sample.insert(pid, now);
+        stats
     }
 
     /// Get CPU usage for a specific process
@@ -97,8 +124,8 @@ impl ProcessMonitor {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Get GPU usage (NVIDIA only for now)
-        let gpu_percent = get_gpu_usage_nvidia(pid).unwrap_or(0.0);
+        // Get GPU usage (NVIDIA only for now), cached
+        let gpu_percent = self.get_gpu_usage_nvidia_cached(pid).unwrap_or(0.0);
 
         Some(ProcessStats {
             pid,
@@ -154,6 +181,36 @@ fn get_gpu_usage_nvidia(pid: u32) -> Option<f64> {
     }
 
     None
+}
+
+impl ProcessMonitor {
+    /// Cached wrapper around nvidia-smi to avoid frequent invocations.
+    fn get_gpu_usage_nvidia_cached(&mut self, pid: u32) -> Option<f64> {
+        if !self.nvidia_available {
+            return None;
+        }
+        let now = Instant::now();
+        if let Some(&(val, ts)) = self.gpu_cache.get(&pid) {
+            if now.duration_since(ts) < self.gpu_cache_ttl {
+                return Some(val);
+            }
+        }
+        let value = get_gpu_usage_nvidia(pid);
+        match value {
+            Some(v) => {
+                self.gpu_cache.insert(pid, (v, now));
+                Some(v)
+            }
+            None => {
+                // If the tool is unavailable or returns nothing, disable further attempts
+                // to prevent blocking.
+                // We only disable when the command itself errors (None can also mean no entry for PID).
+                // Conservatively disable on first None to keep TUI responsive.
+                self.nvidia_available = false;
+                None
+            }
+        }
+    }
 }
 
 /// Find OBS process PID by name

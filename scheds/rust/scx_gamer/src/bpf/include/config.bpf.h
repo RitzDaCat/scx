@@ -75,4 +75,9 @@
  */
 #define KICK_WORDS	((MAX_CPUS + 63) / 64)
 
+/* NAPI preference tracking */
+#define NET_RX_SOFTIRQ	3
+#define NET_TX_SOFTIRQ	2
+#define NAPI_PREFER_TIMEOUT_NS	(5ULL * NSEC_PER_MSEC)
+
 #endif /* __GAMER_CONFIG_BPF_H */
