@@ -51,6 +51,9 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_input_interrupt:1;	/* Input interrupt thread (mouse/keyboard) */
 	u8 is_gpu_interrupt:1;		/* GPU interrupt thread (frame completion) */
 	u8 is_usb_interrupt:1;		/* USB interrupt thread (peripheral events) */
+	u8 is_filesystem_thread:1;	/* Filesystem thread (file operations) */
+	u8 is_save_game:1;		/* Save game thread (game save operations) */
+	u8 is_config_file:1;		/* Config file thread (configuration changes) */
 	u8 is_background:1;		/* Background/batch work */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
