@@ -27,13 +27,20 @@
 - **Game memory access**: None (only reads kernel task metadata)
 
 ### 3. Thread Classification
-- **Function**: Identifies render/audio/GPU threads for better scheduling
+- **Function**: Identifies render/audio/GPU/network/storage/memory/interrupt/filesystem threads for better scheduling
 - **Mechanisms**:
-  - **GPU detection**: fentry hook on `drm_ioctl()` (kernel API call tracking)
+  - **GPU detection**: fentry hooks on `drm_ioctl()` and `nv_drm_ioctl()` (kernel API call tracking)
+  - **Compositor detection**: fentry hooks on `drm_mode_setcrtc()` and `drm_mode_setplane()` (display operations)
+  - **Storage detection**: fentry hooks on `blk_mq_submit_bio()`, `nvme_queue_rq()`, `vfs_read()` (I/O operations)
+  - **Network detection**: fentry hooks on `sock_sendmsg()`, `sock_recvmsg()`, `tcp_sendmsg()`, `udp_sendmsg()` (network operations)
+  - **Audio detection**: fentry hooks on `snd_pcm_period_elapsed()`, `snd_pcm_start()`, `snd_pcm_stop()`, `usb_audio_disconnect()` (audio operations)
+  - **Memory detection**: tracepoint hooks on `sys_enter_brk`, `sys_enter_mprotect`, `sys_enter_mmap`, `sys_enter_munmap` (memory operations)
+  - **Interrupt detection**: tracepoint hooks on `irq_handler_entry`, `irq_handler_exit`, `softirq_entry`, `softirq_exit`, `tasklet_entry`, `tasklet_exit` (interrupt operations)
+  - **Filesystem detection**: tracepoint hooks on `sys_enter_read`, `sys_enter_write`, `sys_enter_openat`, `sys_enter_close` (file operations)
   - **Wine priority**: uprobe on `NtSetInformationThread` (reads 4-byte priority value)
   - **Runtime patterns**: Context switch tracking via `sched_switch` tracepoint
-- **Data collected**: GPU ioctl calls, Windows thread priority hints, exec/sleep patterns
-- **Game memory access**: None (only observes kernel API calls)
+- **Data collected**: GPU ioctl calls, display operations, I/O operations, network operations, audio operations, memory operations, interrupt operations, file operations, Windows thread priority hints, exec/sleep patterns
+- **Game memory access**: None (only observes kernel API calls and system calls)
 
 ### 4. Input Event Monitoring
 - **Function**: Triggers scheduler boost windows during keyboard/mouse activity
@@ -98,14 +105,49 @@
    - Purpose: Classify threads as render/audio/CPU-bound
 
 3. **gpu_detect.bpf.h**: Detects GPU command submission
-   - Hook: `fentry/drm_ioctl` (Intel/AMD) and `kprobe/nvidia_ioctl` (NVIDIA)
+   - Hook: `fentry/drm_ioctl` (Intel/AMD) and `fentry/nv_drm_ioctl` (NVIDIA)
    - Reads: ioctl command numbers (e.g., `DRM_I915_GEM_EXECBUFFER2`)
    - Purpose: Identify GPU threads for physical core placement
 
-4. **wine_detect.bpf.h**: Reads Windows thread priority hints
-   - Hook: `uprobe` on Wine's `ntdll.so:NtSetInformationThread`
-   - Reads: 4-byte priority value from userspace (e.g., `THREAD_PRIORITY_TIME_CRITICAL`)
-   - Purpose: Identify audio threads (99% accurate with `TIME_CRITICAL + REALTIME`)
+4. **compositor_detect.bpf.h**: Detects compositor operations
+   - Hook: `fentry/drm_mode_setcrtc` and `fentry/drm_mode_setplane`
+   - Reads: Display mode and plane parameters
+   - Purpose: Identify compositor threads for display optimization
+
+5. **storage_detect.bpf.h**: Detects storage I/O operations
+   - Hook: `fentry/blk_mq_submit_bio`, `fentry/nvme_queue_rq`, `fentry/vfs_read`
+   - Reads: Block I/O request parameters
+   - Purpose: Identify storage threads for I/O optimization
+
+6. **network_detect.bpf.h**: Detects network operations
+   - Hook: `fentry/sock_sendmsg`, `fentry/sock_recvmsg`, `fentry/tcp_sendmsg`, `fentry/udp_sendmsg`
+   - Reads: Socket operation parameters
+   - Purpose: Identify network threads for latency optimization
+
+7. **audio_detect.bpf.h**: Detects audio operations
+   - Hook: `fentry/snd_pcm_period_elapsed`, `fentry/snd_pcm_start`, `fentry/snd_pcm_stop`, `fentry/usb_audio_disconnect`
+   - Reads: Audio device operation parameters
+   - Purpose: Identify audio threads for audio optimization
+
+8. **memory_detect.bpf.h**: Detects memory operations
+   - Hook: `tracepoint/syscalls/sys_enter_brk`, `tracepoint/syscalls/sys_enter_mprotect`, `tracepoint/syscalls/sys_enter_mmap`, `tracepoint/syscalls/sys_enter_munmap`
+   - Reads: Memory system call parameters
+   - Purpose: Identify memory-intensive threads for memory optimization
+
+9. **interrupt_detect.bpf.h**: Detects interrupt operations
+   - Hook: `tracepoint/irq/irq_handler_entry`, `tracepoint/irq/irq_handler_exit`, `tracepoint/irq/softirq_entry`, `tracepoint/irq/softirq_exit`, `tracepoint/irq/tasklet_entry`, `tracepoint/irq/tasklet_exit`
+   - Reads: Interrupt operation parameters
+   - Purpose: Identify interrupt threads for hardware responsiveness
+
+10. **filesystem_detect.bpf.h**: Detects filesystem operations
+    - Hook: `tracepoint/syscalls/sys_enter_read`, `tracepoint/syscalls/sys_enter_write`, `tracepoint/syscalls/sys_enter_openat`, `tracepoint/syscalls/sys_enter_close`
+    - Reads: File system call parameters
+    - Purpose: Identify filesystem threads for file operation optimization
+
+11. **wine_detect.bpf.h**: Reads Windows thread priority hints
+    - Hook: `uprobe` on Wine's `ntdll.so:NtSetInformationThread`
+    - Reads: 4-byte priority value from userspace (e.g., `THREAD_PRIORITY_TIME_CRITICAL`)
+    - Purpose: Identify audio threads (99% accurate with `TIME_CRITICAL + REALTIME`)
 
 **Safety guarantees:**
 - **BPF verifier**: Kernel ensures programs cannot crash or access arbitrary memory
@@ -272,7 +314,9 @@ These are **quality-of-life improvements**, not competitive advantages (like wal
 ### Q: Can scx_gamer read my game's memory?
 **A:** No. The scheduler never accesses game memory. It only reads:
 - Kernel task metadata (`task->comm`, PID)
-- Kernel API call parameters (GPU ioctls, Wine priorities)
+- Kernel API call parameters (GPU ioctls, display operations, I/O operations, network operations, audio operations)
+- System call parameters (memory operations, interrupt operations, file operations)
+- Windows thread priority hints (Wine priorities)
 - Input device timestamps (evdev events)
 
 All data collection is **kernel-side** and **read-only**.
@@ -340,6 +384,12 @@ If you're an anti-cheat developer reviewing scx_gamer:
 ---
 
 ## Changelog
+
+- **2025-01-XX**: Updated safety analysis (v1.0.3)
+  - Added comprehensive fentry/tracepoint hook documentation
+  - Documented 8 new detection systems (GPU, Compositor, Storage, Network, Audio, Memory, Interrupt, Filesystem)
+  - Updated BPF program safety analysis
+  - Verified anti-cheat safety of all new hooks
 
 - **2025-10-07**: Initial safety analysis (v1.0.2)
   - Comprehensive BPF program review
