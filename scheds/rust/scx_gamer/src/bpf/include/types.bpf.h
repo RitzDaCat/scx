@@ -47,6 +47,10 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_memory_intensive:1;	/* Memory-intensive thread (page faults, allocations) */
 	u8 is_asset_loading:1;		/* Asset loading thread (texture/level streaming) */
 	u8 is_hot_path_memory:1;	/* Hot path memory thread (cache operations) */
+	u8 is_interrupt_thread:1;	/* Interrupt handling thread (hardware interrupts) */
+	u8 is_input_interrupt:1;	/* Input interrupt thread (mouse/keyboard) */
+	u8 is_gpu_interrupt:1;		/* GPU interrupt thread (frame completion) */
+	u8 is_usb_interrupt:1;		/* USB interrupt thread (peripheral events) */
 	u8 is_background:1;		/* Background/batch work */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
