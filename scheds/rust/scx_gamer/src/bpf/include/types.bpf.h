@@ -44,6 +44,9 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_audio_pipeline:1;		/* Audio pipeline processing thread */
 	u8 is_storage_hot_path:1;	/* Storage hot path (I/O intensive operations) */
 	u8 is_ethernet_nic_interrupt:1;	/* Ethernet NIC interrupt thread */
+	u8 is_memory_intensive:1;	/* Memory-intensive thread (page faults, allocations) */
+	u8 is_asset_loading:1;		/* Asset loading thread (texture/level streaming) */
+	u8 is_hot_path_memory:1;	/* Hot path memory thread (cache operations) */
 	u8 is_background:1;		/* Background/batch work */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
