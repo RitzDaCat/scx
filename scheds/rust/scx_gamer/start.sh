@@ -72,6 +72,8 @@ Standard Profiles:
   2) Casual        - Balanced responsiveness + locality
   3) Esports       - Maximum responsiveness, aggressive tuning
   4) NAPI Prefer   - Test prefer-napi-on-input bias
+  5) Ultra-Latency - Busy polling ultra-low latency (9800X3D)
+  6) Deadline-Mode - SCHED_DEADLINE hard real-time guarantees
   q) Back
 PROFILE
         read -rp "Select profile: " profile_choice
@@ -110,9 +112,67 @@ PROFILE
                 launch_scx "Standard - NAPI Prefer" \
                     --env "RUST_LOG=warn" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--stats" \
-                    --arg "1.0"
+                    --arg "--prefer-napi-on-input"
+                return
+                ;;
+            5)
+                echo
+                echo "✅ Ultra-Latency Mode (Busy Polling)"
+                echo "   • Consumes 100% of CPU core 7 for input handling"
+                echo "   • Busy polling for ultra-low latency"
+                echo "   • No real-time scheduling (safer)"
+                echo "   • Recommended for competitive gaming"
+                echo
+                launch_scx "Standard - Ultra-Latency (9800X3D)" \
+                    --env "RUST_LOG=warn" \
+                    --arg "--event-loop-cpu" \
+                    --arg "7" \
+                    --arg "--busy-polling" \
+                    --arg "--slice-us" \
+                    --arg "5" \
+                    --arg "--input-window-us" \
+                    --arg "1000" \
+                    --arg "--wakeup-timer-us" \
+                    --arg "50" \
+                    --arg "--avoid-smt" \
+                    --arg "--mig-max" \
+                    --arg "2"
+                return
+                ;;
+            6)
+                echo
+                echo "🚀 SCHED_DEADLINE Mode (Hard Real-Time)"
+                echo "   • Ultra-low latency with time guarantees"
+                echo "   • No starvation risk (kernel admission control)"
+                echo "   • Hard real-time guarantees"
+                echo "   • Requires CONFIG_SCHED_DEADLINE kernel support"
+                echo
+                read -rp "Continue? (y/N): " confirm
+                if [[ "${confirm}" =~ ^[Yy]$ ]]; then
+                    launch_scx "Standard - SCHED_DEADLINE (9800X3D)" \
+                        --env "RUST_LOG=warn" \
+                        --arg "--event-loop-cpu" \
+                        --arg "7" \
+                        --arg "--busy-polling" \
+                        --arg "--deadline-scheduling" \
+                        --arg "--deadline-runtime-us" \
+                        --arg "500" \
+                        --arg "--deadline-deadline-us" \
+                        --arg "1000" \
+                        --arg "--deadline-period-us" \
+                        --arg "1000" \
+                        --arg "--slice-us" \
+                        --arg "5" \
+                        --arg "--input-window-us" \
+                        --arg "1000" \
+                        --arg "--wakeup-timer-us" \
+                        --arg "50" \
+                        --arg "--avoid-smt" \
+                        --arg "--mig-max" \
+                        --arg "2"
+                else
+                    echo "SCHED_DEADLINE mode cancelled."
+                fi
                 return
                 ;;
             q|Q|0)

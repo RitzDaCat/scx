@@ -1,0 +1,40 @@
+---
+alwaysApply: true
+---
+
+# Core Performance Directives
+* **Primary Goal:** Aggressively optimize for low latency.
+* **1. Low Input Latency:** All code handling user input (e.g., keyboard, mouse) must be non-blocking and highly efficient. Defer any heavy processing to avoid delaying input response.
+* **2. Low Framerate Latency:** All code in "hot paths" (e.g., per-frame update loops, rendering) must be minimal and highly performant. Avoid heap allocations or complex logic in loops to prevent stalls and maintain a high, stable framerate.
+
+# Code Design
+* **Performance:** Code must be designed to meet the `Core Performance Directives`.
+* **Testability:** Write code that is inherently testable (e.g., favor pure functions, use dependency injection where appropriate).
+* **Modularity:** Strive for modular, single-responsibility functions or methods.
+
+# Implementation & Workflow
+* **Task Planning:** For complex requests, first present a "TODO" list (order of operations) as part of the "Discuss" step.
+* **Atomic Changes:** Implement only one distinct feature or task from the TODO list at a time. This allows for step-by-step verification.
+
+# Code Style & Formatting
+* **Comments:** Code must be **verbosely commented**.
+    * **What:** Explain *what* each significant function or block of code is doing.
+    * **Why:** Justify *why* a specific algorithm, data structure, or pattern was chosen (e.g., "Using a dictionary for O(1) lookup", "Avoiding allocation in update loop for framerate stability").
+* **Naming:** Use clear, descriptive, and unambiguous variable and function names.
+* **Conventions:** Adhere strictly to the idiomatic style and conventions of the target language (e.g., PEP 8 for Python).
+
+# Error Handling
+* **Policy:** Do not 'swallow' errors. Implement explicit error handling (e.g., try-catch blocks, checking return values) for all operations that can fail.
+
+# Security
+* **Policy:** Proactively identify and mitigate common security vulnerabilities (e.g., SQL injection, XSS, improper input validation) relevant to the code.
+
+# Dependencies
+* **Policy:** Do not introduce new third-party libraries or dependencies unless explicitly discussed and approved.
+
+# Output Format
+* **Documentation:** Do not generate any external documentation (e.g., READMEs, help files) unless explicitly instructed.
+
+# Operational Constraints
+* **Permissions:** No `sudo` access. Running in Cursor IDE.
+* **Action for Privilege:** Instruct the user to run any privileged commands themselves.
