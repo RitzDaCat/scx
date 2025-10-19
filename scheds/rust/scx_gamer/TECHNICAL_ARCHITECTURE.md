@@ -2121,6 +2121,37 @@ match skel.maps.process_events.ringbuf_poll(timeout) {
 # Longer slices, less aggressive
 ```
 
+### Epoll Path Latency Optimization
+
+**Standard epoll (default)**:
+```bash
+# Uses epoll_wait() with 50ms timeout
+# Latency: ~100-500µs (epoll wakeup + scheduling)
+```
+
+**Busy polling (ultra-low latency)**:
+```bash
+--busy-polling --event-loop-cpu 0
+# Eliminates epoll wakeup latency
+# Latency: ~10-50µs (direct polling)
+# WARNING: Consumes 100% CPU core
+```
+
+**Real-time scheduling (maximum priority)**:
+```bash
+--realtime-scheduling --rt-priority 50
+# SCHED_FIFO policy, highest priority
+# Latency: ~5-20µs (immediate preemption)
+# WARNING: Can lock up system if misused
+```
+
+**Combined ultra-low latency**:
+```bash
+--busy-polling --realtime-scheduling --rt-priority 50 --event-loop-cpu 0
+# Absolute minimum latency: ~5-10µs total
+# WARNING: System stability risk, dedicated gaming machine only
+```
+
 ---
 
 ### Migration Control

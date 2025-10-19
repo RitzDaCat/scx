@@ -33,10 +33,13 @@ static __always_inline bool is_gpu_submit_name(const char *comm)
 	if (comm[0] == 'R' && comm[1] == 'H' && comm[2] == 'I')
 		return true;  /* RHIThread, RHISubmissionTh, RHIInterruptThr */
 
-	/* Unreal Engine RenderThread (Splitgate, Fortnite, etc.) - CRITICAL PATH */
+	/* Unreal Engine RenderThread (Splitgate, Fortnite, Kovaaks, etc.) - CRITICAL PATH */
 	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd' &&
-	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'T')
-		return true;  /* RenderThread 0 */
+	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'T') {
+		/* Handle RenderThread, RenderThread 0, RenderThread 1, etc. */
+		if (comm[7] == '\0' || comm[7] == ' ')
+			return true;  /* RenderThread, RenderThread 0, RenderThread 1 */
+	}
 
 	/* vkd3d threads (Vulkan/D3D12 translation layer for Proton) */
 	if (comm[0] == 'v' && comm[1] == 'k' && comm[2] == 'd' && comm[3] == '3')
@@ -96,6 +99,11 @@ static __always_inline bool is_compositor_name(const char *comm)
 	if (comm[0] == 'X' && comm[1] == 'w' && comm[2] == 'a' && comm[3] == 'y')
 		return true;
 
+	/* Unreal Engine compositor threads (Kovaaks, etc.) */
+	if (comm[0] == 'C' && comm[1] == 'o' && comm[2] == 'm' && comm[3] == 'p' &&
+	    comm[4] == 'o' && comm[5] == 's' && comm[6] == 'i' && comm[7] == 't')
+		return true;  /* CompositorTileW, CompositorThread, etc. */
+
 	return false;
 }
 
@@ -149,6 +157,44 @@ static __always_inline bool is_network_name(const char *comm)
 	/* WoW uppercase network threads */
 	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't')
 		return true;  /* NetThread, Net Queue, Network */
+
+	/* Warframe network threads - Wine networking */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'r' && comm[6] == 'p' && comm[7] == 'c')
+		return true;  /* wine_rpcrt4_ser */
+
+	/* Generic Wine networking patterns */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'n' && comm[6] == 'e' && comm[7] == 't')
+		return true;  /* wine_net* threads */
+
+	/* Warframe main game threads - generic game executable patterns */
+	if (comm[0] == 'W' && comm[1] == 'a' && comm[2] == 'r' && comm[3] == 'f' &&
+	    comm[4] == 'r' && comm[5] == 'a' && comm[6] == 'm' && comm[7] == 'e' &&
+	    comm[8] == '.' && comm[9] == 'x' && comm[10] == '6' && comm[11] == '4')
+		return true;  /* Warframe.x64.ex */
+
+	/* Wine game threads - common Wine thread patterns */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 't' && comm[6] == 'h' && comm[7] == 'r')
+		return true;  /* wine_threadpool */
+
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'x' && comm[6] == 'i' && comm[7] == 'n')
+		return true;  /* wine_xinput_hid */
+
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 's' && comm[6] == 'e' && comm[7] == 'c')
+		return true;  /* wine_sechost_de */
+
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'm' && comm[6] == 'm' && comm[7] == 'd')
+		return true;  /* wine_mmdevapi_n */
+
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'd' && comm[6] == 'i' && comm[7] == 'n')
+		return true;  /* wine_dinput_wor */
+
 
 	if (comm[0] == 'r' && comm[1] == 'e' && comm[2] == 'c' && comm[3] == 'v')
 		return true;
@@ -439,8 +485,11 @@ static __always_inline bool is_nvme_hot_path_thread(const struct task_struct *p,
 static __always_inline bool is_game_audio_name(const char *comm)
 {
 	/* Unreal Engine audio threads */
-	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o')
-		return true;  /* AudioDeviceBuff, AudioThread0, etc. */
+	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o') {
+		/* Handle AudioThread, AudioThread0, AudioMixerRende, etc. */
+		if (comm[5] == '\0' || comm[5] == 'T' || comm[5] == 'M')
+			return true;  /* AudioThread, AudioThread0, AudioMixerRende */
+	}
 
 	if (comm[0] == 'F' && comm[1] == 'A' && comm[2] == 'u' && comm[3] == 'd')
 		return true;  /* FAudio_AudioCli */
@@ -452,6 +501,11 @@ static __always_inline bool is_game_audio_name(const char *comm)
 	/* Generic game audio threads: "audio", "sound", "snd_" */
 	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o')
 		return true;
+
+	/* Warframe audio threads */
+	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o' &&
+	    comm[5] == '_' && comm[6] == 'c' && comm[7] == 'l' && comm[8] == 'i' && comm[9] == 'e')
+		return true;  /* audio_client_ma */
 
 	if (comm[0] == 's' && comm[1] == 'o' && comm[2] == 'u' && comm[3] == 'n' && comm[4] == 'd')
 		return true;
@@ -601,6 +655,76 @@ static __always_inline bool is_background_name(const char *comm)
 
 	if (comm[0] == 'g' && comm[1] == 'p' && comm[2] == 'u')
 		return true;
+
+	/* Steam WebHelper - CPU-intensive browser component that should be throttled */
+	if (comm[0] == 's' && comm[1] == 't' && comm[2] == 'e' && comm[3] == 'a' &&
+	    comm[4] == 'm' && comm[5] == 'w' && comm[6] == 'e' && comm[7] == 'b')
+		return true;  /* steamwebhelper */
+
+	/* Cursor/VS Code - Electron-based editor that can consume significant CPU */
+	if (comm[0] == 'c' && comm[1] == 'u' && comm[2] == 'r' && comm[3] == 's' &&
+	    comm[4] == 'o' && comm[5] == 'r')
+		return true;  /* cursor */
+
+	/* Plasma System Monitor - System monitoring tool that should be background */
+	if (comm[0] == 'p' && comm[1] == 'l' && comm[2] == 'a' && comm[3] == 's' &&
+	    comm[4] == 'm' && comm[5] == 'a' && comm[6] == '-' && comm[7] == 's')
+		return true;  /* plasma-systemmonitor */
+
+	/* Discord - Electron-based communication app that can consume significant CPU */
+	if (comm[0] == 'd' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'c' &&
+	    comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'd')
+		return true;  /* discord */
+
+	/* Chromium - Web browser that can consume significant CPU for rendering */
+	if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'r' && comm[3] == 'o' &&
+	    comm[4] == 'm' && comm[5] == 'i' && comm[6] == 'u' && comm[7] == 'm')
+		return true;  /* chromium */
+
+	/* World of Warcraft background threads - non-critical game threads */
+	if (comm[0] == 'T' && comm[1] == 'A' && comm[2] == 'C' && comm[3] == 'T' &&
+	    comm[4] == ' ' && comm[5] == 'T' && comm[6] == 'a' && comm[7] == 's')
+		return true;  /* TACT Task Threa */
+
+	if (comm[0] == 'W' && comm[1] == 'o' && comm[2] == 'w' && comm[3] == 'D' &&
+	    comm[4] == 'o' && comm[5] == 'w' && comm[6] == 'n' && comm[7] == 'l')
+		return true;  /* WowDownloadDisp */
+
+	if (comm[0] == 'T' && comm[1] == 'A' && comm[2] == 'C' && comm[3] == 'T' &&
+	    comm[4] == ' ' && comm[5] == 'C' && comm[6] == 'u' && comm[7] == 'r')
+		return true;  /* TACT Curl Downl */
+
+	if (comm[0] == 'W' && comm[1] == 'a' && comm[2] == 't' && comm[3] == 'c' &&
+	    comm[4] == 'h' && comm[5] == 'd' && comm[6] == 'o' && comm[7] == 'g')
+		return true;  /* WatchdogThread */
+
+	if (comm[0] == 'C' && comm[1] == 'o' && comm[2] == 'm' && comm[3] == 'b' &&
+	    comm[4] == 'a' && comm[5] == 't' && comm[6] == ' ' && comm[7] == 'L')
+		return true;  /* Combat Log Thre */
+
+	if (comm[0] == 'A' && comm[1] == 's' && comm[2] == 'y' && comm[3] == 'n' &&
+	    comm[4] == 'c' && comm[5] == ' ' && comm[6] == 'P' && comm[7] == 'e')
+		return true;  /* Async Pending */
+
+	if (comm[0] == 'A' && comm[1] == 'I' && comm[2] == 'O' && comm[3] == ' ' &&
+	    comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r' && comm[7] == 'e')
+		return true;  /* AIO Thread */
+
+	if (comm[0] == 'D' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'k' &&
+	    comm[4] == ' ' && comm[5] == 'Q' && comm[6] == 'u' && comm[7] == 'e')
+		return true;  /* Disk Queue 0 */
+
+	if (comm[0] == 'c' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'a' &&
+	    comm[4] == '-' && comm[5] == 'E' && comm[6] == 'v' && comm[7] == 't')
+		return true;  /* cuda-EvtHandlr */
+
+	if (comm[0] == 'c' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'a' &&
+	    comm[4] == '0' && comm[5] == '0' && comm[6] == '0' && comm[7] == '8')
+		return true;  /* cuda00089400226 */
+
+	if (comm[0] == 'C' && comm[1] == 'O' && comm[2] == 'M' && comm[3] == 'M' &&
+	    comm[4] == 'A' && comm[5] == 'N' && comm[6] == 'D')
+		return true;  /* COMMAND */
 
 	return false;
 }
@@ -846,6 +970,126 @@ static __always_inline void classify_ethernet_nic_interrupt(struct task_struct *
 		tctx->is_ethernet_nic_interrupt = 1;
 }
 
+/*
+ * Steam WebHelper detection - CPU-intensive browser component
+ * Steam WebHelper runs Chromium-based browser components for Steam UI
+ * These should be heavily throttled to preserve game performance
+ */
+static __always_inline bool is_steam_webhelper_name(const char *comm)
+{
+	/* Steam WebHelper process name pattern */
+	if (comm[0] == 's' && comm[1] == 't' && comm[2] == 'e' && comm[3] == 'a' &&
+	    comm[4] == 'm' && comm[5] == 'w' && comm[6] == 'e' && comm[7] == 'b')
+		return true;  /* steamwebhelper */
+
+	return false;
+}
+
+static __always_inline void classify_steam_webhelper(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (!tctx->is_background && is_steam_webhelper_name(p->comm)) {
+		tctx->is_background = 1;
+		/* Steam WebHelper gets maximum background penalty (8x slower) */
+		/* This ensures it doesn't compete with game threads for CPU time */
+	}
+}
+
+/*
+ * Cursor/VS Code detection - Electron-based editor processes
+ * Cursor and VS Code are Electron-based editors that can consume significant CPU
+ * These should be throttled when not in foreground to preserve game performance
+ */
+static __always_inline bool is_cursor_name(const char *comm)
+{
+	/* Cursor editor process name pattern */
+	if (comm[0] == 'c' && comm[1] == 'u' && comm[2] == 'r' && comm[3] == 's' &&
+	    comm[4] == 'o' && comm[5] == 'r')
+		return true;  /* cursor */
+
+	return false;
+}
+
+static __always_inline void classify_cursor(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (!tctx->is_background && is_cursor_name(p->comm)) {
+		tctx->is_background = 1;
+		/* Cursor gets background penalty (8x slower) when not in foreground */
+		/* This prevents editor from competing with games for CPU time */
+	}
+}
+
+/*
+ * Plasma System Monitor detection - System monitoring tool
+ * Plasma System Monitor can consume CPU for system monitoring
+ * Should be throttled to preserve game performance
+ */
+static __always_inline bool is_plasma_systemmonitor_name(const char *comm)
+{
+	/* Plasma System Monitor process name pattern */
+	if (comm[0] == 'p' && comm[1] == 'l' && comm[2] == 'a' && comm[3] == 's' &&
+	    comm[4] == 'm' && comm[5] == 'a' && comm[6] == '-' && comm[7] == 's')
+		return true;  /* plasma-systemmonitor */
+
+	return false;
+}
+
+static __always_inline void classify_plasma_systemmonitor(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (!tctx->is_background && is_plasma_systemmonitor_name(p->comm)) {
+		tctx->is_background = 1;
+		/* Plasma System Monitor gets background penalty (8x slower) */
+		/* System monitoring should not interfere with gaming performance */
+	}
+}
+
+/*
+ * Discord detection - Electron-based communication application
+ * Discord is an Electron-based app that can consume significant CPU for voice/video
+ * Should be throttled when not in foreground to preserve game performance
+ */
+static __always_inline bool is_discord_name(const char *comm)
+{
+	/* Discord process name pattern */
+	if (comm[0] == 'd' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'c' &&
+	    comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'd')
+		return true;  /* discord */
+
+	return false;
+}
+
+static __always_inline void classify_discord(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (!tctx->is_background && is_discord_name(p->comm)) {
+		tctx->is_background = 1;
+		/* Discord gets background penalty (8x slower) when not in foreground */
+		/* This prevents Discord from competing with games for CPU time */
+	}
+}
+
+/*
+ * Chromium detection - Web browser application
+ * Chromium is a web browser that can consume significant CPU for rendering
+ * Should be throttled when not in foreground to preserve game performance
+ */
+static __always_inline bool is_chromium_name(const char *comm)
+{
+	/* Chromium process name pattern */
+	if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'r' && comm[3] == 'o' &&
+	    comm[4] == 'm' && comm[5] == 'i' && comm[6] == 'u' && comm[7] == 'm')
+		return true;  /* chromium */
+
+	return false;
+}
+
+static __always_inline void classify_chromium(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (!tctx->is_background && is_chromium_name(p->comm)) {
+		tctx->is_background = 1;
+		/* Chromium gets background penalty (8x slower) when not in foreground */
+		/* This prevents web browser from competing with games for CPU time */
+	}
+}
+
 static __always_inline void classify_background(struct task_struct *p, struct task_ctx *tctx)
 {
 	if (!tctx->is_background && is_background_name(p->comm))
@@ -863,6 +1107,11 @@ static __always_inline void classify_task(struct task_struct *p, struct task_ctx
     classify_audio_pipeline(p, tctx);
     classify_storage_hot_path(p, tctx);
     classify_ethernet_nic_interrupt(p, tctx);
+    classify_steam_webhelper(p, tctx);  /* Steam WebHelper throttling */
+    classify_cursor(p, tctx);           /* Cursor/VS Code throttling */
+    classify_plasma_systemmonitor(p, tctx); /* Plasma System Monitor throttling */
+    classify_discord(p, tctx);          /* Discord throttling */
+    classify_chromium(p, tctx);         /* Chromium throttling */
     classify_background(p, tctx);
 
     if (!tctx->input_lane)

@@ -86,6 +86,19 @@ Add via GUI "Set sched-ext extra scheduler flags":
 --verbose                  # Debug logging
 ```
 
+## Ultra-Low Latency Options (Advanced)
+
+For maximum input responsiveness (sub-100µs latency):
+
+```bash
+--busy-polling             # Eliminate epoll wakeup latency (consumes 100% CPU core)
+--realtime-scheduling      # Use SCHED_FIFO real-time policy (requires root)
+--rt-priority 50           # Real-time priority (1-99, higher = more priority)
+--event-loop-cpu 0         # Pin event loop to specific CPU core
+```
+
+**WARNING**: These options can lock up your system if misused. Only use on dedicated gaming machines.
+
 ## Verification
 
 ```bash
