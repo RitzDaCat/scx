@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added comprehensive performance monitoring
 
 ### Performance Improvements
-- **Input latency**: ~50.7μs baseline with optimizations
+- **Input latency**: ~50-80ns per event with optimizations
 - **CPU efficiency**: Improved SMT performance with pause instruction
 - **Event processing**: Reduced syscall overhead with batching
 - **Memory access**: Better cache performance with prefetching
