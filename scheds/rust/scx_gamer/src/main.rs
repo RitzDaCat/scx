@@ -200,10 +200,47 @@ pub enum InputLane {
 }
 
 /// Combined device info to avoid double HashMap lookups in hot path
+/// Bit-packed for optimal cache utilization: 24 bits for idx, 8 bits for lane
 #[derive(Debug, Clone, Copy)]
 struct DeviceInfo {
-    idx: usize,
-    lane: InputLane,
+    packed_info: u32,
+}
+
+impl DeviceInfo {
+    /// Create new DeviceInfo with packed idx and lane
+    /// 
+    /// # Arguments
+    /// * `idx` - Device index (max 16M devices)
+    /// * `lane` - Input lane type
+    /// 
+    /// # Returns
+    /// * `Self` - Packed DeviceInfo
+    fn new(idx: usize, lane: InputLane) -> Self {
+        // Pack: 24 bits for idx (max 16M devices), 8 bits for lane
+        let packed_info = ((idx as u32) & 0xFFFFFF) | ((lane as u32) << 24);
+        Self { packed_info }
+    }
+    
+    /// Get device index
+    /// 
+    /// # Returns
+    /// * `usize` - Device index
+    fn idx(&self) -> usize {
+        (self.packed_info & 0xFFFFFF) as usize
+    }
+    
+    /// Get input lane
+    /// 
+    /// # Returns
+    /// * `InputLane` - Input lane type
+    fn lane(&self) -> InputLane {
+        match (self.packed_info >> 24) as u8 {
+            0 => InputLane::Keyboard,
+            1 => InputLane::Mouse,
+            2 => InputLane::Other,
+            _ => InputLane::Other, // Default fallback
+        }
+    }
 }
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -993,7 +1030,7 @@ impl<'a> Scheduler<'a> {
                                               input_id.product(),
                                               fd,
                                               lane);
-                                        input_fd_info.insert(fd, DeviceInfo { idx: input_devs.len(), lane });
+                                        input_fd_info.insert(fd, DeviceInfo::new(input_devs.len(), lane));
                                         input_devs.push(dev);
                                     }
                                 }
@@ -1676,7 +1713,9 @@ impl<'a> Scheduler<'a> {
                 }
 
                 // PERF: Single HashMap lookup gets both idx and dev_type (saves ~15-30ns per event)
-                if let Some(&DeviceInfo { idx, lane }) = self.input_fd_info.get(&fd) {
+                if let Some(&device_info) = self.input_fd_info.get(&fd) {
+                    let idx = device_info.idx();
+                    let lane = device_info.lane();
                     // Validate idx is within bounds before access (handles vector reallocation)
                     if idx >= self.input_devs.len() {
                         // Stale index, clean it up
