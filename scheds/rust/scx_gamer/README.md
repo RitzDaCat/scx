@@ -608,15 +608,15 @@ Hardware Input (Mouse/Keyboard)
 USB Controller
     ↓ (~1-2μs)
 Kernel evdev Driver
-    ↓ (~50ns)
+    ↓ (~50ns - Direct BPF fentry hook, no userspace wakeup)
 BPF fentry Hook (input_event_raw)
-    ↓ (~50ns)
+    ↓ (~50ns - Kernel-level event capture)
 BPF Ring Buffer (Direct Memory Access)
-    ↓ (~50ns)
+    ↓ (~50ns - Zero-copy kernel-to-userspace)
 Userspace Ring Buffer Consumer
-    ↓ (~200-500ns)
+    ↓ (~200-500ns - Lock-free processing)
 Scheduler Boost Trigger
-    ↓ (~500-1500ns)
+    ↓ (~500-1500ns - Gaming-optimized scheduling)
 Game Thread Prioritization
     ↓ (~1.5-1.7μs)
 Context Switch to Game Thread
@@ -634,18 +634,19 @@ Hardware Input (Mouse/Keyboard)
 USB Controller
     ↓ (~1-2μs)
 Kernel evdev Driver
-    ↓ (~200-600ns)
+    ↓ (~200-600ns - Standard evdev processing + userspace wakeup)
 epoll_wait() (Wakeup Latency)
-    ↓ (~200-600ns)
+    ↓ (~200-600ns - Syscall overhead + context switch)
 Userspace Event Processing
-    ↓ (~500-1500ns)
+    ↓ (~200-600ns - Standard event handling)
 Standard Scheduler (CFS/EEVDF)
-    ↓ (~1.5-1.7μs)
+    ↓ (~500-1500ns - Generic scheduling, no gaming awareness)
 Context Switch to Game Thread
-    ↓ (~1-3ms)
+    ↓ (~1.5-1.7μs)
 Frame Rendering
-    ↓ (4.17ms @ 240Hz)
+    ↓ (~1-3ms)
 Display
+    ↓ (4.17ms @ 240Hz)
 ```
 **Total Software Latency: ~3-5μs**
 
@@ -682,6 +683,38 @@ Display
 | **Total Software Latency** | ~2-4μs | ~3-5μs | ~4-7μs |
 | **Gaming Focus** | Built-in | None | Partial (DirectInput) |
 | **Translation Layers** | Minimal (2-3) | Standard (3-4) | Multiple (4-5) |
+
+### Technical Differences Explained
+
+**scx_gamer vs EEVDF Kernel Processing:**
+- **scx_gamer**: Uses BPF fentry hook on `input_event()` function (~50ns)
+  - Direct kernel-level event capture via ftrace trampoline
+  - No userspace wakeup required
+  - Events written directly to BPF ring buffer
+- **EEVDF**: Standard evdev driver processing (~200-600ns)
+  - Normal kernel input event processing
+  - Userspace wakeup via epoll_wait() syscall
+  - Additional context switch overhead
+
+**scx_gamer vs EEVDF Userspace Communication:**
+- **scx_gamer**: BPF ring buffer (~50ns)
+  - Zero-copy direct memory access
+  - Lock-free SegQueue for event processing
+  - No syscall overhead
+- **EEVDF**: epoll_wait() syscall (~200-600ns)
+  - Traditional syscall-based event notification
+  - Context switch from kernel to userspace
+  - Standard event processing overhead
+
+**scx_gamer vs EEVDF Scheduler Awareness:**
+- **scx_gamer**: Gaming-optimized scheduling (~500-1500ns)
+  - Automatic thread classification via BPF hooks
+  - Intelligent CPU placement for gaming workloads
+  - Input-aware scheduling decisions
+- **EEVDF**: Generic scheduling (~500-1500ns)
+  - No gaming-specific optimizations
+  - Standard CPU selection algorithms
+  - No input event awareness
 
 **scx_gamer Advantages:**
 - **25-33% lower software latency** than EEVDF (~2-4μs vs ~3-5μs)
