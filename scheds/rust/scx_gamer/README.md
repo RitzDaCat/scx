@@ -23,23 +23,25 @@ scx_gamer is a Linux sched_ext (eBPF) scheduler designed to minimize input laten
 3. **Cache-conscious design**: Preserves L1/L2/L3 cache affinity to reduce memory latency
 4. **Real-time input processing**: Busy polling mode achieves sub-microsecond response times
 5. **Game-specific intelligence**: Automatically detects and optimizes for gaming workloads
+6. **Lock-free architecture**: Eliminates contention and reduces latency spikes
+7. **Bit-packed data structures**: Optimized memory layout for better cache utilization
 
 ## Key Features
 
 ### Ultra-Low Latency Input Processing
-- **Lock-free ring buffer**: Direct memory access between kernel and userspace (~50-100ns per event)
-- **Busy polling mode**: Eliminates epoll wakeup latency (~200ns → ~50ns improvement)
+- **Lock-free ring buffer**: Direct memory access between kernel and userspace
+- **Busy polling mode**: Eliminates epoll wakeup latency
 - **Bit-packed device info**: Optimized memory layout for cache efficiency (16 bytes → 4 bytes)
-- **Direct array indexing**: O(1) device lookup without hash overhead (~40-70ns improvement)
+- **Direct array indexing**: O(1) device lookup without hash overhead
 
 ### Advanced Thread Detection
-- **BPF fentry hooks**: Ultra-low latency detection using eBPF (~200-500ns vs 50-200ms heuristic)
+- **BPF fentry hooks**: Ultra-low latency detection using eBPF
 - **Pattern learning**: Automatic thread role identification for games with generic names
 - **Game-specific optimization**: Enhanced detection for popular games (Kovaaks, Warframe, etc.)
 - **Visual chain prioritization**: Input > GPU > Compositor > Audio > Network > Memory > Interrupt > Filesystem
 
 ### Performance Optimizations
-- **Hot path optimizations**: ~76-74% reduction in input latency (210-390ns → 50-100ns per event)
+- **Hot path optimizations**: Significant reduction in input latency
 - **Memory efficiency**: ~75% reduction in DeviceInfo storage
 - **CPU efficiency**: Improved cache utilization and reduced contention
 - **Gaming performance**: Smoother input handling and better responsiveness
@@ -47,16 +49,56 @@ scx_gamer is a Linux sched_ext (eBPF) scheduler designed to minimize input laten
 ## Performance Metrics
 
 ### Current Performance
-- **Input Latency**: ~50-100ns per event (hot path optimizations)
-- **Scheduler Latency**: ~500-800ns average `select_cpu()` latency
-- **Memory Usage**: ~75% reduction in DeviceInfo storage
+- **Memory Usage**: Significant reduction in DeviceInfo storage
 - **CPU Efficiency**: Improved cache utilization and reduced contention
+- **Lock-free Architecture**: Eliminated contention and reduced latency spikes
 
-### Performance Evolution
-- **Original**: ~200-600ns per event (epoll-based)
-- **v1.0.1**: ~45-80ns per event (BPF ring buffer)
-- **v1.0.2**: ~50.7μs baseline (busy polling optimizations)
-- **Current**: ~50-100ns per event (hot path optimizations)
+### Performance Improvements
+- **Memory Efficiency**: Significant reduction in DeviceInfo storage
+- **CPU Efficiency**: Improved cache utilization and reduced contention
+- **Lock-free Architecture**: Eliminated contention and reduced latency spikes
+
+**Key Optimizations:**
+- Lock-free ring buffer: Eliminated contention and reduced latency spikes
+- Bit-packed DeviceInfo: Significant memory reduction with improved cache utilization
+- Direct array indexing: O(1) device lookup without hash overhead
+- Instant-based timing: More accurate latency measurements
+
+### Architecture Components
+
+| Component | Description |
+|-----------|-------------|
+| **Input Event Detection** | BPF fentry hook → ring buffer |
+| **Ring Buffer Processing** | Userspace event processing |
+| **Scheduler Operations** | CPU selection, enqueue, dispatch |
+| **Task Migration** | Context switch overhead |
+| **Frame Presentation** | GPU → Display pipeline |
+
+### Mouse & Keyboard Processing
+- **8kHz Mouse**: 125μs polling interval
+- **Keyboard**: 1ms polling interval
+- **Event Batching**: Processes multiple events per batch for efficiency
+- **Busy Polling**: Eliminates wakeup latency for ultra-low latency mode
+
+### Realistic Latency Expectations
+
+**Hardware Limitations:**
+- **USB Polling**: 8kHz mice poll every 125μs (hardware limitation)
+- **Display Refresh**: 240Hz displays refresh every 4.17ms
+- **GPU Pipeline**: Frame rendering takes 1-3ms depending on complexity
+- **Network Latency**: Online gaming adds 10-50ms network latency
+
+**Software Achievements:**
+- **Lock-free Architecture**: Eliminated contention and reduced latency spikes
+- **Memory Efficiency**: Significant reduction in DeviceInfo storage
+- **Cache Optimization**: Improved cache utilization and reduced contention
+- **Direct Access**: O(1) device lookup without hash overhead
+
+**Why 25μs Target is Unrealistic:**
+- Hardware polling intervals (125μs for 8kHz mouse) are the bottleneck
+- Display refresh rates (4.17ms for 240Hz) limit frame presentation
+- Network latency (10-50ms) dominates online gaming
+- Software optimizations can only reduce overhead, not hardware limits
 
 ## Architecture
 
@@ -331,17 +373,9 @@ sudo ./target/release/scx_gamer \
 ```
 
 ## Performance Monitoring
-
-### Ring Buffer Statistics
 ```
 RING_BUFFER: Input events processed: 1250, batches: 45, avg_events_per_batch: 27.8
-latency: avg=45.2ns min=30ns max=60ns p50=42.1ns p95=55.3ns p99=58.7ns
-```
-
-### Scheduler Performance
-```
-SCHEDULER: select_cpu() latency: avg=650ns min=350ns max=800ns
-Fast path: 60% of calls, Slow path: 30% of calls
+SCHEDULER: Fast path: 60% of calls, Slow path: 30% of calls
 ```
 
 ### Hot Path Optimizations
@@ -534,20 +568,22 @@ sudo scx_gamer --disable-bpf-lsm --disable-wine-detect
 ### Scheduler Overhead (vs CFS)
 | Operation | CFS | scx_gamer | Overhead |
 |-----------|-----|-----------|----------|
-| select_cpu() | ~150ns | 200-800ns | +50-650ns |
-| enqueue() | ~100ns | 150-400ns | +50-300ns |
-| dispatch() | ~80ns | 100-300ns | +20-220ns |
-| Context switch | ~1.5μs | 1.6-1.7μs | +100-200ns |
+| select_cpu() | Low overhead | Moderate overhead | Increased overhead |
+| enqueue() | Low overhead | Moderate overhead | Increased overhead |
+| dispatch() | Low overhead | Moderate overhead | Increased overhead |
+| Context switch | Moderate overhead | Higher overhead | Increased overhead |
 | Total CPU usage | 0.1-0.3% | 0.3-0.8% | +0.2-0.5% |
 
 ### Detection Latency
-| Subsystem | Latency | CPU Overhead |
-|-----------|---------|--------------|
-| BPF LSM game detect | <1ms | 200-800ns per exec |
-| Inotify fallback | 10-50ms | 10-50ms/sec CPU |
-| GPU thread detect | <1ms | 0 (only on first ioctl) |
-| Wine priority detect | <1ms | 1-2μs per priority change |
-| Input event trigger | <500μs | ~1μs per event |
+| Subsystem | Latency | CPU Overhead | Description |
+|-----------|---------|--------------|-------------|
+| **BPF LSM game detect** | <1ms | Low overhead per exec | Kernel-level process detection |
+| **Inotify fallback** | 10-50ms | Moderate CPU overhead | Filesystem monitoring fallback |
+| **GPU thread detect** | <1ms | Low overhead (first ioctl only) | DRM ioctl hook detection |
+| **Wine priority detect** | <1ms | Low overhead per priority change | Wine process priority monitoring |
+| **Input event trigger** | <500μs | Low overhead per event | BPF fentry hook on input_event_raw |
+| **Ring buffer processing** | Low latency | Low overhead per event | Lock-free event processing |
+| **Thread classification** | <1ms | Low overhead per thread | Pattern-based thread identification |
 
 ### Memory Usage
 | Component | Size |
@@ -583,7 +619,7 @@ This project extensively uses AI assistance for code generation and optimization
 
 **Technical constraints:**
 - BPF LSM requires kernel 6.13+ (fallback to inotify for older kernels)
-- High-rate input devices (8kHz mice) incur ~6ms/sec CPU overhead from syscalls
+- High-rate input devices (8kHz mice) incur moderate CPU overhead from syscalls
 - Wine uprobe only works with system Wine installations (not Flatpak/Snap)
 - Cross-NUMA work stealing not implemented (local NUMA node preference only)
 
@@ -642,14 +678,14 @@ RitzDaCat
 
 ### 1.0.3 (2025-01-20)
 - **Hot path optimizations**: Lock-free ring buffer and bit-packed DeviceInfo
-- **Performance improvements**: ~76-74% reduction in input latency
-- **Memory efficiency**: ~75% reduction in DeviceInfo storage
+- **Performance improvements**: Significant reduction in input latency
+- **Memory efficiency**: Significant reduction in DeviceInfo storage
 - **CPU efficiency**: Improved cache utilization and reduced contention
 - **Documentation**: Consolidated and cleaned up for GitHub readability
 
 ### 1.0.2 (2025-01-15)
 - **Ultra-low latency detection systems**: Comprehensive fentry and tracepoint hooks
-- **Performance improvements**: ~100,000x faster detection (200-500ns vs 50-200ms)
+- **Performance improvements**: Significant improvement in detection speed
 - **Enhanced thread classification**: Complete gaming pipeline optimization
 - **Anti-cheat safety**: All new hooks verified as read-only and kernel-side
 
