@@ -9,9 +9,7 @@
 //! direct memory access between kernel (BPF) and userspace, eliminating syscall
 //! overhead for event processing.
 
-// Imports removed - using libbpf_rs::RingBuffer instead of custom implementation
-
-// LocklessRingBuffer removed - using libbpf_rs::RingBuffer instead
+use crossbeam::queue::SegQueue;
 
 /// Input event structure for ring buffer
 /// 
@@ -70,8 +68,8 @@ impl GamerInputEvent {
 pub struct InputRingBufferManager {
     /// Event counter for tracking processed events
     events_processed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// Recent events buffer for processing
-    recent_events: std::sync::Arc<std::sync::Mutex<Vec<GamerInputEvent>>>,
+    /// Recent events buffer for processing (lock-free)
+    recent_events: std::sync::Arc<SegQueue<GamerInputEvent>>,
     /// Performance monitoring
     stats: InputRingBufferStats,
     /// Shutdown flag for cleanup
@@ -116,13 +114,13 @@ impl InputRingBufferManager {
         
         let stats = InputRingBufferStats::default();
         let events_processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recent_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recent_events = Arc::new(SegQueue::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         
         // Clone for thread
-        let thread_events_processed = Arc::clone(&events_processed);
-        let thread_recent_events = Arc::clone(&recent_events);
-        let thread_shutdown = Arc::clone(&shutdown);
+        let thread_events_processed: Arc<std::sync::atomic::AtomicUsize> = Arc::clone(&events_processed);
+        let thread_recent_events: Arc<SegQueue<GamerInputEvent>> = Arc::clone(&recent_events);
+        let thread_shutdown: Arc<std::sync::atomic::AtomicBool> = Arc::clone(&shutdown);
         
         // Build ring buffer consumer with callback
         let mut builder = RingBufferBuilder::new();
@@ -143,15 +141,8 @@ impl InputRingBufferManager {
                     
                     let _latency_ns = current_time.saturating_sub(event.timestamp);
                     
-                    // Store event for processing
-                    if let Ok(mut events) = thread_recent_events.lock() {
-                        events.push(event);
-                        // Keep only recent events (last 100)
-                        if events.len() > 100 {
-                            let drain_count = events.len() - 100;
-                            events.drain(0..drain_count);
-                        }
-                    }
+                    // Store event for processing (lock-free)
+                    thread_recent_events.push(event);
                     
                     // Count processed events
                     thread_events_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -208,19 +199,22 @@ impl InputRingBufferManager {
         let events_processed = self.events_processed.swap(0, std::sync::atomic::Ordering::Relaxed);
         let has_input_activity = events_processed > 0;
         
-        // Process recent events if available
-        if let Ok(mut events) = self.recent_events.lock() {
-            if !events.is_empty() {
-                // Process events and clear buffer
-                let event_count = events.len();
-                events.clear();
-                
-                // Update statistics with actual event count
-                self.stats.total_events += event_count as u64;
-                self.stats.total_batches += 1;
-                self.stats.avg_events_per_batch = 
-                    self.stats.total_events as f64 / self.stats.total_batches as f64;
+        // Process recent events if available (lock-free)
+        let mut event_count = 0;
+        while let Some(_event) = self.recent_events.pop() {
+            event_count += 1;
+            // Prevent unbounded growth - limit to 100 events per batch
+            if event_count > 100 {
+                break;
             }
+        }
+        
+        // Update statistics with actual event count
+        if event_count > 0 {
+            self.stats.total_events += event_count as u64;
+            self.stats.total_batches += 1;
+            self.stats.avg_events_per_batch = 
+                self.stats.total_events as f64 / self.stats.total_batches as f64;
         }
         
         // Update statistics
@@ -318,7 +312,7 @@ impl Default for InputRingBufferManager {
     fn default() -> Self {
         Self {
             events_processed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            recent_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            recent_events: std::sync::Arc::new(SegQueue::new()),
             stats: InputRingBufferStats::default(),
             shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _thread: None,
