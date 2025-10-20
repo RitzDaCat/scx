@@ -65,7 +65,7 @@ The scheduler is designed to be anti-cheat safe by adhering to the following pri
 - Read-only process monitoring (LSM hooks observe, do not modify)
 - Kernel-sanctioned APIs (mainlined in Linux 6.12+)
 
-For detailed safety analysis, see [ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md).
+For detailed safety analysis, see [docs/ANTICHEAT_SAFETY.md](docs/ANTICHEAT_SAFETY.md).
 
 **Fallback mode for compatibility:**
 If anti-cheat systems flag BPF features, fallback mode is available:
@@ -112,7 +112,7 @@ sudo scx_gamer --disable-bpf-lsm --disable-wine-detect
 - **USB audio interface detection**: GoXLR, Focusrite, and other USB audio interfaces
 - **NVMe I/O thread detection**: High page fault rate + I/O wait pattern analysis
 
-For comprehensive implementation details, see [TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md).
+For comprehensive implementation details, see [docs/TECHNICAL_ARCHITECTURE.md](docs/TECHNICAL_ARCHITECTURE.md).
 
 ## Experimental Methodology
 
@@ -426,17 +426,16 @@ score = (1.0 / select_cpu_latency) * 40% +
 ## Documentation
 
 ### Core Documentation
-- **[TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md)** - Detailed implementation and data flows
-- **[ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md)** - Anti-cheat compatibility analysis
-- **[CACHYOS_ARCHITECTURE.md](CACHYOS_ARCHITECTURE.md)** - CachyOS integration architecture
-- **[CACHYOS_INTEGRATION.md](CACHYOS_INTEGRATION.md)** - CachyOS installation guide
-- **[QUICK_START.md](QUICK_START.md)** - 3-step installation for CachyOS
+- **[docs/TECHNICAL_ARCHITECTURE.md](docs/TECHNICAL_ARCHITECTURE.md)** - Detailed implementation and data flows
+- **[docs/ANTICHEAT_SAFETY.md](docs/ANTICHEAT_SAFETY.md)** - Anti-cheat compatibility analysis
+- **[docs/CACHYOS_ARCHITECTURE.md](docs/CACHYOS_ARCHITECTURE.md)** - CachyOS integration architecture
+- **[docs/CACHYOS_INTEGRATION.md](docs/CACHYOS_INTEGRATION.md)** - CachyOS installation guide
+- **[docs/QUICK_START.md](docs/QUICK_START.md)** - 3-step installation for CachyOS
 
 ### ML and Performance
-- **[docs/ML_AUTOTUNE_GUIDE.md](docs/ML_AUTOTUNE_GUIDE.md)** - Automated parameter tuning
-- **[docs/ML_README.md](docs/ML_README.md)** - ML pipeline architecture
-- **[docs/PERFORMANCE_ANALYSIS.md](docs/PERFORMANCE_ANALYSIS.md)** - Latency analysis
-- **[docs/BPF_CODE_REVIEW.md](docs/BPF_CODE_REVIEW.md)** - BPF verifier compliance
+- **[docs/ML.md](docs/ML.md)** - Machine learning autotune guide
+- **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** - Performance analysis and optimization
+- **[docs/THREADS.md](docs/THREADS.md)** - Thread detection and classification
 
 **Complete index**: See [docs/README.md](docs/README.md)
 
@@ -482,7 +481,7 @@ scxctl status
 sudo systemctl stop scx_loader
 ```
 
-For installation details, see [CACHYOS_INTEGRATION.md](CACHYOS_INTEGRATION.md).
+For installation details, see [docs/CACHYOS_INTEGRATION.md](docs/CACHYOS_INTEGRATION.md).
 
 ### Clean Shutdown
 
@@ -973,7 +972,7 @@ sudo scx_gamer --disable-bpf-lsm --disable-wine-detect
 
 3. Report compatibility issue to scx_gamer developers for documentation
 
-For detailed safety analysis, see [ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md).
+For detailed safety analysis, see [docs/ANTICHEAT_SAFETY.md](docs/ANTICHEAT_SAFETY.md).
 
 ### ML Auto-Tuning Not Converging
 
@@ -1151,7 +1150,7 @@ RitzDaCat
 - **Updated priority order**: Complete gaming pipeline optimization from input to display, including hardware responsiveness and file operations
 - **Performance improvements**: ~100,000x faster detection (200-500ns vs 50-200ms) with zero false positives
 - **Anti-cheat safety**: All new hooks verified as read-only and kernel-side, maintaining same safety guarantees
-- **Updated documentation**: Comprehensive README.md and ANTICHEAT_SAFETY.md updates reflecting new detection systems
+- **Updated documentation**: Comprehensive README.md and docs/ANTICHEAT_SAFETY.md updates reflecting new detection systems
 
 ### 1.0.2 (2025-01-15)
 - Optimized thread priority order for gaming performance (Input > GPU > Compositor > Audio > Network)
@@ -1176,4 +1175,4 @@ RitzDaCat
 
 - GitHub Issues: https://github.com/sched-ext/scx/issues
 - Documentation: [docs/README.md](docs/README.md)
-- Anti-cheat concerns: [ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md)
+- Anti-cheat concerns: [docs/ANTICHEAT_SAFETY.md](docs/ANTICHEAT_SAFETY.md)

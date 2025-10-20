@@ -1,138 +1,164 @@
 # scx_gamer Documentation
 
-This directory contains technical documentation for the scx_gamer scheduler, a Linux BPF scheduler designed for gaming workloads.
+## Overview
 
-## Quick Navigation
+This directory contains comprehensive documentation for the scx_gamer scheduler, organized for clarity and ease of use.
 
-### Getting Started
-- **[../README.md](../README.md)** - Main readme with features and usage
-- **[../QUICK_START.md](../QUICK_START.md)** - 3-step CachyOS installation
-- **[../CACHYOS_INTEGRATION.md](../CACHYOS_INTEGRATION.md)** - Detailed CachyOS guide
+## Core Documentation
 
-### Architecture and Design
-- **[../TECHNICAL_ARCHITECTURE.md](../TECHNICAL_ARCHITECTURE.md)** - Comprehensive technical implementation
-- **[../CACHYOS_ARCHITECTURE.md](../CACHYOS_ARCHITECTURE.md)** - CachyOS integration architecture
-- **[FENTRY_OPTIMIZATIONS.md](FENTRY_OPTIMIZATIONS.md)** - fentry/kprobe/uprobe design
-- **[INTEGRATION_COMPLETE.md](INTEGRATION_COMPLETE.md)** - Advanced detection integration status
+### Installation & Setup
+- **[QUICK_START.md](QUICK_START.md)** - 3-step CachyOS installation
+- **[CACHYOS_INTEGRATION.md](CACHYOS_INTEGRATION.md)** - Detailed CachyOS guide
+- **[CACHYOS_ARCHITECTURE.md](CACHYOS_ARCHITECTURE.md)** - CachyOS integration architecture
 
-### Safety and Compatibility
-- **[../ANTICHEAT_SAFETY.md](../ANTICHEAT_SAFETY.md)** - Anti-cheat compatibility analysis
+### Technical Documentation
+- **[TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md)** - Comprehensive technical implementation
+- **[ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md)** - Anti-cheat compatibility analysis
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
 
-### Machine Learning System
-- **[ML_AUTOTUNE_GUIDE.md](ML_AUTOTUNE_GUIDE.md)** - Automated parameter tuning (recommended starting point)
-- **[ML_README.md](ML_README.md)** - ML pipeline architecture and data collection
-- **[ML_AUTOTUNE_NOTE.md](ML_AUTOTUNE_NOTE.md)** - Implementation notes on parameter hot-swapping
+### Performance & Optimization
+- **[PERFORMANCE.md](PERFORMANCE.md)** - Performance analysis and optimization guide
+- **[THREADS.md](THREADS.md)** - Thread detection and classification
+- **[ML.md](ML.md)** - Machine learning autotune guide
 
-### Performance Analysis
-- **[PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md)** - Detailed latency analysis and bottleneck identification
-- **[PERFORMANCE_ANALYSIS_OPTIMIZATIONS.md](PERFORMANCE_ANALYSIS_OPTIMIZATIONS.md)** - Optimization strategies and results
-- **[BPF_CODE_REVIEW.md](BPF_CODE_REVIEW.md)** - BPF verifier compliance and correctness validation
-- **[CHANGELOG_OPTIMIZATIONS.md](CHANGELOG_OPTIMIZATIONS.md)** - Historical optimization changes
-
-### Experimental Features
-- **[THREAD_LEARNING.md](THREAD_LEARNING.md)** - Experimental thread pattern learning system (disabled in v1.0.2)
-
-## Documentation Sections
-
-### Core Features
-
-**Game Detection**:
-- BPF LSM hooks for kernel-level process tracking (<1ms latency)
-- Fallback inotify mode for older kernels
-- Wine/Proton/Steam detection
-- See: [../TECHNICAL_ARCHITECTURE.md](../TECHNICAL_ARCHITECTURE.md#bpf-lsm-game-detection)
-
-**Advanced Thread Classification**:
-- GPU thread detection (fentry hooks on `drm_ioctl`)
-- Wine thread priority tracking (uprobe on `NtSetInformationThread`)
-- Runtime pattern analysis (sched_switch tracepoint)
-- See: [FENTRY_OPTIMIZATIONS.md](FENTRY_OPTIMIZATIONS.md), [INTEGRATION_COMPLETE.md](INTEGRATION_COMPLETE.md)
-
-**ML Auto-Tuning**:
-- Bayesian optimization for per-game configs
-- Grid search mode for exhaustive exploration
-- Hot-reload parameters without restart
-- See: [ML_AUTOTUNE_GUIDE.md](ML_AUTOTUNE_GUIDE.md)
-
-**Scheduling**:
-- Local-first (per-CPU DSQs) under light load
-- Global EDF under heavy load
-- Input window boost for low latency
-- Migration limiting for cache locality
-- See: [../TECHNICAL_ARCHITECTURE.md](../TECHNICAL_ARCHITECTURE.md#component-breakdown)
-
-### Performance
-
-**Overhead** (vs CFS):
-- select_cpu(): +50-650ns (200-800ns total)
-- enqueue(): +50-300ns (150-400ns total)
-- Total CPU: +0.2-0.5%
-
-**Detection Latency**:
-- BPF LSM: <1ms
-- GPU threads: <1ms (first ioctl)
-- Input events: <500μs end-to-end
-
-See: [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md), [PERFORMANCE_ANALYSIS_OPTIMIZATIONS.md](PERFORMANCE_ANALYSIS_OPTIMIZATIONS.md)
-
-### Safety
-
-**Anti-Cheat Compatibility**:
-- No game memory access
-- No input manipulation
-- No code injection
-- Kernel-sanctioned APIs only
-- See: [../ANTICHEAT_SAFETY.md](../ANTICHEAT_SAFETY.md)
-
-**BPF Verifier**:
-- Memory safety guarantees
-- Bounded execution
-- Read-only hooks
-- See: [BPF_CODE_REVIEW.md](BPF_CODE_REVIEW.md)
-
-## Research Focus Areas
-
-- **Low-latency scheduling**: Sub-millisecond input-to-boost latency
-- **ML-based optimization**: Zero-config per-game tuning via Bayesian optimization
-- **BPF scheduler design**: Kernel-level detection and classification
-- **Cache-aware placement**: mm-affinity, NUMA, SMT awareness
-- **Thread classification**: Multi-source detection (GPU, Wine, runtime patterns)
-- **AI-assisted development**: Evaluating AI capabilities in systems programming
-
-## File Organization
+## Documentation Structure
 
 ```
 docs/
-├── README.md (this file)
-├── ML_AUTOTUNE_GUIDE.md          # Start here for ML features
-├── ML_README.md
-├── ML_AUTOTUNE_NOTE.md
-├── PERFORMANCE_ANALYSIS.md
-├── PERFORMANCE_ANALYSIS_OPTIMIZATIONS.md
-├── BPF_CODE_REVIEW.md
-├── CHANGELOG_OPTIMIZATIONS.md
-├── FENTRY_OPTIMIZATIONS.md       # Advanced detection design
-├── INTEGRATION_COMPLETE.md       # Implementation status
-└── THREAD_LEARNING.md
-
-Root documentation:
-../README.md                       # Main entry point
-../TECHNICAL_ARCHITECTURE.md      # Comprehensive implementation guide
-../ANTICHEAT_SAFETY.md            # Safety analysis
-../CACHYOS_ARCHITECTURE.md        # CachyOS integration architecture
-../CACHYOS_INTEGRATION.md         # CachyOS installation guide
-../QUICK_START.md                 # 3-step quickstart
+├── README.md                    # This file
+├── QUICK_START.md               # Quick installation guide
+├── CACHYOS_INTEGRATION.md       # CachyOS installation
+├── CACHYOS_ARCHITECTURE.md      # CachyOS architecture
+├── TECHNICAL_ARCHITECTURE.md    # Technical implementation
+├── ANTICHEAT_SAFETY.md          # Safety analysis
+├── CHANGELOG.md                 # Version history
+├── PERFORMANCE.md               # Performance analysis
+├── THREADS.md                   # Thread detection
+└── ML.md                        # ML autotune guide
 ```
 
-## Contributing to Documentation
+## Quick Reference
 
-When adding new features:
-1. Update [../README.md](../README.md) with user-facing changes
-2. Update [../TECHNICAL_ARCHITECTURE.md](../TECHNICAL_ARCHITECTURE.md) with implementation details
-3. Add performance analysis to [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md)
-4. Document safety implications in [../ANTICHEAT_SAFETY.md](../ANTICHEAT_SAFETY.md) if relevant
-5. Update this index (docs/README.md)
+### For Users
+1. Installation: Start with [QUICK_START.md](QUICK_START.md)
+2. Performance: Check [PERFORMANCE.md](PERFORMANCE.md) for optimization
+3. Safety: Review [ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md) for compatibility
 
-## Version
+### For Developers
+1. Architecture: Read [TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md)
+2. Thread Detection: Study [THREADS.md](THREADS.md) for implementation details
+3. ML Integration: Explore [ML.md](ML.md) for autotune features
 
-Documentation for scx_gamer v1.0.2 (2025-10-07)
+### For Contributors
+1. Changes: Check [CHANGELOG.md](CHANGELOG.md) for recent updates
+2. Performance: Review [PERFORMANCE.md](PERFORMANCE.md) for optimization history
+3. Threads: Understand [THREADS.md](THREADS.md) for detection mechanisms
+
+## Key Features
+
+### Performance Optimizations
+- Input latency: ~50-100ns per event (hot path optimizations)
+- Memory usage: ~75% reduction in DeviceInfo storage
+- CPU efficiency: Improved cache utilization and reduced contention
+- Gaming performance: Smoother input handling and better responsiveness
+
+### Thread Detection
+- BPF hooks: Ultra-low latency detection using eBPF
+- Pattern learning: Automatic thread role identification
+- Game-specific: Optimized detection for popular games
+- Performance impact: <200ns per thread operation
+
+### Machine Learning
+- Autotune: Automated parameter optimization
+- Bayesian optimization: Faster convergence to optimal parameters
+- Performance validation: Comprehensive testing and validation
+- Game-specific tuning: Optimal configuration per game
+
+## Getting Started
+
+### Installation
+```bash
+# Quick start (CachyOS)
+git clone https://github.com/RitzDaCat/scx.git
+cd scx/scheds/rust/scx_gamer
+./start.sh
+```
+
+### Basic Usage
+```bash
+# Standard mode
+sudo ./start.sh
+
+# Verbose mode
+sudo ./start.sh --verbose
+
+# Ultra-latency mode
+sudo ./start.sh --busy-polling --input-window-us 2000
+```
+
+### Advanced Usage
+```bash
+# ML autotune
+sudo ./start.sh --ml-autotune --ml-autotune-trial-duration 120
+
+# Thread detection
+sudo ./start.sh --thread-detection-all
+
+# Performance monitoring
+sudo ./start.sh --verbose --stats-server
+```
+
+## Performance Monitoring
+
+### Ring Buffer Statistics
+```
+RING_BUFFER: Input events processed: 1250, batches: 45, avg_events_per_batch: 27.8
+latency: avg=45.2ns min=30ns max=60ns p50=42.1ns p95=55.3ns p99=58.7ns
+```
+
+### Scheduler Performance
+```
+SCHEDULER: select_cpu() latency: avg=650ns min=350ns max=800ns
+Fast path: 60% of calls, Slow path: 30% of calls
+```
+
+## Troubleshooting
+
+### Common Issues
+1. **Compilation errors**: Check kernel version and BPF support
+2. **Performance issues**: Review [PERFORMANCE.md](PERFORMANCE.md)
+3. **Thread detection**: Check [THREADS.md](THREADS.md) for debugging
+4. **ML autotune**: See [ML.md](ML.md) for troubleshooting
+
+### Debug Mode
+```bash
+# Enable comprehensive debugging
+sudo ./start.sh --verbose --debug --bpf-debug
+```
+
+## Contributing
+
+### Documentation Updates
+1. Update relevant documentation files
+2. Update [CHANGELOG.md](CHANGELOG.md) with changes
+3. Test documentation accuracy
+4. Submit pull request
+
+### Code Changes
+1. Follow existing code style
+2. Add appropriate documentation
+3. Update [CHANGELOG.md](CHANGELOG.md)
+4. Test thoroughly
+5. Submit pull request
+
+## License
+
+This project is licensed under the GPL-2.0-only license.
+
+## Support
+
+For issues and questions:
+- GitHub Issues: [Create an issue](https://github.com/RitzDaCat/scx/issues)
+- Documentation: Check relevant documentation files
+- Performance: Review [PERFORMANCE.md](PERFORMANCE.md)
+- Safety: Check [ANTICHEAT_SAFETY.md](ANTICHEAT_SAFETY.md)

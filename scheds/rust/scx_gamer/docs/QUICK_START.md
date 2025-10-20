@@ -2,12 +2,12 @@
 
 ## Ultra-Low Latency Gaming Scheduler
 
-scx_gamer is a Linux sched_ext scheduler optimized for gaming with **ultra-low latency detection systems**:
+scx_gamer is a Linux sched_ext scheduler optimized for gaming with ultra-low latency detection systems:
 
-- **~100,000x faster detection** than heuristic approaches (200-500ns vs 50-200ms)
-- **Zero false positives** - only detects actual kernel operations
-- **Complete gaming pipeline optimization** from input to display
-- **Anti-cheat safe** - read-only kernel-side monitoring
+- ~100,000x faster detection than heuristic approaches (200-500ns vs 50-200ms)
+- Zero false positives - only detects actual kernel operations
+- Complete gaming pipeline optimization from input to display
+- Anti-cheat safe - read-only kernel-side monitoring
 
 ## Installation (3 steps)
 
