@@ -566,13 +566,19 @@ sudo scx_gamer --disable-bpf-lsm --disable-wine-detect
 ## Performance Characteristics
 
 ### Scheduler Overhead (vs CFS)
-| Operation | CFS | scx_gamer | Overhead |
-|-----------|-----|-----------|----------|
-| select_cpu() | Low overhead | Moderate overhead | Increased overhead |
-| enqueue() | Low overhead | Moderate overhead | Increased overhead |
-| dispatch() | Low overhead | Moderate overhead | Increased overhead |
-| Context switch | Moderate overhead | Higher overhead | Increased overhead |
-| Total CPU usage | 0.1-0.3% | 0.3-0.8% | +0.2-0.5% |
+| Operation | CFS | scx_gamer | Trade-off |
+|-----------|-----|-----------|-----------|
+| select_cpu() | Simple O(1) lookup | BPF-based classification | Higher overhead for intelligent placement |
+| enqueue() | Basic priority queue | Enhanced boost calculation | Additional processing for gaming optimization |
+| dispatch() | Standard task dispatch | Gaming-aware scheduling | Extra logic for thread prioritization |
+| Context switch | Standard kernel overhead | Same as CFS | No additional overhead |
+| Total CPU usage | 0.1-0.3% | 0.3-0.8% | Acceptable trade-off for gaming benefits |
+
+**Why Higher Overhead is Acceptable:**
+- Gaming workloads benefit significantly from intelligent thread placement
+- Input latency reduction outweighs scheduler overhead
+- Better frame time consistency improves gaming experience
+- Overhead is minimal compared to game processing time
 
 ### Detection Latency
 | Subsystem | Latency | CPU Overhead | Description |
@@ -592,6 +598,91 @@ sudo scx_gamer --disable-bpf-lsm --disable-wine-detect
 | BPF maps (data) | ~2-5MB |
 | Userspace binary | ~8MB (stripped) |
 | Total runtime RSS | ~15-20MB |
+
+## Input Processing Comparison
+
+### scx_gamer Input Path
+```
+Hardware Input (Mouse/Keyboard)
+    ↓
+USB Controller (125μs polling)
+    ↓
+Kernel evdev Driver
+    ↓
+BPF fentry Hook (input_event_raw)
+    ↓
+BPF Ring Buffer (Direct Memory Access)
+    ↓
+Userspace Ring Buffer Consumer
+    ↓
+Scheduler Boost Trigger
+    ↓
+Game Thread Prioritization
+    ↓
+Frame Rendering
+    ↓
+Display (4.17ms @ 240Hz)
+```
+
+### EEVDF (Linux Default) Input Path
+```
+Hardware Input (Mouse/Keyboard)
+    ↓
+USB Controller (125μs polling)
+    ↓
+Kernel evdev Driver
+    ↓
+epoll_wait() (Wakeup Latency)
+    ↓
+Userspace Event Processing
+    ↓
+Standard Scheduler (CFS/EEVDF)
+    ↓
+Generic Thread Scheduling
+    ↓
+Frame Rendering
+    ↓
+Display (4.17ms @ 240Hz)
+```
+
+### Windows Raw Input Path
+```
+Hardware Input (Mouse/Keyboard)
+    ↓
+USB Controller (125μs polling)
+    ↓
+Windows Kernel Input Stack
+    ↓
+Raw Input API (Multiple Layers)
+    ↓
+DirectInput/XInput Translation
+    ↓
+Windows Scheduler (Priority Classes)
+    ↓
+Game Thread Scheduling
+    ↓
+DirectX/D3D Rendering
+    ↓
+Display (4.17ms @ 240Hz)
+```
+
+### Key Differences
+
+| Aspect | scx_gamer | EEVDF | Windows Raw Input |
+|--------|-----------|-------|-------------------|
+| **Kernel Integration** | Direct BPF hooks | Standard evdev | Windows kernel stack |
+| **Userspace Communication** | Ring buffer (direct) | epoll (syscall) | Raw Input API |
+| **Scheduler Awareness** | Gaming-optimized | Generic | Priority classes |
+| **Thread Classification** | Automatic BPF detection | Manual tuning | Manual configuration |
+| **Input Latency** | Optimized path | Standard path | Multiple translation layers |
+| **Gaming Focus** | Built-in | None | Partial (DirectInput) |
+
+**scx_gamer Advantages:**
+- **Direct kernel-to-userspace communication** via ring buffer
+- **Automatic thread classification** using BPF hooks
+- **Gaming-optimized scheduling** with intelligent CPU placement
+- **Reduced translation layers** compared to Windows
+- **Real-time input processing** with busy polling mode
 
 ## AI-Assisted Development
 
