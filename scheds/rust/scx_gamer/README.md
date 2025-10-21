@@ -100,6 +100,13 @@ scx_gamer is a Linux sched_ext (eBPF) scheduler designed to minimize input laten
 - Network latency (10-50ms) dominates online gaming
 - Software optimizations can only reduce overhead, not hardware limits
 
+### Latency scopes and units
+
+- Per-event hot-path: nanoseconds (ns) for `select_cpu()`, `enqueue()`, `dispatch()`, ring buffer push/read.
+- End-to-end input chain: microseconds (μs) from evdev input to scheduler boost trigger.
+- Input-to-photon envelope: milliseconds (ms), dominated by USB polling and display refresh.
+- Unless noted, figures refer to per-event p50 and exclude hardware polling and display refresh.
+
 ## Architecture
 
 ### Userspace Components (Rust)
@@ -585,11 +592,11 @@ sudo scx_gamer --disable-bpf-lsm --disable-wine-detect
 |-----------|---------|--------------|-------------|
 | **BPF LSM game detect** | <1ms | Low overhead per exec | Kernel-level process detection |
 | **Inotify fallback** | 10-50ms | Moderate CPU overhead | Filesystem monitoring fallback |
-| **GPU thread detect** | <1ms | Low overhead (first ioctl only) | DRM ioctl hook detection |
-| **Wine priority detect** | <1ms | Low overhead per priority change | Wine process priority monitoring |
-| **Input event trigger** | <500μs | Low overhead per event | BPF fentry hook on input_event_raw |
-| **Ring buffer processing** | Low latency | Low overhead per event | Lock-free event processing |
-| **Thread classification** | <1ms | Low overhead per thread | Pattern-based thread identification |
+| **GPU thread detect** | 200-500ns | Low overhead (first ioctl only) | DRM ioctl hook detection |
+| **Wine priority detect** | 1-2μs | Low overhead per priority change | Wine process priority monitoring |
+| **Input event trigger** | ~50ns | Low overhead per event | BPF fentry hook on input_event_raw |
+| **Ring buffer processing** | ~30-60ns | Low overhead per event | Lock-free event processing |
+| **Thread classification** | 100-200ns | Low overhead per thread | Pattern-based thread identification |
 
 ### Memory Usage
 | Component | Size |
@@ -620,12 +627,12 @@ Scheduler Boost Trigger
 Game Thread Prioritization
     ↓ (~1.5-1.7μs)
 Context Switch to Game Thread
-    ↓ (~1-3ms)
+    ↓ (~1.5-1.7μs)
 Frame Rendering
     ↓ (4.17ms @ 240Hz)
 Display
 ```
-**Total Software Latency: ~2-4μs**
+**Total software hot-path (per-event, p50): ~2-4μs**
 
 ### EEVDF (Linux Default) Input Path
 ```
@@ -648,7 +655,7 @@ Frame Rendering
 Display
     ↓ (4.17ms @ 240Hz)
 ```
-**Total Software Latency: ~3-5μs**
+**Total software hot-path (per-event, p50): ~3-5μs**
 
 ### Windows Raw Input Path
 ```
@@ -665,12 +672,12 @@ DirectInput/XInput Translation
 Windows Scheduler (Priority Classes)
     ↓ (~1.5-1.7μs)
 Context Switch to Game Thread
-    ↓ (~1-3ms)
+    ↓ (~1.5-1.7μs)
 DirectX/D3D Rendering
     ↓ (4.17ms @ 240Hz)
 Display
 ```
-**Total Software Latency: ~4-7μs**
+**Total software hot-path (per-event, p50): ~4-7μs**
 
 ### Key Differences
 

@@ -19,7 +19,9 @@ use crossbeam::queue::SegQueue;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GamerInputEvent {
-    /// Event timestamp in nanoseconds
+    /// Event timestamp in nanoseconds (BPF monotonic time)
+    /// Note: This is BPF timestamp (scx_bpf_now) for event ordering.
+    /// For accurate latency measurement, we capture Instant at userspace.
     pub timestamp: u64,
     /// Event type (key, mouse movement, etc.)
     pub event_type: u16,
@@ -30,6 +32,7 @@ pub struct GamerInputEvent {
     /// Device identifier
     pub device_id: u32,
 }
+
 
 // Legacy InputEvent removed - using GamerInputEvent instead
 
@@ -89,13 +92,13 @@ pub struct InputRingBufferStats {
     pub avg_events_per_batch: f64,
     /// Processing time in nanoseconds
     pub total_processing_time_ns: u64,
-    /// Average latency per event in nanoseconds
+    /// Average latency per event in nanoseconds (userspace Instant-based)
     pub avg_latency_ns: f64,
     /// Maximum latency observed in nanoseconds
     pub max_latency_ns: u64,
     /// Minimum latency observed in nanoseconds
     pub min_latency_ns: u64,
-    /// Latency samples for percentile calculation
+    /// Latency samples for percentile calculation (userspace Instant-based)
     pub latency_samples: Vec<u64>,
 }
 
@@ -133,13 +136,6 @@ impl InputRingBufferManager {
                 
                 // Filter for relevant input events (keyboard/mouse)
                 if event.is_keyboard() || event.is_mouse_movement() || event.is_mouse_button() {
-                    // HOT PATH OPTIMIZATION: Use Instant for userspace timing (saves ~80-180ns per event)
-                    // BPF timestamp is already monotonic (scx_bpf_now), userspace uses Instant for consistency
-                    let _current_time = std::time::Instant::now();
-                    
-                    // Note: For accurate latency measurement, we'd need to capture Instant at BPF side
-                    // Current approach uses BPF timestamp for event ordering and Instant for userspace timing
-                    
                     // Store event for processing (lock-free)
                     thread_recent_events.push(event);
                     
@@ -208,6 +204,7 @@ impl InputRingBufferManager {
             }
         }
         
+        
         // Update statistics with actual event count
         if event_count > 0 {
             self.stats.total_events += event_count as u64;
@@ -227,7 +224,7 @@ impl InputRingBufferManager {
         let processing_time = start_time.elapsed();
         self.stats.total_processing_time_ns += processing_time.as_nanos() as u64;
         
-        // Update latency statistics
+        // Update latency statistics (userspace Instant-based)
         if events_processed > 0 {
             let avg_latency = processing_time.as_nanos() as f64 / events_processed as f64;
             self.stats.avg_latency_ns = (self.stats.avg_latency_ns * (self.stats.total_events - events_processed as u64) as f64 + avg_latency * events_processed as f64) / self.stats.total_events as f64;
@@ -248,10 +245,19 @@ impl InputRingBufferManager {
             }
         }
         
+        
         (events_processed, has_input_activity)
     }
     
     // get_recent_events method removed - not used in main loop
+    
+    /// Get latency percentiles for userspace processing
+    /// 
+    /// # Returns
+    /// * `(p50, p95, p99)` - 50th, 95th, and 99th percentiles in nanoseconds
+    pub fn get_latency_percentiles(&self) -> (f64, f64, f64) {
+        self.calculate_percentiles(&self.stats.latency_samples)
+    }
     
     /// Check if events are available in the ring buffer
     /// 
@@ -272,22 +278,25 @@ impl InputRingBufferManager {
         &self.stats
     }
     
-    /// Get latency percentiles
+    /// Calculate percentiles from a vector of latency samples
+    /// 
+    /// # Arguments
+    /// * `samples` - Vector of latency samples in nanoseconds
     /// 
     /// # Returns
-    /// * `(f64, f64, f64)` - (p50, p95, p99) latency percentiles in nanoseconds
-    pub fn get_latency_percentiles(&self) -> (f64, f64, f64) {
-        if self.stats.latency_samples.is_empty() {
+    /// * `(p50, p95, p99)` - 50th, 95th, and 99th percentiles in nanoseconds
+    fn calculate_percentiles(&self, samples: &[u64]) -> (f64, f64, f64) {
+        if samples.is_empty() {
             return (0.0, 0.0, 0.0);
         }
         
-        let mut samples = self.stats.latency_samples.clone();
-        samples.sort();
+        let mut sorted_samples = samples.to_vec();
+        sorted_samples.sort();
         
-        let len = samples.len();
-        let p50 = samples[len * 50 / 100] as f64;
-        let p95 = samples[len * 95 / 100] as f64;
-        let p99 = samples[len * 99 / 100] as f64;
+        let len = sorted_samples.len();
+        let p50 = sorted_samples[len * 50 / 100] as f64;
+        let p95 = sorted_samples[len * 95 / 100] as f64;
+        let p99 = sorted_samples[len * 99 / 100] as f64;
         
         (p50, p95, p99)
     }

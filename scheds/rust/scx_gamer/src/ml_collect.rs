@@ -221,7 +221,7 @@ impl MLCollector {
         let sample_count = self.samples.len();
 
         // PERF: Use drain to move data without cloning (saves allocation for 100+ samples)
-        data.samples.extend(self.samples.drain(..));
+        data.samples.append(&mut self.samples);
         if data.best_score.is_none() || current_score > data.best_score.unwrap() {
             data.best_score = Some(current_score);
             data.best_config = Some(self.config.clone());
@@ -350,7 +350,7 @@ impl MLCollector {
 
             // Track performance by configuration
             let config_key = Self::config_to_key(&sample.config);
-            let score = self.calculate_score(&[sample.clone()]);
+            let score = self.calculate_score(std::slice::from_ref(sample));
             *config_perf.entry(config_key).or_insert(0.0) += score;
         }
 
