@@ -83,8 +83,7 @@ impl CpuInfo {
 
         // Fallback: use first 2-3 meaningful parts
         parts.iter()
-            .take(3)
-            .map(|s| *s)
+            .take(3).copied()
             .collect::<Vec<_>>()
             .join("_")
     }

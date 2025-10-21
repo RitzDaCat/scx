@@ -20,6 +20,7 @@ alwaysApply: true
 * **Comments:** Code must be **verbosely commented**.
     * **What:** Explain *what* each significant function or block of code is doing.
     * **Why:** Justify *why* a specific algorithm, data structure, or pattern was chosen (e.g., "Using a dictionary for O(1) lookup", "Avoiding allocation in update loop for framerate stability").
+    * **Rules:** Never allow deadcode, follow best practices for optimal performance.
 * **Naming:** Use clear, descriptive, and unambiguous variable and function names.
 * **Conventions:** Adhere strictly to the idiomatic style and conventions of the target language (e.g., PEP 8 for Python).
 
@@ -30,7 +31,7 @@ alwaysApply: true
 * **Policy:** Proactively identify and mitigate common security vulnerabilities (e.g., SQL injection, XSS, improper input validation) relevant to the code.
 
 # Dependencies
-* **Policy:** Do not introduce new third-party libraries or dependencies unless explicitly discussed and approved.
+* **Policy:** Do not introduce new third-party libraries or dependencies unless explicitly discussed and approved. 
 
 # Output Format
 * **Documentation:** Do not generate any external documentation (e.g., READMEs, help files) unless explicitly instructed.

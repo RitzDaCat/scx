@@ -6,7 +6,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use udev;
 
 // OPTIMIZATION: CPU affinity pinning for input handling thread
 // Improves cache locality and reduces context switching overhead
@@ -61,15 +60,11 @@ fn enable_kernel_busy_polling() -> Result<(), std::io::Error> {
         
         // Try to enable busy polling for input devices
         if let Ok(mut file) = File::create("/sys/module/core/parameters/busy_poll") {
-            if let Err(e) = file.write_all(busy_poll_value.as_bytes()) {
-                return Err(e);
-            }
+            file.write_all(busy_poll_value.as_bytes())?
         }
         
         if let Ok(mut file) = File::create("/sys/module/core/parameters/busy_read") {
-            if let Err(e) = file.write_all(busy_poll_value.as_bytes()) {
-                return Err(e);
-            }
+            file.write_all(busy_poll_value.as_bytes())?
         }
     }
     
@@ -1133,16 +1128,16 @@ impl<'a> Scheduler<'a> {
             |trig, skel, lane| {
                 match lane {
                     InputLane::Mouse => {
-                        let _ = trig.trigger_input_with_napi_lane(skel, lane);
+                        trig.trigger_input_with_napi_lane(skel, lane);
                     }
                     _ => {
-                        let _ = trig.trigger_input_lane(skel, lane);
+                        trig.trigger_input_lane(skel, lane);
                     }
                 }
             }
         } else {
             |trig, skel, lane| {
-                let _ = trig.trigger_input_lane(skel, lane);
+                trig.trigger_input_lane(skel, lane);
             }
         };
 
@@ -1188,7 +1183,7 @@ impl<'a> Scheduler<'a> {
             epoll_fd: None,
             input_fd_info_vec,
             registered_epoll_fds: FxHashSet::default(),
-            trig: trigger::BpfTrigger::default(),
+            trig: trigger::BpfTrigger,
             input_trigger_fn,
             bpf_game_detector,
             game_detector: game_detector_fallback,
@@ -1246,7 +1241,7 @@ impl<'a> Scheduler<'a> {
         // Get detected game name for display in stats
         let fg_app = self.get_detected_game_info()
             .map(|g| g.name)
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
 
         // Use detected_fg_tgid if available, fallback to foreground_tgid
         let fg_pid = if bss.detected_fg_tgid > 0 {
@@ -1312,7 +1307,7 @@ impl<'a> Scheduler<'a> {
             timer_elapsed_ns: bss.timer_elapsed_ns_total,
             idle_pick: bss.nr_idle_cpu_pick,
             mm_hint_hit: bss.nr_mm_hint_hit,
-            fg_cpu_pct: if bss.total_runtime_ns_total > 0 { (bss.fg_runtime_ns_total.saturating_mul(100) / bss.total_runtime_ns_total) as u64 } else { 0 },
+            fg_cpu_pct: if bss.total_runtime_ns_total > 0 { bss.fg_runtime_ns_total.saturating_mul(100) / bss.total_runtime_ns_total } else { 0 },
             input_trig: bss.nr_input_trig,
             frame_trig: bss.nr_frame_trig,
             sync_wake_fast: bss.nr_sync_wake_fast,
@@ -1518,7 +1513,7 @@ impl<'a> Scheduler<'a> {
         let watchdog_enabled = self.opts.watchdog_secs > 0;
         let mut last_dispatch_total: u64 = {
             let bss = self.skel.maps.bss_data.as_ref().unwrap();
-            (bss.nr_direct_dispatches as u64) + (bss.nr_shared_dispatches as u64)
+            bss.nr_direct_dispatches + bss.nr_shared_dispatches
         };
         let mut last_progress_t = Instant::now();
         let mut last_watchdog_check = Instant::now();
@@ -1609,7 +1604,7 @@ impl<'a> Scheduler<'a> {
                 }
             } else {
                 // Standard epoll with timeout for responsive shutdown and stats
-                const EPOLL_TIMEOUT_MS: u16 = 50;
+                const EPOLL_TIMEOUT_MS: u16 = 1; // Reduced from 50ms to 1ms for lower latency
                 match self.epoll_fd.as_ref().unwrap().wait(&mut events, Some(EPOLL_TIMEOUT_MS)) {
                     Ok(_) => { /* Process events below */ },
                     Err(e) if e == nix::errno::Errno::EINTR => continue,  // Interrupted by signal
@@ -1913,7 +1908,7 @@ impl<'a> Scheduler<'a> {
             if watchdog_enabled && last_watchdog_check.elapsed() >= Duration::from_millis(100) {
                 last_watchdog_check = Instant::now();
                 let bss = self.skel.maps.bss_data.as_ref().unwrap();
-                let dispatch_total = (bss.nr_direct_dispatches as u64) + (bss.nr_shared_dispatches as u64);
+                let dispatch_total = bss.nr_direct_dispatches + bss.nr_shared_dispatches;
                 if dispatch_total != last_dispatch_total {
                     last_dispatch_total = dispatch_total;
                     last_progress_t = Instant::now();

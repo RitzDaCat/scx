@@ -271,7 +271,7 @@ impl HistoricalData {
         self.latency_dispatch.push(metrics.prof_dispatch_avg_ns);
         self.migrations.push(metrics.migrations);
         self.mig_blocked.push(metrics.mig_blocked);
-        self.input_rate.push(metrics.input_trigger_rate as u64);
+        self.input_rate.push(metrics.input_trigger_rate);
         self.direct_pct.push(direct_pct);
         self.edf_pct.push(edf_pct);
         self.timestamps.push(Instant::now());
@@ -1924,7 +1924,7 @@ fn render_thread_breakdown(f: &mut Frame, area: Rect, metrics: &Metrics, state: 
         Row::new(vec![Span::raw("Background"), Span::raw(sanitize(metrics.background_threads).to_string()), Span::raw("-"), Span::raw("Rate limited")]),
     ];
 
-    let table = Table::new(rows.into_iter(), [
+    let table = Table::new(rows, [
         Constraint::Percentage(25),
         Constraint::Length(6),
         Constraint::Length(7),

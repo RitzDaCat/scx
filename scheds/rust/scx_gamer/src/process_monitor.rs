@@ -152,7 +152,7 @@ fn get_gpu_usage_nvidia(pid: u32) -> Option<f64> {
     // Run nvidia-smi to get per-process GPU usage
     // Format: nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits
     let output = std::process::Command::new("nvidia-smi")
-        .args(&[
+        .args([
             "--query-compute-apps=pid,used_memory",
             "--format=csv,noheader,nounits"
         ])

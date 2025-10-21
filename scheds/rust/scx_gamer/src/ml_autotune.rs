@@ -349,7 +349,7 @@ impl MLAutotuner {
             ));
             if result.config.mm_affinity { report.push_str("   --mm-affinity\n"); }
             if result.config.avoid_smt { report.push_str("   --avoid-smt\n"); }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Best config command

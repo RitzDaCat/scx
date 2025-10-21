@@ -57,7 +57,7 @@ pub fn trigger_napi_softirq_window(skel: &mut crate::BpfSkel) -> Result<(), u32>
 pub fn trigger_input_with_napi(skel: &mut crate::BpfSkel) -> Result<(), u32> {
     // ZERO-LATENCY: Execute both syscalls immediately for input + NAPI windows
     // First activate input window
-    let _ = trigger_input_window(skel)?;
+    trigger_input_window(skel)?;
 
     // Then activate NAPI window
     let prog = &mut skel.progs.set_napi_softirq_window;
