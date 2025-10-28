@@ -105,6 +105,28 @@ pub struct Metrics {
     pub fentry_gaming_events: u64,
     #[stat(desc = "fentry events filtered (non-gaming)")]
     pub fentry_filtered_events: u64,
+    #[stat(desc = "ring buffer overflow events dropped")]
+    pub ringbuf_overflow_events: u64,
+    
+    /* Ring Buffer Input Latency Tracking: Kernel→Userspace→Processing */
+    #[stat(desc = "ring buffer avg latency (ns)")]
+    pub ringbuf_latency_avg_ns: u64,
+    #[stat(desc = "ring buffer p50 latency (ns)")]
+    pub ringbuf_latency_p50_ns: u64,
+    #[stat(desc = "ring buffer p95 latency (ns)")]
+    pub ringbuf_latency_p95_ns: u64,
+    #[stat(desc = "ring buffer p99 latency (ns)")]
+    pub ringbuf_latency_p99_ns: u64,
+    #[stat(desc = "ring buffer min latency (ns)")]
+    pub ringbuf_latency_min_ns: u64,
+    #[stat(desc = "ring buffer max latency (ns)")]
+    pub ringbuf_latency_max_ns: u64,
+
+    // Userspace ring buffer queue metrics
+    #[stat(desc = "rb queue dropped total (userspace)")]
+    pub rb_queue_dropped_total: u64,
+    #[stat(desc = "rb queue high watermark (userspace)")]
+    pub rb_queue_high_watermark: u64,
 
     /* BPF Profiling: Hot-path latency measurements */
     #[stat(desc = "select_cpu avg latency (ns)")]
@@ -236,6 +258,19 @@ impl Metrics {
             fentry_boost_triggers: self.fentry_boost_triggers,
             fentry_gaming_events: self.fentry_gaming_events,
             fentry_filtered_events: self.fentry_filtered_events,
+            ringbuf_overflow_events: self.ringbuf_overflow_events,
+            
+            // Ring buffer latency: live measurements (not deltas)
+            ringbuf_latency_avg_ns: self.ringbuf_latency_avg_ns,
+            ringbuf_latency_p50_ns: self.ringbuf_latency_p50_ns,
+            ringbuf_latency_p95_ns: self.ringbuf_latency_p95_ns,
+            ringbuf_latency_p99_ns: self.ringbuf_latency_p99_ns,
+            ringbuf_latency_min_ns: self.ringbuf_latency_min_ns,
+            ringbuf_latency_max_ns: self.ringbuf_latency_max_ns,
+
+            // Userspace RB queue metrics are live (not counters)
+            rb_queue_dropped_total: self.rb_queue_dropped_total,
+            rb_queue_high_watermark: self.rb_queue_high_watermark,
 
             // Profiling: calculate averages from deltas
             prof_select_cpu_avg_ns: if self.prof_select_cpu_calls > prev.prof_select_cpu_calls {

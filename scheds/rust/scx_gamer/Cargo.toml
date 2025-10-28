@@ -54,3 +54,5 @@ wayland-protocols = { version = "0.32", default-features = false, features = ["c
 
 [features]
 enable_backtrace = []
+full_tui = []
+proc_monitor = []

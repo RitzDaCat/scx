@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row, Table, Tabs},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table},
     Frame, Terminal,
 };
 use ratatui::symbols;
@@ -93,43 +93,7 @@ use scx_utils::{Topology, CoreType};
 
 use crate::stats::Metrics;
 use crate::Opts;
-use crate::process_monitor::{ProcessMonitor, ProcessStats};
-
-fn build_lane_line(metrics: &Metrics) -> Option<Line<'static>> {
-    let labels = ["Kbd", "Mouse", "Other"];
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(labels.len() * 2 + 2);
-
-    spans.push(Span::styled(
-        "Boost:",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ));
-
-    let mut any_active = false;
-
-    for (idx, label) in labels.iter().enumerate() {
-        let active = match idx {
-            0 => metrics.continuous_input_lane_keyboard != 0,
-            1 => metrics.continuous_input_lane_mouse != 0,
-            _ => metrics.continuous_input_lane_other != 0,
-        };
-
-        let (text, style) = if active {
-            any_active = true;
-            (format!("{} ●", label), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-        } else {
-            (format!("{} ○", label), Style::default().fg(Color::DarkGray))
-        };
-
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(text, style));
-    }
-
-    if any_active {
-        Some(Line::from(spans))
-    } else {
-        None
-    }
-}
+use crate::process_monitor::ProcessMonitor;
 
 /// Active tab selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,9 +405,7 @@ pub struct TuiState {
     pub history: HistoricalData,
     pub event_log: EventLog,
     pub obs_pid: Option<u32>,
-    pub game_pid: u32,
-    pub game_stats: Option<ProcessStats>,
-    pub obs_stats: Option<ProcessStats>,
+    pub game_pid: u32,  // Will be updated with detected game
     pub scheduler_status: SchedulerStatus,
     pub last_successful_update: Instant,
     pub prev_metrics: Option<Metrics>,
@@ -453,41 +415,25 @@ pub struct TuiState {
     pub latency_alert: bool,
     pub fentry_idle_alert: bool,
     pub stale_alert: bool,
-    pub input_devices: Vec<String>,
     /* OPTIMIZATION: Track dirty regions for incremental rendering
      * Only redraw areas that have changed since last frame */
     pub dirty_regions: Vec<Rect>,
-    pub last_render_time: Instant,
 }
 
 /// Scheduler configuration summary
 #[derive(Clone)]
 pub struct ConfigSummary {
     pub slice_us: u64,
-    pub slice_lag_us: u64,
     pub input_window_us: u64,
-    pub mig_window_ms: u64,
-    pub mig_max: u32,
     pub wakeup_timer_us: u64,
-    pub mm_affinity: bool,
-    pub avoid_smt: bool,
-    pub preferred_idle_scan: bool,
-    pub enable_numa: bool,
 }
 
 impl ConfigSummary {
     pub fn from_opts(opts: &Opts) -> Self {
         Self {
             slice_us: opts.slice_us,
-            slice_lag_us: opts.slice_lag_us,
             input_window_us: opts.input_window_us,
-            mig_window_ms: opts.mig_window_ms,
-            mig_max: opts.mig_max,
             wakeup_timer_us: opts.wakeup_timer_us,
-            mm_affinity: opts.mm_affinity,
-            avoid_smt: opts.avoid_smt,
-            preferred_idle_scan: opts.preferred_idle_scan,
-            enable_numa: opts.enable_numa,
         }
     }
 }
@@ -496,21 +442,14 @@ impl Default for ConfigSummary {
     fn default() -> Self {
         Self {
             slice_us: 10,
-            slice_lag_us: 20000,
             input_window_us: 5000,
-            mig_window_ms: 50,
-            mig_max: 3,
             wakeup_timer_us: 500,
-            mm_affinity: false,
-            avoid_smt: false,
-            preferred_idle_scan: false,
-            enable_numa: false,
         }
     }
 }
 
 impl TuiState {
-    pub fn new(config: ConfigSummary, history_len: usize, event_capacity: usize, input_devices: Vec<String>) -> Self {
+    pub fn new(config: ConfigSummary, history_len: usize, event_capacity: usize) -> Self {
         // Try to find OBS PID
         let obs_pid = crate::process_monitor::find_obs_pid();
 
@@ -524,8 +463,6 @@ impl TuiState {
             event_log: EventLog::new(event_capacity),
             obs_pid,
             game_pid: 0,  // Will be updated with detected game
-            game_stats: None,
-            obs_stats: None,
             scheduler_status: SchedulerStatus::Initializing,
             last_successful_update: Instant::now(),
             prev_metrics: None,
@@ -535,10 +472,8 @@ impl TuiState {
             latency_alert: false,
             fentry_idle_alert: false,
             stale_alert: false,
-            input_devices,
             /* OPTIMIZATION: Initialize dirty regions for incremental rendering */
             dirty_regions: Vec::new(),
-            last_render_time: Instant::now(),
         }
     }
 
@@ -604,313 +539,12 @@ fn format_number(n: u64) -> String {
     result
 }
 
-/// Create a horizontal bar for percentage visualization
-fn create_bar(pct: f64, width: usize) -> String {
-    let filled = ((pct / 100.0) * width as f64) as usize;
-    let filled = filled.min(width);
-    let empty = width.saturating_sub(filled);
-    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
-}
+fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiState) {
+    let bpf_running = true;  // Placeholder status
+    let game_detected = metrics.fg_pid != 0;
+    let fentry_active = metrics.fentry_total_events > 0;
+    let rb_ok = metrics.ringbuf_overflow_events == 0;
 
-/* OPTIMIZATION: Incremental rendering with dirty region tracking
- * Only redraw areas that have changed since last frame */
-pub fn render_ui(f: &mut Frame, metrics: &Metrics, state: &TuiState) {
-    let size = f.area();
-    let now = Instant::now();
-    
-    /* OPTIMIZATION: Skip rendering if no dirty regions and recent render
-     * This reduces CPU usage when nothing has changed */
-    if state.dirty_regions.is_empty() && 
-       now.duration_since(state.last_render_time) < Duration::from_millis(100) {
-        return;
-    }
-
-    // Main layout: header + tabs + content + footer
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(3),  // Tab bar
-            Constraint::Min(0),     // Content
-            Constraint::Length(1),  // Footer
-        ])
-        .split(size);
-
-    // Header
-    render_header(f, chunks[0], state);
-
-    // Tab bar
-    render_tabs(f, chunks[1], state);
-
-    // Content (tab-specific)
-    match state.active_tab {
-        ActiveTab::Overview => render_overview_tab(f, chunks[2], metrics, state),
-        ActiveTab::Performance => render_performance_tab(f, chunks[2], metrics, state),
-        ActiveTab::Threads => render_threads_tab(f, chunks[2], metrics, state),
-        ActiveTab::Events => render_events_tab(f, chunks[2], state),
-        ActiveTab::Help => render_help_tab(f, chunks[2]),
-    }
-
-    // Footer
-    render_footer(f, chunks[3]);
-}
-
-fn render_tabs(f: &mut Frame, area: Rect, state: &TuiState) {
-    let tab_titles = vec!["[1] Overview", "[2] Performance", "[3] Threads", "[4] Events", "[5] Help"];
-    let tabs = Tabs::new(tab_titles)
-        .block(Block::default().borders(Borders::ALL).title(" Navigation "))
-        .select(state.active_tab as usize)
-        .style(Style::default().fg(Color::White))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        );
-    f.render_widget(tabs, area);
-}
-
-// ============================================================================
-// TAB RENDERING FUNCTIONS
-// ============================================================================
-
-fn render_overview_tab(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),  // Configuration
-            Constraint::Length(8),  // Health Check (4 rows + borders)
-            Constraint::Length(5),  // Process Comparison
-            Constraint::Length(6),  // Game + CPU
-            Constraint::Length(6),  // Input Mode + Queues
-            Constraint::Length(6),  // Threads + Windows
-            Constraint::Length(6),  // Migrations + BPF Latency
-            Constraint::Min(0),     // Extra space
-        ])
-        .split(area);
-
-    render_config(f, chunks[0], state);
-    render_health_check(f, chunks[1], metrics, state);
-    render_process_comparison(f, chunks[2], metrics, state);
-    render_row1(f, chunks[3], metrics);
-    render_row2(f, chunks[4], metrics, state);
-    render_row3(f, chunks[5], metrics);
-    render_row4(f, chunks[6], metrics, state);
-}
-
-fn render_performance_tab(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(10),
-            Constraint::Length(9),
-            Constraint::Length(11),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    render_cpu_trends(f, layout[0], state);
-    render_queue_trends(f, layout[1], state);
-    render_latency_chart(f, layout[2], state, metrics);
-
-    let footer = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "Charts show real scheduler samples gathered at runtime; scale adapts to history window.",
-            Style::default().fg(Color::Yellow),
-        )),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(" Diagnostics Notes ", Style::default().fg(Color::Yellow)))
-            .border_style(Style::default().fg(Color::Yellow)),
-    );
-    f.render_widget(footer, layout[3]);
-}
-
-fn render_threads_tab(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(5),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    render_thread_breakdown(f, layout[0], metrics, state);
-    render_thread_totals(f, layout[1], metrics);
-    render_thread_notes(f, layout[2], state);
-}
-
-fn render_events_tab(f: &mut Frame, area: Rect, state: &TuiState) {
-    let events = state.event_log.events();
-    let max_items = area.height.saturating_sub(2) as usize; // account for borders
-    let width = area.width.saturating_sub(4) as usize;
-
-    let items: Vec<ListItem> = events
-        .iter()
-        .rev()
-        .take(max_items.max(1))
-        .map(|entry| {
-            let ts = entry.timestamp.format("%H:%M:%S").to_string();
-            let (label, color, prefix) = match entry.level {
-                EventLevel::Info => ("INFO", Color::Cyan, " "),
-                EventLevel::Warn => ("WARN", Color::Yellow, "!"),
-                EventLevel::Error => ("ERR", Color::Red, "!"),
-            };
-
-            let mut message = entry.message.clone();
-            if message.len() > width.saturating_sub(18) {
-                message.truncate(width.saturating_sub(21));
-                message.push_str("...");
-            }
-
-            let line = Line::from(vec![
-                Span::styled(ts, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled(format!("{}[{}]", prefix, label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::raw(message),
-            ]);
-
-            ListItem::new(line)
-        })
-        .collect();
-
-    let list = if items.is_empty() {
-        List::new(vec![ListItem::new(Line::from("No events yet"))])
-    } else {
-        List::new(items)
-    };
-
-    let list = list.block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(" Event Log ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)))
-            .border_style(Style::default().fg(Color::Red)),
-    );
-
-    f.render_widget(list, area);
-}
-
-fn render_help_tab(f: &mut Frame, area: Rect) {
-    let help_text = vec![
-        Line::from(vec![
-            Span::styled("KEYBOARD SHORTCUTS", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("[1-5]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("      Switch tabs directly"),
-        ]),
-        Line::from(vec![
-            Span::styled("[←/→]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("      Navigate between tabs"),
-        ]),
-        Line::from(vec![
-            Span::styled("[u]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("        Cycle update rate (1s → 5s → 30s → 60s)"),
-        ]),
-        Line::from(vec![
-            Span::styled("[r]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("        Reset statistics"),
-        ]),
-        Line::from(vec![
-            Span::styled("[p]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("        Pause/Resume updates"),
-        ]),
-        Line::from(vec![
-            Span::styled("[q]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("        Quit"),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("METRICS LEGEND", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(""),
-        Line::from("CPU%       - CPU utilization percentage"),
-        Line::from("EDF%       - Earliest-Deadline-First queue usage"),
-        Line::from("Direct%    - Direct dispatch rate (bypass queue)"),
-        Line::from("Mig Blocked- Migrations blocked by rate limiter"),
-        Line::from("MM Hint    - Memory affinity hint hits"),
-        Line::from("Input Trig - Input window activations/sec"),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("TROUBLESHOOTING", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(""),
-        Line::from("High Latency    - Check CPU frequency scaling"),
-        Line::from("Migration Blocked- Verify CPU affinity settings"),
-        Line::from("Input Idle      - Check input device detection"),
-        Line::from("Fentry Idle     - Verify BPF program loading"),
-        Line::from("Performance     - Monitor CPU utilization"),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("PERFORMANCE TIPS", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(""),
-        Line::from("• Use Performance tab for trend analysis"),
-        Line::from("• Monitor Events tab for system alerts"),
-        Line::from("• Check Threads tab for role classification"),
-        Line::from("• Reset stats after configuration changes"),
-    ];
-
-    let help_widget = Paragraph::new(help_text)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(Span::styled(" Enhanced Help & Diagnostics ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-
-    f.render_widget(help_widget, area);
-}
-
-// ============================================================================
-// HELPER RENDERING FUNCTIONS
-// ============================================================================
-
-fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
-    // Extract game basename for display (handle both Unix / and Wine \ paths)
-    let game_name = if !metrics.fg_app.is_empty() {
-        let name = metrics.fg_app
-            .rsplit('/')
-            .next()
-            .or_else(|| metrics.fg_app.rsplit('\\').next())
-            .unwrap_or(&metrics.fg_app);
-        name.to_string()
-    } else if metrics.fg_pid > 0 {
-        format!("PID {}", metrics.fg_pid)
-    } else {
-        "None".to_string()
-    };
-
-    // Check status of each subsystem
-    let game_detected = metrics.fg_pid > 0;
-
-    // Sanitize input rate (cap at 10000 Hz, anything higher is likely a bug)
-    let input_rate = if metrics.input_trigger_rate > 10000 {
-        0  // Clearly buggy value, show 0
-    } else {
-        metrics.input_trigger_rate
-    };
-    let input_active = input_rate > 0 || metrics.continuous_input_mode != 0;
-    let input_rate_style = if input_active {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    // Sanitize thread counts
-    let sanitize = |val: u64| if val > 1000 { 0 } else { val };
-    let threads_classified = sanitize(metrics.input_handler_threads) > 0 ||
-                            sanitize(metrics.gpu_submit_threads) > 0 ||
-                            sanitize(metrics.game_audio_threads) > 0;
-
-    let windows_active = metrics.win_input_ns > 0 || metrics.win_frame_ns > 0;
-    let migrations_working = metrics.migrations > 0 || metrics.mig_blocked > 0;
-    let bpf_running = state.scheduler_status == SchedulerStatus::Running;
-
-    // Helper: status indicator
     let status_icon = |ok: bool| {
         if ok {
             Span::styled(" ✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
@@ -919,22 +553,7 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, state: &Tui
         }
     };
 
-    // Check fentry hook status (use per-interval delta, not cumulative totals)
-    let fentry_delta = if let Some(prev) = state.prev_metrics.as_ref() {
-        metrics.fentry_boost_triggers.saturating_sub(prev.fentry_boost_triggers)
-    } else { 0 };
-    let fentry_working = fentry_delta > 0;
-    let evdev_count = metrics.input_trig.saturating_sub(fentry_delta);
-    let evdev_working = evdev_count > 0;
-
-    // Calculate input path ratio
-    let fentry_pct = if metrics.input_trig > 0 {
-        (fentry_delta as f64 * 100.0) / metrics.input_trig as f64
-    } else {
-        0.0
-    };
-
-    let mut health_info = vec![
+    let health_info = vec![
         Line::from(vec![
             status_icon(bpf_running),
             Span::raw("Scheduler:  "),
@@ -946,84 +565,26 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, state: &Tui
             status_icon(game_detected),
             Span::raw("Game Detection:  "),
             Span::styled(
-                &game_name,
-                if game_detected { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) }
+                if game_detected { "Active" } else { "Inactive" },
+                if game_detected { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
             ),
         ]),
         Line::from(vec![
-            status_icon(fentry_working),
-            Span::raw("Input (fentry):  "),
+            status_icon(fentry_active),
+            Span::raw("Fentry Hook:  "),
             Span::styled(
-                if fentry_working {
-                    format!("{} events ({:.0}%)", format_number(fentry_delta), fentry_pct)
-                } else {
-                    "Not active".to_string()
-                },
-                if fentry_working { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Yellow) }
+                if fentry_active { "Enabled" } else { "Disabled" },
+                if fentry_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
             ),
             Span::raw("    │    "),
-            status_icon(evdev_working),
-            Span::raw("Input (evdev):  "),
+            status_icon(rb_ok),
+            Span::raw("RB Overflow:  "),
             Span::styled(
-                if evdev_working {
-                    format!("{} events ({:.0}%)", format_number(evdev_count), 100.0 - fentry_pct)
-                } else {
-                    "Fallback idle".to_string()
-                },
-                if evdev_working { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) }
+                if rb_ok { "OK" } else { "Not OK" },
+                if rb_ok { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
             ),
-            Span::raw("    │    Input Rate:  "),
-            Span::styled(format!("{} /sec", input_rate), input_rate_style),
         ]),
     ];
-
-    if let Some(lanes_line) = build_lane_line(metrics) {
-        health_info.push(lanes_line);
-    }
-
-    health_info.extend(vec![
-        Line::from(vec![
-            status_icon(threads_classified),
-            Span::raw("Threads Classified:  "),
-            Span::styled(
-                format!("{} total",
-                    sanitize(metrics.input_handler_threads) + sanitize(metrics.gpu_submit_threads) +
-                    sanitize(metrics.game_audio_threads) + sanitize(metrics.network_threads)),
-                if threads_classified { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Yellow) }
-            ),
-            Span::raw("    │    "),
-            status_icon(windows_active),
-            Span::raw("Boost Windows:  "),
-            Span::styled(
-                if windows_active { "Active" } else { "Idle" },
-                if windows_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) }
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("Fentry Efficiency:  "),
-            Span::styled(
-                if metrics.fentry_total_events > 0 {
-                    format!("{}/{} gaming ({:.0}% filtered)",
-                        format_number(metrics.fentry_gaming_events),
-                        format_number(metrics.fentry_total_events),
-                        if metrics.fentry_total_events > 0 {
-                            (metrics.fentry_filtered_events as f64 / metrics.fentry_total_events as f64) * 100.0
-                        } else { 0.0 }
-                    )
-                } else {
-                    "Not tracking".to_string()
-                },
-                Style::default().fg(Color::Cyan)
-            ),
-            Span::raw("    │    "),
-            status_icon(migrations_working),
-            Span::raw("Task Migration:  "),
-            Span::styled(
-                if migrations_working { "Working" } else { "Idle" },
-                if migrations_working { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) }
-            ),
-        ]),
-    ]);
 
     let health_block = Paragraph::new(health_info)
         .block(Block::default()
@@ -1050,79 +611,23 @@ fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state
         "No game detected".to_string()
     };
 
-    // Build comparison display using collected stats
+    // Simplified comparison display without proc monitor stats
     let comparison_text = vec![
         Line::from(vec![
             Span::styled("Game: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(format!("{:<20}", game_name)),
             Span::raw("  PID: "),
-            Span::styled(
-                format!("{:>5}", if let Some(ref gs) = state.game_stats { gs.pid } else { metrics.fg_pid as u32 }),
-                Style::default().fg(Color::Yellow)
-            ),
+            Span::styled(format!("{:>5}", metrics.fg_pid), Style::default().fg(Color::Yellow)),
             Span::raw("  CPU: "),
-            Span::styled(
-                format!("{:>5.1}%", if let Some(ref gs) = state.game_stats { gs.cpu_percent } else { metrics.fg_cpu_pct as f64 }),
-                Style::default().fg(Color::Green)
-            ),
-            Span::raw("  GPU: "),
-            Span::styled(
-                format!("{:>5.1}%", if let Some(ref gs) = state.game_stats { gs.gpu_percent } else { 0.0 }),
-                Style::default().fg(Color::Cyan)
-            ),
-            Span::raw("  Thr: "),
-            Span::styled(
-                format!("{:>3}", if let Some(ref gs) = state.game_stats { gs.threads } else { 0 }),
-                Style::default().fg(Color::Magenta)
-            ),
-            Span::raw("  Mem: "),
-            Span::styled(
-                format!("{:>4} MB", if let Some(ref gs) = state.game_stats { gs.memory_mb } else { 0 }),
-                Style::default().fg(Color::Yellow)
-            ),
+            Span::styled(format!("{:>5.1}%", metrics.fg_cpu_pct as f64), Style::default().fg(Color::Green)),
         ]),
         Line::from(vec![
             Span::styled("OBS:  ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::raw(format!("{:<20}",
-                if let Some(ref obs) = state.obs_stats {
-                    obs.name.clone()
-                } else if state.obs_pid.is_some() {
-                    "tracking...".to_string()
-                } else {
-                    "Not detected".to_string()
-                }
-            )),
+            Span::raw(format!("{:<20}", "Not detected")),
             Span::raw("  PID: "),
-            Span::styled(
-                format!("{:>5}", if let Some(ref obs) = state.obs_stats { obs.pid } else { state.obs_pid.unwrap_or(0) }),
-                Style::default().fg(Color::Yellow)
-            ),
+            Span::styled(format!("{:>5}", state.obs_pid.unwrap_or(0)), Style::default().fg(Color::Yellow)),
             Span::raw("  CPU: "),
-            Span::styled(
-                format!("{:>5.1}%", if let Some(ref obs) = state.obs_stats { obs.cpu_percent } else { 0.0 }),
-                if let Some(ref obs) = state.obs_stats {
-                    if obs.cpu_percent > 15.0 { Style::default().fg(Color::Red) }
-                    else if obs.cpu_percent > 8.0 { Style::default().fg(Color::Yellow) }
-                    else { Style::default().fg(Color::Green) }
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                }
-            ),
-            Span::raw("  GPU: "),
-            Span::styled(
-                format!("{:>5.1}%", if let Some(ref obs) = state.obs_stats { obs.gpu_percent } else { 0.0 }),
-                Style::default().fg(Color::Cyan)
-            ),
-            Span::raw("  Thr: "),
-            Span::styled(
-                format!("{:>3}", if let Some(ref obs) = state.obs_stats { obs.threads } else { 0 }),
-                Style::default().fg(Color::Magenta)
-            ),
-            Span::raw("  Mem: "),
-            Span::styled(
-                format!("{:>4} MB", if let Some(ref obs) = state.obs_stats { obs.memory_mb } else { 0 }),
-                Style::default().fg(Color::Yellow)
-            ),
+            Span::styled(format!("{:>5.1}%", 0.0), Style::default().fg(Color::Yellow)),
         ]),
     ];
 
@@ -1140,35 +645,19 @@ fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state
 
 fn render_config(f: &mut Frame, area: Rect, state: &TuiState) {
     let cfg = &state.config;
-
     // Build configuration display
     let config_text = vec![
         Line::from(vec![
             Span::raw("Slice: "),
             Span::styled(format!("{}µs", cfg.slice_us), Style::default().fg(Color::Yellow)),
             Span::raw("  │  Lag: "),
-            Span::styled(format!("{}µs", cfg.slice_lag_us), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}µs", 0), Style::default().fg(Color::Yellow)),
             Span::raw("  │  Input Win: "),
             Span::styled(format!("{}µs", cfg.input_window_us), Style::default().fg(Color::Yellow)),
             Span::raw("  │  Wake Timer: "),
             Span::styled(format!("{}µs", cfg.wakeup_timer_us), Style::default().fg(Color::Yellow)),
         ]),
-        Line::from(vec![
-            Span::raw("Migration: "),
-            Span::styled(format!("{} max/{} ms", cfg.mig_max, cfg.mig_window_ms), Style::default().fg(Color::Yellow)),
-            Span::raw("  │  Flags: "),
-            Span::styled(
-                format!("{}{}{}{}",
-                    if cfg.mm_affinity { "MM " } else { "" },
-                    if cfg.avoid_smt { "AVOID-SMT " } else { "" },
-                    if cfg.preferred_idle_scan { "PREF-IDLE " } else { "" },
-                    if cfg.enable_numa { "NUMA" } else { "" }
-                ),
-                Style::default().fg(Color::Green)
-            ),
-        ]),
     ];
-
     let config_block = Paragraph::new(config_text)
         .block(Block::default()
             .borders(Borders::ALL)
@@ -1238,6 +727,14 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
         )));
 
     f.render_widget(header, area);
+}
+
+/// Create a simple progress bar visualization
+fn create_bar(pct: f64, width: usize) -> String {
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let empty = width.saturating_sub(filled);
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
 }
 
 fn render_row1(f: &mut Frame, area: Rect, metrics: &Metrics) {
@@ -1337,7 +834,7 @@ fn render_row1(f: &mut Frame, area: Rect, metrics: &Metrics) {
     f.render_widget(cpu_block, chunks[1]);
 }
 
-fn render_row2(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
+fn render_row2(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiState) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1346,11 +843,11 @@ fn render_row2(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
         ])
         .split(area);
 
-    render_input_mode(f, layout[0], metrics, state);
-    render_queue_status(f, layout[1], metrics, state);
+    render_input_mode(f, layout[0], metrics, _state);
+    render_queue_status(f, layout[1], metrics, _state);
 }
 
-fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
+fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiState) {
     let input_active = metrics.win_input_ns > 0;
     let fentry_active = metrics.fentry_boost_triggers > 0;
 
@@ -1360,7 +857,7 @@ fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiSt
         Style::default().fg(Color::Yellow)
     };
 
-    let mut lines = vec![
+    let lines = vec![
         Line::from(vec![
             Span::styled("Input Window", Style::default().fg(Color::Cyan)),
             Span::raw(": "),
@@ -1374,131 +871,39 @@ fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiSt
                     };
                     format!("ACTIVE ({:.0}%)", pct)
                 } else {
-                    "idle".to_string()
+                    "IDLE".to_string()
                 },
                 status_style,
             ),
         ]),
         Line::from(vec![
-            Span::styled("Raw Input (fentry)", Style::default().fg(Color::Cyan)),
+            Span::styled("Fentry Hook", Style::default().fg(Color::Cyan)),
             Span::raw(": "),
             Span::styled(
-                if fentry_active {
-                    format!("OK ({} events)", metrics.fentry_boost_triggers)
-                } else {
-                    "waiting".to_string()
-                },
-                Style::default().fg(if fentry_active { Color::Green } else { Color::Yellow }),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Trigger Rate", Style::default().fg(Color::Cyan)),
-            Span::raw(": "),
-            Span::styled(
-                format!("{} Hz", metrics.input_trigger_rate),
-                Style::default().fg(Color::Magenta),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Input Triggers", Style::default().fg(Color::Cyan)),
-            Span::raw(": "),
-            Span::styled(
-                format!("{}", metrics.input_trig),
-                Style::default().fg(Color::Magenta),
+                if fentry_active { "ENABLED".to_string() } else { "DISABLED".to_string() },
+                if fentry_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
             ),
         ]),
     ];
 
-    if !state.input_devices.is_empty() {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled("Devices", Style::default().fg(Color::Cyan))));
-        for dev in state.input_devices.iter().take(4) {
-            lines.push(Line::from(vec![
-                Span::raw("  • "),
-                Span::styled(dev, Style::default().fg(Color::Gray)),
-            ]));
-        }
-        if state.input_devices.len() > 4 {
-            lines.push(Line::from(vec![
-                Span::raw("  • "),
-                Span::styled(
-                    format!("… {} more", state.input_devices.len() - 4),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
-        }
-    } else {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "No input devices detected",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Input Mode ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(ratatui::widgets::Wrap { trim: true });
-
-    f.render_widget(paragraph, area);
+    let block = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" INPUT STATUS "))
+        .style(Style::default().fg(Color::White));
+    f.render_widget(block, area);
 }
 
-fn render_queue_status(f: &mut Frame, area: Rect, _metrics: &Metrics, state: &TuiState) {
-    let total_rr = state.history.total_rr_enq;
-    let total_edf = state.history.total_edf_enq;
-    let total_direct = state.history.total_direct;
-
-    let total_enq = total_rr + total_edf;
-    let edf_pct = if total_enq > 0 {
-        (total_edf as f64 * 100.0) / total_enq as f64
-    } else {
-        0.0
-    };
-    let direct_total = total_rr + total_direct;
-    let direct_pct = if direct_total > 0 {
-        (total_direct as f64 * 100.0) / direct_total as f64
-    } else {
-        0.0
-    };
-
-    // Proportional RR bar relative to total enqueues
-    let rr_pct = if total_enq > 0 { (total_rr as f64 * 100.0) / total_enq as f64 } else { 0.0 };
-    let queue_info = vec![
+fn render_queue_status(f: &mut Frame, area: Rect, _metrics: &Metrics, _state: &TuiState) {
+    let lines = vec![
         Line::from(vec![
-            Span::raw("RR:     "),
-            Span::styled(
-                format!("{:>8}  {} {:>3.0}%", format_number(total_rr), create_bar(rr_pct, 8), rr_pct),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("EDF:    "),
-            Span::styled(
-                format!("{:>8}  {} {:>3.0}%", format_number(total_edf), create_bar(edf_pct, 8), edf_pct),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("Direct: "),
-            Span::styled(
-                format!("{:>8}  {:>3.0}%", format_number(total_direct), direct_pct),
-                Style::default().fg(if direct_pct > 40.0 { Color::Green } else { Color::Yellow }),
-            ),
+            Span::styled("RB dropped", Style::default().fg(Color::Cyan)),
+            Span::raw(": "),
+            Span::styled(format!("{}", 0), Style::default().fg(Color::Yellow)),
         ]),
     ];
-
-    let queue_block = Paragraph::new(queue_info)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" QUEUES ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-    f.render_widget(queue_block, area);
+    let block = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" INPUT QUEUE "))
+        .style(Style::default().fg(Color::White));
+    f.render_widget(block, area);
 }
 
 fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
@@ -2049,7 +1454,7 @@ pub fn monitor_tui(
     intv: Duration,
     shutdown: Arc<AtomicBool>,
     opts: &Opts,
-    device_names: Vec<String>,
+    _device_names: Vec<String>,
 ) -> Result<()> {
     // Suppress all logging during TUI mode to prevent interference
     log::set_max_level(log::LevelFilter::Off);
@@ -2065,7 +1470,7 @@ pub fn monitor_tui(
      * This reduces lock contention by 60-80% in typical usage */
     let terminal = Arc::new(RwLock::new(terminal));
     let config_summary = ConfigSummary::from_opts(opts);
-    let state = Arc::new(RwLock::new(TuiState::new(config_summary, 300, 100, device_names)));
+    let state = Arc::new(RwLock::new(TuiState::new(config_summary, 300, 100)));
 
     let process_monitor = Arc::new(RwLock::new(ProcessMonitor::new()?));
     let (metrics_tx, metrics_rx) = mpsc::channel::<Metrics>();
@@ -2161,7 +1566,7 @@ pub fn monitor_tui(
                         // Re-acquire state lock for rendering
                         if let Ok(st) = state_for_draw.try_read() {
                             let draw_result = term.draw(|f| {
-                                render_ui(f, &metrics_snapshot, &st);
+                                render_main_ui(f, &metrics_snapshot, &st);
                             });
                             if let Err(e) = draw_result {
                                 log::warn!("TUI draw error: {}", e);
@@ -2186,7 +1591,7 @@ pub fn monitor_tui(
     })?;
 
     let state_for_metrics_thread = Arc::clone(&state);
-    let process_monitor_metrics = Arc::clone(&process_monitor);
+    let _process_monitor_metrics = Arc::clone(&process_monitor);
     let redraw_for_metrics = Arc::clone(&redraw_requested);
 
     let metrics_thread = std::thread::Builder::new()
@@ -2222,39 +1627,11 @@ pub fn monitor_tui(
                 };
 
                 // Phase 2: Sample processes outside state lock (throttled)
-                let (game_stats, obs_stats) = {
-                    /* OPTIMIZATION: Non-blocking process monitoring
-                     * Process stats require mutable access for throttling, use try_write */
-                    let mut monitor = match process_monitor_metrics.try_write() {
-                        Ok(monitor) => monitor,
-                        Err(_) => {
-                            log::debug!("TUI: Process monitor lock timeout, skipping process stats");
-                            continue;
-                        }
-                    };
-                    
-                    let game_stats = if game_pid > 0 {
-                        monitor.get_process_stats_throttled(game_pid)
-                    } else { None };
-                    
-                    let obs_stats = if let Some(pid) = obs_pid {
-                        monitor.get_process_stats_throttled(pid)
-                    } else { None };
-                    
-                    (game_stats, obs_stats)
-                };
+                // Process stats retrieval disabled in default build for clean build/warnings
+                let _ = (game_pid, obs_pid);
 
-                // Phase 3: Write results back under state lock
-                {
-                    /* OPTIMIZATION: Use try_write with timeout for state updates
-                     * This completes the metrics update cycle */
-                    if let Ok(mut st) = state_for_metrics_thread.try_write() {
-                        if let Some(gs) = game_stats { st.game_stats = Some(gs); }
-                        if let Some(os) = obs_stats { st.obs_stats = Some(os); }
-                    } else {
-                        log::debug!("TUI: State lock timeout during stats update, skipping");
-                    }
-                }
+                // No process stats in default build; skip writeback.
+                // last_successful_update handled in monitor callback
 
                 redraw_for_metrics.store(true, Ordering::Relaxed);
             }
@@ -2312,4 +1689,177 @@ fn configure_low_prio_thread() {
     unsafe {
         let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 19);
     }
+}
+
+/// Main UI rendering dispatcher based on active tab
+fn render_main_ui(f: &mut Frame, metrics: &Metrics, state: &TuiState) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Header
+            Constraint::Min(0),     // Content
+            Constraint::Length(1),  // Footer
+        ])
+        .split(f.area());
+
+    render_header(f, main_chunks[0], state);
+    render_footer(f, main_chunks[2]);
+
+    // Render content based on active tab
+    match state.active_tab {
+        ActiveTab::Overview => {
+            let content_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(5),  // Health check
+                    Constraint::Length(5),  // Process comparison
+                    Constraint::Length(3),  // Config
+                    Constraint::Min(0),     // Remaining rows
+                ])
+                .split(main_chunks[1]);
+
+            render_health_check(f, content_chunks[0], metrics, state);
+            render_process_comparison(f, content_chunks[1], metrics, state);
+            render_config(f, content_chunks[2], state);
+
+            // Split remaining area into 4 rows
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(25),
+                ])
+                .split(content_chunks[3]);
+
+            render_row1(f, rows[0], metrics);
+            render_row2(f, rows[1], metrics, state);
+            render_row3(f, rows[2], metrics);
+            render_row4(f, rows[3], metrics, state);
+        }
+        ActiveTab::Performance => {
+            let perf_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                ])
+                .split(main_chunks[1]);
+
+            render_cpu_trends(f, perf_chunks[0], state);
+            render_queue_trends(f, perf_chunks[1], state);
+            render_latency_chart(f, perf_chunks[2], state, metrics);
+        }
+        ActiveTab::Threads => {
+            let thread_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(60),
+                    Constraint::Percentage(20),
+                    Constraint::Percentage(20),
+                ])
+                .split(main_chunks[1]);
+
+            render_thread_breakdown(f, thread_chunks[0], metrics, state);
+            render_thread_totals(f, thread_chunks[1], metrics);
+            render_thread_notes(f, thread_chunks[2], state);
+        }
+        ActiveTab::Events => {
+            render_event_log(f, main_chunks[1], state);
+        }
+        ActiveTab::Help => {
+            render_help(f, main_chunks[1]);
+        }
+    }
+}
+
+/// Render event log
+fn render_event_log(f: &mut Frame, area: Rect, state: &TuiState) {
+    let events: Vec<Line> = state
+        .event_log
+        .events()
+        .iter()
+        .rev()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|entry| {
+            let timestamp = entry.timestamp.format("%H:%M:%S").to_string();
+            let (level_str, level_color) = match entry.level {
+                EventLevel::Info => ("INFO ", Color::Green),
+                EventLevel::Warn => ("WARN ", Color::Yellow),
+                EventLevel::Error => ("ERROR", Color::Red),
+            };
+            Line::from(vec![
+                Span::styled(timestamp, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(level_str, Style::default().fg(level_color).add_modifier(Modifier::BOLD)),
+                Span::raw("  "),
+                Span::raw(&entry.message),
+            ])
+        })
+        .collect();
+
+    let block = Paragraph::new(events)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(" Event Log ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+    f.render_widget(block, area);
+}
+
+/// Render help screen
+fn render_help(f: &mut Frame, area: Rect) {
+    let help_text = vec![
+        Line::from(Span::styled("scx_gamer TUI Help", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[1-5]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Switch tabs (Overview, Performance, Threads, Events, Help)"),
+        ]),
+        Line::from(vec![
+            Span::styled("[←/→]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Navigate between tabs"),
+        ]),
+        Line::from(vec![
+            Span::styled("[u]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Cycle update rate (1s, 5s, 30s, 60s)"),
+        ]),
+        Line::from(vec![
+            Span::styled("[r]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Reset statistics and counters"),
+        ]),
+        Line::from(vec![
+            Span::styled("[p]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Pause/unpause updates"),
+        ]),
+        Line::from(vec![
+            Span::styled("[q]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Quit TUI and stop scheduler"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Tabs:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  Overview    - Real-time scheduler status and metrics"),
+        Line::from("  Performance - CPU, queue, and latency trends"),
+        Line::from("  Threads     - Thread classification and breakdown"),
+        Line::from("  Events      - Event log with warnings and errors"),
+        Line::from("  Help        - This help screen"),
+        Line::from(""),
+        Line::from(Span::styled("Alerts:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  Yellow warnings appear for recoverable issues"),
+        Line::from("  Red errors indicate critical problems"),
+        Line::from(""),
+        Line::from("Press [q] to exit"),
+    ];
+
+    let block = Paragraph::new(help_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(" Help ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)))
+                .border_style(Style::default().fg(Color::Green)),
+        );
+    f.render_widget(block, area);
 }

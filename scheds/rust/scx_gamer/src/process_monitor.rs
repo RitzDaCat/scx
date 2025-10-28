@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ProcessStats {
-    pub pid: u32,
-    pub name: String,
-    pub cpu_percent: f64,
-    pub gpu_percent: f64,
-    pub threads: usize,
-    pub memory_mb: u64,
+    pub _pid: u32,
+    pub _name: String,
+    pub _cpu_percent: f64,
+    pub _gpu_percent: f64,
+    pub _threads: usize,
+    pub _memory_mb: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -35,9 +35,6 @@ pub struct ProcessMonitor {
     gpu_cache_ttl: Duration,
     // Disable further nvidia-smi attempts after first failure
     nvidia_available: bool,
-    // Throttle /proc sampling per PID to reduce contention (esp. under input spam)
-    stats_sample_ttl: Duration,
-    last_stats_sample: HashMap<u32, Instant>,
 }
 
 impl ProcessMonitor {
@@ -51,23 +48,7 @@ impl ProcessMonitor {
             gpu_cache: HashMap::new(),
             gpu_cache_ttl: Duration::from_secs(2),
             nvidia_available: true,
-            stats_sample_ttl: Duration::from_millis(1000),
-            last_stats_sample: HashMap::new(),
         })
-    }
-
-    /// Get CPU/GPU stats but throttle sampling frequency to once per `stats_sample_ttl`.
-    /// Returns None if throttled; caller can keep previous stats.
-    pub fn get_process_stats_throttled(&mut self, pid: u32) -> Option<ProcessStats> {
-        let now = Instant::now();
-        if let Some(last) = self.last_stats_sample.get(&pid).copied() {
-            if now.duration_since(last) < self.stats_sample_ttl {
-                return None;
-            }
-        }
-        let stats = self.get_process_stats(pid);
-        self.last_stats_sample.insert(pid, now);
-        stats
     }
 
     /// Get CPU usage for a specific process
@@ -128,12 +109,12 @@ impl ProcessMonitor {
         let gpu_percent = self.get_gpu_usage_nvidia_cached(pid).unwrap_or(0.0);
 
         Some(ProcessStats {
-            pid,
-            name,
-            cpu_percent,
-            gpu_percent,
-            threads: num_threads,
-            memory_mb: vsize_bytes / (1024 * 1024),
+            _pid: pid,
+            _name: name,
+            _cpu_percent: cpu_percent,
+            _gpu_percent: gpu_percent,
+            _threads: num_threads,
+            _memory_mb: vsize_bytes / (1024 * 1024),
         })
     }
 

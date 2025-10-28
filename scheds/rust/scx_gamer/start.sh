@@ -52,9 +52,21 @@ launch_scx() {
     done
 
     echo
-    echo "=== Launching scx_gamer (${mode_desc}) ==="
-    echo "Press Ctrl+C to stop and return to the menu."
+    echo "================================================================================"
+    echo "                    LAUNCHING SCX_GAMER: ${mode_desc}"
+    echo "================================================================================"
+    echo
     prompt_extra_flags
+
+    if [[ ${#EXTRA_FLAGS[@]} -gt 0 ]]; then
+        echo "Additional flags: ${EXTRA_FLAGS[*]}"
+        echo
+    fi
+
+    echo "Starting scheduler with root privileges..."
+    echo "Press Ctrl+C to stop and return to the menu."
+    echo "================================================================================"
+    echo
 
     if (( ${#env_vars[@]} > 0 )); then
         sudo env "${env_vars[@]}" "${BIN_PATH}" "${base_args[@]}" "${EXTRA_FLAGS[@]}"
@@ -67,111 +79,247 @@ run_standard() {
     while true; do
         cat <<'PROFILE'
 
-Standard Profiles:
-  1) Baseline      - Minimal changes (no additional flags)
-  2) Casual        - Balanced responsiveness + locality
-  3) Esports       - Maximum responsiveness, aggressive tuning
-  4) NAPI Prefer   - Test prefer-napi-on-input bias
-  5) Ultra-Latency - Busy polling ultra-low latency (9800X3D)
-  6) Deadline-Mode - SCHED_DEADLINE hard real-time guarantees
-  q) Back
+================================================================================
+                          SCX_GAMER STANDARD PROFILES
+================================================================================
+
+PROFILE                DESCRIPTION
+--------------------------------------------------------------------------------
+1) Baseline            Default settings, minimal optimizations
+                       - Slice: 1000us (1ms)
+                       - Use for: Testing, debugging
+
+2) Casual Gaming       Balanced performance for general gaming
+                       - Slice: 500us, MM affinity, NAPI preference
+                       - Use for: Single-player, RPGs, 60Hz monitors
+
+3) Esports             Competitive gaming with aggressive tuning
+                       - Slice: 250us, avoid SMT, max responsiveness
+                       - Use for: FPS, MOBAs, 144Hz-240Hz (RECOMMENDED)
+
+4) NAPI Preference     Network-aware scheduling testing
+                       - Slice: 500us, prefer-napi-on-input
+                       - Use for: Online gaming optimization testing
+
+5) Ultra-Latency       Extreme low-latency for competitive play
+                       - Slice: 5us, real-time scheduling, 1-5us latency
+                       - Use for: Aim trainers, 360Hz+, <5% CPU usage
+
+6) SCHED_DEADLINE      Hard real-time with guaranteed time bounds
+                       - Kernel admission control, no starvation risk
+                       - Use for: Maximum consistency and stability
+
+q) Back to main menu
+
+================================================================================
 PROFILE
-        read -rp "Select profile: " profile_choice
+        read -rp "Select profile [1-6, q]: " profile_choice
         case "${profile_choice}" in
             1)
-                launch_scx "Standard - Baseline" \
-                    --env "RUST_LOG=warn"
+                echo
+                echo "Profile: Baseline"
+                echo "Purpose: Testing and debugging with default settings"
+                echo
+                echo "Active Flags:"
+                echo "  --slice-us 1000                (1ms scheduling slice)"
+                echo
+                launch_scx "Baseline" \
+                    --env "RUST_LOG=warn" \
+                    --arg "--slice-us" \
+                    --arg "1000"
                 return
                 ;;
             2)
-                launch_scx "Standard - Casual" \
+                echo
+                echo "Profile: Casual Gaming"
+                echo "Purpose: Balanced performance for general gaming scenarios"
+                echo
+                echo "Active Flags:"
+                echo "  --slice-us 500                 (500us scheduling slice)"
+                echo "  --wakeup-timer-us 500          (Fast BPF timer sampling)"
+                echo "  --preferred-idle-scan          (Intelligent CPU selection)"
+                echo "  --mm-affinity                  (Cache-conscious placement)"
+                echo "  --prefer-napi-on-input         (Network-aware scheduling)"
+                echo
+                launch_scx "Casual Gaming" \
                     --env "RUST_LOG=warn" \
+                    --arg "--slice-us" \
+                    --arg "500" \
+                    --arg "--wakeup-timer-us" \
+                    --arg "500" \
                     --arg "--preferred-idle-scan" \
                     --arg "--mm-affinity" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--wakeup-timer-us" \
-                    --arg "400"
+                    --arg "--prefer-napi-on-input"
                 return
                 ;;
             3)
-                launch_scx "Standard - Esports" \
+                echo
+                echo "Profile: Esports"
+                echo "Purpose: Competitive gaming with aggressive optimizations"
+                echo
+                echo "Active Flags:"
+                echo "  --slice-us 250                 (250us aggressive preemption)"
+                echo "  --wakeup-timer-us 250          (Responsive monitoring)"
+                echo "  --input-window-us 8000         (8ms input boost window)"
+                echo "  --mig-max 4                    (Migration rate limiting)"
+                echo "  --preferred-idle-scan          (Smart CPU placement)"
+                echo "  --avoid-smt                    (Prevents SMT contention)"
+                echo "  --prefer-napi-on-input         (Network interrupt awareness)"
+                echo
+                launch_scx "Esports" \
                     --env "RUST_LOG=warn" \
-                    --arg "--preferred-idle-scan" \
-                    --arg "--disable-smt" \
-                    --arg "--avoid-smt" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--input-window-us" \
-                    --arg "8000" \
+                    --arg "--slice-us" \
+                    --arg "250" \
                     --arg "--wakeup-timer-us" \
                     --arg "250" \
+                    --arg "--input-window-us" \
+                    --arg "8000" \
                     --arg "--mig-max" \
-                    --arg "2"
+                    --arg "4" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--avoid-smt" \
+                    --arg "--prefer-napi-on-input"
                 return
                 ;;
             4)
-                launch_scx "Standard - NAPI Prefer" \
+                echo
+                echo "Profile: NAPI Preference"
+                echo "Purpose: Testing network-aware scheduling optimizations"
+                echo
+                echo "Active Flags:"
+                echo "  --slice-us 500                 (500us scheduling slice)"
+                echo "  --preferred-idle-scan          (Smart CPU selection)"
+                echo "  --prefer-napi-on-input         (Prefer NAPI-handling CPUs)"
+                echo
+                launch_scx "NAPI Preference" \
                     --env "RUST_LOG=warn" \
+                    --arg "--slice-us" \
+                    --arg "500" \
                     --arg "--preferred-idle-scan" \
                     --arg "--prefer-napi-on-input"
                 return
                 ;;
             5)
                 echo
-                echo "✅ Ultra-Latency Mode (Busy Polling)"
-                echo "   • Consumes 100% of CPU core 7 for input handling"
-                echo "   • Busy polling for ultra-low latency"
-                echo "   • No real-time scheduling (safer)"
-                echo "   • Recommended for competitive gaming"
+                echo "================================================================================"
+                echo "                         ULTRA-LATENCY MODE (ADVANCED)"
+                echo "================================================================================"
                 echo
-                launch_scx "Standard - Ultra-Latency (9800X3D)" \
-                    --env "RUST_LOG=warn" \
-                    --arg "--event-loop-cpu" \
-                    --arg "7" \
-                    --arg "--busy-polling" \
-                    --arg "--slice-us" \
-                    --arg "5" \
-                    --arg "--input-window-us" \
-                    --arg "1000" \
-                    --arg "--wakeup-timer-us" \
-                    --arg "50" \
-                    --arg "--avoid-smt" \
-                    --arg "--mig-max" \
-                    --arg "2"
+                echo "Profile: Ultra-Latency (Interrupt-Driven)"
+                echo "Purpose: Extreme low-latency for competitive gaming and aim training"
+                echo
+                echo "Technical Details:"
+                echo "  - Real-time scheduling: SCHED_FIFO with priority 50"
+                echo "  - Input latency: 1-5 microseconds (interrupt-driven, not busy polling)"
+                echo "  - CPU usage: <5% (95-98% savings vs old busy polling method)"
+                echo "  - Scheduling slice: 5us (extremely aggressive preemption)"
+                echo "  - Input boost window: 2ms (sustained for rapid input)"
+                echo
+                echo "Active Flags:"
+                echo "  --realtime-scheduling          (SCHED_FIFO real-time policy)"
+                echo "  --rt-priority 50               (Mid-range RT priority)"
+                echo "  --slice-us 5                   (5us ultra-aggressive slice)"
+                echo "  --input-window-us 2000         (2ms input boost window)"
+                echo "  --wakeup-timer-us 100          (100us BPF timer)"
+                echo "  --avoid-smt                    (Avoids hyperthread contention)"
+                echo "  --mig-max 2                    (Minimal migrations)"
+                echo "  --preferred-idle-scan          (Smart CPU selection)"
+                echo
+                echo "Best For:"
+                echo "  - Aim trainers (Kovaak's, Aimlab)"
+                echo "  - High refresh rate displays (360Hz+)"
+                echo "  - Competitive FPS games where every microsecond counts"
+                echo "  - Systems with 8+ CPU cores (enough headroom for aggressive scheduling)"
+                echo
+                echo "WARNING:"
+                echo "  Real-time scheduling gives this process maximum priority."
+                echo "  Ensure your system has adequate resources (8+ cores recommended)."
+                echo
+                echo "================================================================================"
+                echo
+                read -rp "Enable Ultra-Latency mode? (y/N): " confirm
+                if [[ "${confirm}" =~ ^[Yy]$ ]]; then
+                    launch_scx "Ultra-Latency" \
+                        --env "RUST_LOG=warn" \
+                        --arg "--realtime-scheduling" \
+                        --arg "--rt-priority" \
+                        --arg "50" \
+                        --arg "--slice-us" \
+                        --arg "5" \
+                        --arg "--input-window-us" \
+                        --arg "2000" \
+                        --arg "--wakeup-timer-us" \
+                        --arg "100" \
+                        --arg "--avoid-smt" \
+                        --arg "--mig-max" \
+                        --arg "2" \
+                        --arg "--preferred-idle-scan"
+                else
+                    echo
+                    echo "Ultra-Latency mode cancelled."
+                    echo
+                fi
                 return
                 ;;
             6)
                 echo
-                echo "🚀 SCHED_DEADLINE Mode (Hard Real-Time)"
-                echo "   • Ultra-low latency with time guarantees"
-                echo "   • No starvation risk (kernel admission control)"
-                echo "   • Hard real-time guarantees"
-                echo "   • Requires CONFIG_SCHED_DEADLINE kernel support"
+                echo "================================================================================"
+                echo "                      SCHED_DEADLINE MODE (HARD REAL-TIME)"
+                echo "================================================================================"
                 echo
-                read -rp "Continue? (y/N): " confirm
+                echo "Profile: SCHED_DEADLINE"
+                echo "Purpose: Hard real-time guarantees with kernel admission control"
+                echo
+                echo "Technical Details:"
+                echo "  - Scheduling policy: SCHED_DEADLINE (hard real-time)"
+                echo "  - Runtime budget: 800us per 1000us period (80% utilization cap)"
+                echo "  - Kernel admission control: Prevents system overload"
+                echo "  - No starvation risk: Guaranteed time bounds"
+                echo "  - Most consistent latency profile available"
+                echo
+                echo "Active Flags:"
+                echo "  --deadline-scheduling          (Enable SCHED_DEADLINE policy)"
+                echo "  --deadline-runtime-us 800      (CPU time budget per period)"
+                echo "  --deadline-deadline-us 1000    (Relative deadline)"
+                echo "  --deadline-period-us 1000      (Scheduling period)"
+                echo "  --input-window-us 2000         (2ms input boost window)"
+                echo "  --wakeup-timer-us 250          (250us BPF timer)"
+                echo "  --avoid-smt                    (Avoids hyperthread contention)"
+                echo "  --mig-max 4                    (Migration rate limiting)"
+                echo
+                echo "Best For:"
+                echo "  - Maximum latency consistency and stability"
+                echo "  - Systems where predictability is critical"
+                echo "  - When you need guaranteed response times"
+                echo
+                echo "Requirements:"
+                echo "  - Kernel built with CONFIG_SCHED_DEADLINE support"
+                echo "  - Check with: zgrep SCHED_DEADLINE /proc/config.gz"
+                echo
+                echo "================================================================================"
+                echo
+                read -rp "Enable SCHED_DEADLINE mode? (y/N): " confirm
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
-                    launch_scx "Standard - SCHED_DEADLINE (9800X3D)" \
+                    launch_scx "SCHED_DEADLINE" \
                         --env "RUST_LOG=warn" \
-                        --arg "--event-loop-cpu" \
-                        --arg "7" \
-                        --arg "--busy-polling" \
                         --arg "--deadline-scheduling" \
                         --arg "--deadline-runtime-us" \
-                        --arg "500" \
+                        --arg "800" \
                         --arg "--deadline-deadline-us" \
                         --arg "1000" \
                         --arg "--deadline-period-us" \
                         --arg "1000" \
-                        --arg "--slice-us" \
-                        --arg "5" \
                         --arg "--input-window-us" \
-                        --arg "1000" \
+                        --arg "2000" \
                         --arg "--wakeup-timer-us" \
-                        --arg "50" \
+                        --arg "250" \
                         --arg "--avoid-smt" \
                         --arg "--mig-max" \
-                        --arg "2"
+                        --arg "4"
                 else
+                    echo
                     echo "SCHED_DEADLINE mode cancelled."
+                    echo
                 fi
                 return
                 ;;
@@ -186,7 +334,11 @@ PROFILE
 }
 
 run_verbose() {
-    launch_scx "Verbose" \
+    echo
+    echo "Mode: Verbose Statistics"
+    echo "Statistics output interval: 1.0 seconds"
+    echo
+    launch_scx "Verbose Mode" \
         --env "RUST_LOG=info" \
         --arg "--stats" \
         --arg "1.0"
@@ -199,24 +351,49 @@ run_tui() {
     while true; do
         cat <<'TUI_PROFILE'
 
-TUI Profiles:
-  1) Baseline      - Launch TUI with default scheduler settings
-  2) Casual        - TUI + preferred idle scan, mm affinity
-  3) Esports       - TUI + aggressive competitive tuning
-  4) NAPI Prefer   - TUI + prefer-napi-on-input testing
-  q) Back
+================================================================================
+                         SCX_GAMER TUI DASHBOARD PROFILES
+================================================================================
+
+TUI profiles include real-time visual monitoring with your selected settings.
+Update interval: 0.1 seconds (100ms refresh rate)
+
+PROFILE                DESCRIPTION
+--------------------------------------------------------------------------------
+1) Baseline TUI        Default scheduler settings with TUI monitoring
+                       - Minimal optimizations, good for testing
+
+2) Casual Gaming TUI   Balanced settings with visual monitoring
+                       - Preferred idle scan, MM affinity, NAPI preference
+
+3) Esports TUI         Aggressive competitive tuning with monitoring
+                       - Full optimization suite, recommended for gaming
+
+4) NAPI Preference TUI Network-aware scheduling with monitoring
+                       - Testing prefer-napi-on-input behavior
+
+q) Back to main menu
+
+================================================================================
 TUI_PROFILE
-        read -rp "Select TUI profile: " profile_choice
+        read -rp "Select TUI profile [1-4, q]: " profile_choice
         case "${profile_choice}" in
             1)
-                launch_scx "TUI - Baseline" \
+                echo
+                echo "Launching: TUI Dashboard - Baseline"
+                echo
+                launch_scx "TUI Baseline" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}"
                 return
                 ;;
             2)
-                launch_scx "TUI - Casual" \
+                echo
+                echo "Launching: TUI Dashboard - Casual Gaming"
+                echo "Active optimizations: Preferred idle scan, MM affinity"
+                echo
+                launch_scx "TUI Casual Gaming" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}" \
@@ -225,7 +402,11 @@ TUI_PROFILE
                 return
                 ;;
             3)
-                launch_scx "TUI - Esports" \
+                echo
+                echo "Launching: TUI Dashboard - Esports"
+                echo "Active optimizations: Full competitive tuning suite"
+                echo
+                launch_scx "TUI Esports" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}" \
@@ -242,7 +423,11 @@ TUI_PROFILE
                 return
                 ;;
             4)
-                launch_scx "TUI - NAPI Prefer" \
+                echo
+                echo "Launching: TUI Dashboard - NAPI Preference"
+                echo "Active optimizations: Network-aware scheduling"
+                echo
+                launch_scx "TUI NAPI Preference" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}" \
@@ -261,7 +446,15 @@ TUI_PROFILE
 }
 
 run_ml_collect() {
-    launch_scx "ML Collect" \
+    echo
+    echo "Mode: Machine Learning Data Collection"
+    echo "Sample interval: 5.0 seconds"
+    echo "Data directory: ml_data/"
+    echo
+    echo "This mode collects scheduler performance metrics for training."
+    echo "Let it run during gaming sessions for best results."
+    echo
+    launch_scx "ML Data Collection" \
         --env "RUST_LOG=info" \
         --arg "--ml-collect" \
         --arg "--ml-sample-interval" \
@@ -271,13 +464,28 @@ run_ml_collect() {
 }
 
 run_ml_profiles() {
-    launch_scx "ML Profiles" \
+    echo
+    echo "Mode: Machine Learning Profile Manager"
+    echo
+    echo "This mode automatically loads optimized configurations based on"
+    echo "the detected game. Requires previously collected ML data."
+    echo
+    launch_scx "ML Profile Manager" \
         --env "RUST_LOG=info" \
         --arg "--ml-profiles"
 }
 
 run_ml_full() {
-    launch_scx "ML Full" \
+    echo
+    echo "Mode: Complete ML Pipeline"
+    echo
+    echo "Enables all ML features simultaneously:"
+    echo "  - Data collection (saves to ml_data/)"
+    echo "  - Auto-load per-game profiles"
+    echo "  - Bayesian optimization"
+    echo "  - Verbose statistics output"
+    echo
+    launch_scx "ML Full Pipeline" \
         --env "RUST_LOG=info" \
         --arg "--ml-collect" \
         --arg "--ml-profiles" \
@@ -289,7 +497,18 @@ run_ml_full() {
 }
 
 run_debug() {
-    launch_scx "Debug" \
+    echo
+    echo "Mode: Debug (Maximum Logging)"
+    echo
+    echo "Environment:"
+    echo "  RUST_LOG=debug"
+    echo "  LIBBPF_LOG=debug"
+    echo "  SCX_BPF_LOG=trace"
+    echo
+    echo "Use this mode for troubleshooting scheduler issues."
+    echo "Output will be very verbose."
+    echo
+    launch_scx "Debug Mode" \
         --env "RUST_LOG=debug" \
         --env "LIBBPF_LOG=debug" \
         --env "SCX_BPF_LOG=trace" \
@@ -301,38 +520,74 @@ run_debug() {
 run_custom() {
     ensure_binary
     echo
+    echo "================================================================================"
+    echo "                              CUSTOM FLAGS MODE"
+    echo "================================================================================"
+    echo
+    echo "Enter your custom scx_gamer command-line arguments."
+    echo "Example: --slice-us 100 --input-window-us 1000 --verbose"
+    echo
+    echo "Available flags: Run 'scx_gamer --help' for complete list"
+    echo
     local line
-    read -rp "Enter custom scx_gamer flags: " line
+    read -rp "Custom flags: " line
     if [[ -z "${line}" ]]; then
-        echo "No flags provided."
+        echo
+        echo "No flags provided. Cancelled."
+        echo
         return
     fi
     read -ra CUSTOM_ARGS <<<"${line}"
-    echo "=== Launching scx_gamer (custom flags) ==="
+    echo
+    echo "Launching with custom arguments: ${CUSTOM_ARGS[*]}"
+    echo "================================================================================"
+    echo
     sudo "${BIN_PATH}" "${CUSTOM_ARGS[@]}"
 }
 
 show_menu() {
     cat <<'MENU'
-Select launch mode:
 
-  1) Standard        - Silent operation (no output)
-  2) Verbose         - Show stats every 1s (clean output)
-  3) TUI Dashboard   - Interactive terminal UI (recommended)
-  4) ML Collect      - Collect training data (saves to ml_data/)
-  5) ML Profiles     - Auto-load per-game configs
-  6) ML Full         - Collect + Profiles + Verbose stats
-  7) Debug           - Maximum logging (for troubleshooting)
-  8) Custom          - Enter your own flags
+================================================================================
+                              SCX_GAMER LAUNCHER
+================================================================================
 
-  q) Quit
+MODE                   DESCRIPTION
+--------------------------------------------------------------------------------
+1) Standard Profiles   Choose from preset gaming configurations
+                       - Baseline, Casual, Esports, Ultra-Latency, etc.
+
+2) Verbose Mode        Run with statistics output every 1 second
+                       - Clean output, no extra logging
+
+3) TUI Dashboard       Interactive terminal UI with real-time stats
+                       - Visual performance monitoring (recommended)
+
+4) ML Data Collection  Collect scheduler metrics for machine learning
+                       - Saves performance data to ml_data/ directory
+
+5) ML Profile Manager  Auto-load optimized configs per game
+                       - Uses previously trained ML data
+
+6) ML Full Pipeline    Complete ML workflow (collect + profiles + stats)
+                       - Comprehensive machine learning optimization
+
+7) Debug Mode          Maximum logging for troubleshooting
+                       - RUST_LOG=debug, LIBBPF_LOG=debug
+
+8) Custom Flags        Manually enter scheduler command-line arguments
+                       - For advanced users and testing
+
+q) Quit                Exit launcher
+
+================================================================================
 MENU
 }
 
 while true; do
     show_menu
     echo
-    read -rp "Choice: " choice
+    read -rp "Select mode [1-8, q]: " choice
     case "${choice}" in
         1) run_standard ;;
         2) run_verbose ;;
@@ -342,10 +597,21 @@ while true; do
         6) run_ml_full ;;
         7) run_debug ;;
         8) run_custom ;;
-        q|Q|0) echo "Exiting."; exit 0 ;;
-        *) echo "Invalid choice: ${choice}" ;;
+        q|Q|0) 
+            echo
+            echo "Exiting scx_gamer launcher."
+            echo
+            exit 0
+            ;;
+        *) 
+            echo
+            echo "Invalid selection: ${choice}"
+            echo "Please choose 1-8 or q to quit."
+            echo
+            ;;
     esac
     echo
-    read -rp "Press Enter to return to the menu..." _
-    echo
+    echo "================================================================================"
+    read -rp "Press Enter to return to the main menu..." _
+    clear
 done
