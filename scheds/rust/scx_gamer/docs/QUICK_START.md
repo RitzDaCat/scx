@@ -191,6 +191,6 @@ scxstats -s scx_gamer | grep "threads"
 ## More Info
 
 - [Full Integration Guide](CACHYOS_INTEGRATION.md)
-- [Full README](README.md)
+- [Documentation Index](README.md) - Browse all documentation
 - [Technical Architecture](TECHNICAL_ARCHITECTURE.md)
 - [Anti-Cheat Safety](ANTICHEAT_SAFETY.md)
