@@ -6,27 +6,27 @@
 
 ---
 
-## 📚 Documentation Structure (Diátaxis Framework)
+## Documentation Structure (Diátaxis Framework)
 
 Our documentation is organized into four types, each serving a different purpose:
 
-1. **📚 Tutorials** - Learning-oriented, teach concepts step-by-step
-2. **🔧 How-To Guides** - Goal-oriented, solve specific problems
-3. **📖 Reference** - Information-oriented, technical specifications
-4. **💡 Explanation** - Understanding-oriented, provide context and insights
+1. **Tutorials** - Learning-oriented, teach concepts step-by-step
+2. **How-To Guides** - Goal-oriented, solve specific problems
+3. **Reference** - Information-oriented, technical specifications
+4. **Explanation** - Understanding-oriented, provide context and insights
 
 ---
 
-## 📚 Tutorials (Learning-Oriented)
+## Tutorials (Learning-Oriented)
 
 **Purpose:** Guide users through learning scx_gamer concepts step-by-step.
 
-- **[QUICK_START.md](./QUICK_START.md)** - ⭐ **Start here!** Get up and running in 3 steps
+- **[QUICK_START.md](./QUICK_START.md)** - **Start here!** Get up and running in 3 steps
 - **[INSTALLER_README.md](./INSTALLER_README.md)** - Detailed installation instructions with all methods
 
 ---
 
-## 🔧 How-To Guides (Goal-Oriented)
+## How-To Guides (Goal-Oriented)
 
 **Purpose:** Step-by-step instructions to accomplish specific tasks.
 
@@ -45,7 +45,7 @@ Our documentation is organized into four types, each serving a different purpose
 
 ---
 
-## 📖 Reference (Information-Oriented)
+## Reference (Information-Oriented)
 
 **Purpose:** Technical specifications, API details, and factual information.
 
@@ -71,7 +71,7 @@ Our documentation is organized into four types, each serving a different purpose
 
 ---
 
-## 💡 Explanation (Understanding-Oriented)
+## Explanation (Understanding-Oriented)
 
 **Purpose:** Provide context, insights, and deeper understanding of why and how things work.
 
@@ -96,7 +96,7 @@ Our documentation is organized into four types, each serving a different purpose
 
 ---
 
-## 📋 Additional Documentation
+## Additional Documentation
 
 ### Changelogs
 - **[CHANGELOG.md](./CHANGELOG.md)** - Project changelog
