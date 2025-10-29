@@ -83,10 +83,10 @@ static __always_inline void register_network_thread(u32 tid, u8 type)
 		new_info.is_low_latency = 0;     /* Assume standard latency until proven otherwise */
 
 		if (bpf_map_update_elem(&network_threads_map, &tid, &new_info, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&network_map_full_errors, 1);
+			__atomic_fetch_add(&network_map_full_errors, 1, __ATOMIC_RELAXED);
 			return;  /* Map full, can't track this thread */
 		}
-		__sync_fetch_and_add(&network_detect_new_threads, 1);
+		__atomic_fetch_add(&network_detect_new_threads, 1, __ATOMIC_RELAXED);
 	} else {
 		/* Update existing thread */
 		u64 delta_ns = now - info->last_net_ts;
@@ -101,7 +101,7 @@ static __always_inline void register_network_thread(u32 tid, u8 type)
 		}
 	}
 
-	__sync_fetch_and_add(&network_detect_operations, 1);
+	__atomic_fetch_add(&network_detect_operations, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -123,7 +123,7 @@ int BPF_PROG(detect_network_send, void *sock, void *msg, size_t size)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&network_detect_send_calls, 1);
+	__atomic_fetch_add(&network_detect_send_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as network thread */
 	register_network_thread(tid, NETWORK_TYPE_UNKNOWN);
@@ -150,7 +150,7 @@ int BPF_PROG(detect_network_recv, void *sock, void *msg, size_t size, int flags)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&network_detect_recv_calls, 1);
+	__atomic_fetch_add(&network_detect_recv_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as network thread */
 	register_network_thread(tid, NETWORK_TYPE_UNKNOWN);
@@ -177,7 +177,7 @@ int BPF_PROG(detect_network_tcp_send, void *sock, void *msg, size_t size)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&network_detect_tcp_calls, 1);
+	__atomic_fetch_add(&network_detect_tcp_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as TCP network thread */
 	register_network_thread(tid, NETWORK_TYPE_TCP);
@@ -204,7 +204,7 @@ int BPF_PROG(detect_network_udp_send, void *sock, void *msg, size_t size)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&network_detect_udp_calls, 1);
+	__atomic_fetch_add(&network_detect_udp_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as UDP network thread */
 	register_network_thread(tid, NETWORK_TYPE_UDP);

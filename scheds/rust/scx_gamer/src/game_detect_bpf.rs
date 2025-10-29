@@ -21,7 +21,7 @@ use log::{info, warn};
 /// Process event from BPF ring buffer
 /// Must match struct process_event in game_detect.bpf.h
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 struct ProcessEvent {
 	type_: u32,           // event type
 	pid: u32,             // Process PID
@@ -35,12 +35,14 @@ struct ProcessEvent {
 const GAME_EVENT_EXEC: u32 = 1;
 const GAME_EVENT_EXIT: u32 = 2;
 
+// FFI constants matching BPF enum values in game_detect.bpf.h
+// Marked allow(dead_code) because Rust compiler doesn't see BPF C code usage
 #[allow(dead_code)]
-const FLAG_WINE: u32 = 1 << 0;
+const FLAG_WINE: u32 = 1 << 0;   // Used in BPF: game_detect.bpf.h FLAG_WINE
 #[allow(dead_code)]
-const FLAG_STEAM: u32 = 1 << 1;
+const FLAG_STEAM: u32 = 1 << 1;  // Used in BPF: game_detect.bpf.h FLAG_STEAM
 #[allow(dead_code)]
-const FLAG_EXE: u32 = 1 << 2;
+const FLAG_EXE: u32 = 1 << 2;    // Used in BPF: game_detect.bpf.h FLAG_EXE
 
 #[derive(Debug, Clone)]
 pub struct GameInfo {
@@ -173,13 +175,21 @@ fn handle_process_event(
 	current_game: &Arc<AtomicU32>,
 	current_game_info: &Arc<ArcSwap<Option<GameInfo>>>
 ) -> i32 {
-	// Parse event from BPF
-	if data.len() < std::mem::size_of::<ProcessEvent>() {
-		warn!("BPF LSM: invalid event size: {}", data.len());
-		return -1;
-	}
+    // Parse event from BPF
+    if data.len() != std::mem::size_of::<ProcessEvent>() {
+        warn!(
+            "BPF LSM: invalid event size: {} (expected {})",
+            data.len(),
+            std::mem::size_of::<ProcessEvent>()
+        );
+        return -1;
+    }
 
-	let evt: &ProcessEvent = unsafe { &*(data.as_ptr() as *const ProcessEvent) };
+	// SAFETY: Size validated above, use read_unaligned to avoid alignment requirements
+	// The BPF ring buffer may not guarantee alignment, so we use read_unaligned for safety
+	let evt = unsafe { 
+		(data.as_ptr() as *const ProcessEvent).read_unaligned() 
+	};
 
 	match evt.type_ {
 		GAME_EVENT_EXEC => {

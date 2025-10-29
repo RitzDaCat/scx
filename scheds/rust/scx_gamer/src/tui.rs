@@ -93,7 +93,7 @@ use scx_utils::{Topology, CoreType};
 
 use crate::stats::Metrics;
 use crate::Opts;
-use crate::process_monitor::ProcessMonitor;
+use crate::process_monitor::find_obs_pid;
 
 /// Active tab selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1472,7 +1472,9 @@ pub fn monitor_tui(
     let config_summary = ConfigSummary::from_opts(opts);
     let state = Arc::new(RwLock::new(TuiState::new(config_summary, 300, 100)));
 
-    let process_monitor = Arc::new(RwLock::new(ProcessMonitor::new()?));
+    // ProcessMonitor created but not used - process stats disabled in default build
+    // See line 1630-1631 for details. Remove this line when process monitoring is re-enabled.
+    // let process_monitor = Arc::new(RwLock::new(ProcessMonitor::new()?));
     let (metrics_tx, metrics_rx) = mpsc::channel::<Metrics>();
     let redraw_requested = Arc::new(AtomicBool::new(true));
 
@@ -1591,7 +1593,7 @@ pub fn monitor_tui(
     })?;
 
     let state_for_metrics_thread = Arc::clone(&state);
-    let _process_monitor_metrics = Arc::clone(&process_monitor);
+    // ProcessMonitor removed - process stats disabled (see line 1630-1631)
     let redraw_for_metrics = Arc::clone(&redraw_requested);
 
     let metrics_thread = std::thread::Builder::new()
@@ -1686,9 +1688,8 @@ fn configure_low_prio_thread() {
         }
     }
     // Best-effort: lower priority (may require CAP_SYS_NICE)
-    unsafe {
-        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 19);
-    }
+    // Best-effort: lower priority (may require CAP_SYS_NICE)
+    unsafe { let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 19); }
 }
 
 /// Main UI rendering dispatcher based on active tab

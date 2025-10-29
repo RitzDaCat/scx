@@ -268,7 +268,7 @@ int BPF_PROG(track_thread_runtime, bool preempt,
 	struct thread_runtime_stats *prev_stats, *next_stats;
 	struct thread_runtime_stats new_stats = {0};
 
-	__sync_fetch_and_add(&thread_track_switches, 1);
+	__atomic_fetch_add(&thread_track_switches, 1, __ATOMIC_RELAXED);
 
 	/* Extract TIDs from task_struct */
 	prev_tid = BPF_CORE_READ(prev, pid);
@@ -332,7 +332,7 @@ int BPF_PROG(track_thread_runtime, bool preempt,
 		new_stats.detected_role = ROLE_UNKNOWN;
 
 		if (bpf_map_update_elem(&thread_runtime_map, &next_tid, &new_stats, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&thread_track_map_full, 1);
+			__atomic_fetch_add(&thread_track_map_full, 1, __ATOMIC_RELAXED);
 		}
 	} else {
 		/* Calculate sleep duration since last run */
@@ -350,7 +350,7 @@ int BPF_PROG(track_thread_runtime, bool preempt,
 		/* Update thread activity for lazy detection */
 		update_thread_activity(next_tid);
 
-		__sync_fetch_and_add(&thread_track_wakeups, 1);
+		__atomic_fetch_add(&thread_track_wakeups, 1, __ATOMIC_RELAXED);
 
 		/* Periodically re-classify (every 64 wakeups) */
 		if ((next_stats->wakeup_count & 0x3F) == 0) {
@@ -360,7 +360,7 @@ int BPF_PROG(track_thread_runtime, bool preempt,
 			if (new_role != old_role && new_role != ROLE_UNKNOWN) {
 				next_stats->detected_role = new_role;
 				next_stats->confidence = calculate_confidence(next_stats);
-				__sync_fetch_and_add(&thread_track_role_changes, 1);
+				__atomic_fetch_add(&thread_track_role_changes, 1, __ATOMIC_RELAXED);
 			}
 		}
 	}

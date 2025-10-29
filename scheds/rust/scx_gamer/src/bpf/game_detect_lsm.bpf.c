@@ -64,7 +64,7 @@ int BPF_PROG(game_detect_exec, struct linux_binprm *bprm)
 	u32 flags = 0;
 	u32 pid, parent_pid = 0;
 
-	__sync_fetch_and_add(&lsm_exec_count, 1);
+	__atomic_fetch_add(&lsm_exec_count, 1, __ATOMIC_RELAXED);
 
 	task = bpf_get_current_task_btf();
 	if (!task)
@@ -113,7 +113,7 @@ int BPF_PROG(game_detect_exec, struct linux_binprm *bprm)
 	evt = bpf_ringbuf_reserve(&process_events, sizeof(*evt), 0);
 	if (!evt) {
 		/* Ring buffer full (extremely rare) */
-		__sync_fetch_and_add(&lsm_events_dropped, 1);
+		__atomic_fetch_add(&lsm_events_dropped, 1, __ATOMIC_RELAXED);
 		return 0;
 	}
 
@@ -128,7 +128,7 @@ int BPF_PROG(game_detect_exec, struct linux_binprm *bprm)
 
 	/* Submit to userspace (zero-copy handoff) */
 	bpf_ringbuf_submit(evt, 0);
-	__sync_fetch_and_add(&lsm_events_sent, 1);
+	__atomic_fetch_add(&lsm_events_sent, 1, __ATOMIC_RELAXED);
 
 	return 0;
 }
@@ -150,7 +150,7 @@ int BPF_PROG(game_detect_exit, struct task_struct *task)
 	u32 pid, zero = 0;
 	u32 *current_game;
 
-	__sync_fetch_and_add(&lsm_exit_count, 1);
+	__atomic_fetch_add(&lsm_exit_count, 1, __ATOMIC_RELAXED);
 
 	if (!task)
 		return 0;
@@ -165,7 +165,7 @@ int BPF_PROG(game_detect_exit, struct task_struct *task)
 	/* Game exited! Notify userspace immediately */
 	evt = bpf_ringbuf_reserve(&process_events, sizeof(*evt), 0);
 	if (!evt) {
-		__sync_fetch_and_add(&lsm_events_dropped, 1);
+		__atomic_fetch_add(&lsm_events_dropped, 1, __ATOMIC_RELAXED);
 		return 0;
 	}
 
@@ -177,7 +177,7 @@ int BPF_PROG(game_detect_exit, struct task_struct *task)
 	bpf_probe_read_kernel_str(evt->comm, sizeof(evt->comm), task->comm);
 
 	bpf_ringbuf_submit(evt, 0);
-	__sync_fetch_and_add(&lsm_events_sent, 1);
+	__atomic_fetch_add(&lsm_events_sent, 1, __ATOMIC_RELAXED);
 
 	return 0;
 }

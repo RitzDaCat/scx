@@ -91,10 +91,14 @@ PROFILE                DESCRIPTION
 
 2) Casual Gaming       Balanced performance for general gaming
                        - Slice: 500us, MM affinity, NAPI preference
+                       - Keyboard boost: 1500ms (ability chains)
+                       - Mouse boost: 10ms (forgiving tracking)
                        - Use for: Single-player, RPGs, 60Hz monitors
 
 3) Esports             Competitive gaming with aggressive tuning
                        - Slice: 250us, avoid SMT, max responsiveness
+                       - Keyboard boost: 300ms (tight, less background penalty)
+                       - Mouse boost: 6ms (covers 8000Hz polling)
                        - Use for: FPS, MOBAs, 144Hz-240Hz (RECOMMENDED)
 
 4) NAPI Preference     Network-aware scheduling testing
@@ -103,11 +107,17 @@ PROFILE                DESCRIPTION
 
 5) Ultra-Latency       Extreme low-latency for competitive play
                        - Slice: 5us, real-time scheduling, 1-5us latency
+                       - Keyboard boost: 100ms (minimal overhead)
+                       - Mouse boost: 4ms (covers highest polling rates)
                        - Use for: Aim trainers, 360Hz+, <5% CPU usage
 
 6) SCHED_DEADLINE      Hard real-time with guaranteed time bounds
                        - Kernel admission control, no starvation risk
                        - Use for: Maximum consistency and stability
+
+NOTE: Profiles run WITHOUT monitoring (--stats/--monitor/--tui) for maximum
+      performance. Ring buffer write is automatically skipped, saving ~20µs per
+      event. Use TUI Dashboard (option 3) if you need visual monitoring.
 
 q) Back to main menu
 
@@ -137,6 +147,8 @@ PROFILE
                 echo "Active Flags:"
                 echo "  --slice-us 500                 (500us scheduling slice)"
                 echo "  --wakeup-timer-us 500          (Fast BPF timer sampling)"
+                echo "  --keyboard-boost-us 1500000    (1500ms - covers ability chains)"
+                echo "  --mouse-boost-us 10000         (10ms - forgiving tracking)"
                 echo "  --preferred-idle-scan          (Intelligent CPU selection)"
                 echo "  --mm-affinity                  (Cache-conscious placement)"
                 echo "  --prefer-napi-on-input         (Network-aware scheduling)"
@@ -147,6 +159,10 @@ PROFILE
                     --arg "500" \
                     --arg "--wakeup-timer-us" \
                     --arg "500" \
+                    --arg "--keyboard-boost-us" \
+                    --arg "1500000" \
+                    --arg "--mouse-boost-us" \
+                    --arg "10000" \
                     --arg "--preferred-idle-scan" \
                     --arg "--mm-affinity" \
                     --arg "--prefer-napi-on-input"
@@ -161,6 +177,8 @@ PROFILE
                 echo "  --slice-us 250                 (250us aggressive preemption)"
                 echo "  --wakeup-timer-us 250          (Responsive monitoring)"
                 echo "  --input-window-us 8000         (8ms input boost window)"
+                echo "  --keyboard-boost-us 300000     (300ms - tight, less background penalty)"
+                echo "  --mouse-boost-us 6000          (6ms - covers 8000Hz polling)"
                 echo "  --mig-max 4                    (Migration rate limiting)"
                 echo "  --preferred-idle-scan          (Smart CPU placement)"
                 echo "  --avoid-smt                    (Prevents SMT contention)"
@@ -174,6 +192,10 @@ PROFILE
                     --arg "250" \
                     --arg "--input-window-us" \
                     --arg "8000" \
+                    --arg "--keyboard-boost-us" \
+                    --arg "300000" \
+                    --arg "--mouse-boost-us" \
+                    --arg "6000" \
                     --arg "--mig-max" \
                     --arg "4" \
                     --arg "--preferred-idle-scan" \
@@ -214,12 +236,15 @@ PROFILE
                 echo "  - CPU usage: <5% (95-98% savings vs old busy polling method)"
                 echo "  - Scheduling slice: 5us (extremely aggressive preemption)"
                 echo "  - Input boost window: 2ms (sustained for rapid input)"
+                echo "  - Performance: Ring buffer write skipped (no monitoring) for ~20µs faster latency"
                 echo
                 echo "Active Flags:"
                 echo "  --realtime-scheduling          (SCHED_FIFO real-time policy)"
                 echo "  --rt-priority 50               (Mid-range RT priority)"
                 echo "  --slice-us 5                   (5us ultra-aggressive slice)"
                 echo "  --input-window-us 2000         (2ms input boost window)"
+                echo "  --keyboard-boost-us 100000     (100ms - minimal overhead)"
+                echo "  --mouse-boost-us 4000          (4ms - covers highest polling rates)"
                 echo "  --wakeup-timer-us 100          (100us BPF timer)"
                 echo "  --avoid-smt                    (Avoids hyperthread contention)"
                 echo "  --mig-max 2                    (Minimal migrations)"
@@ -248,6 +273,10 @@ PROFILE
                         --arg "5" \
                         --arg "--input-window-us" \
                         --arg "2000" \
+                        --arg "--keyboard-boost-us" \
+                        --arg "100000" \
+                        --arg "--mouse-boost-us" \
+                        --arg "4000" \
                         --arg "--wakeup-timer-us" \
                         --arg "100" \
                         --arg "--avoid-smt" \
@@ -283,6 +312,8 @@ PROFILE
                 echo "  --deadline-deadline-us 1000    (Relative deadline)"
                 echo "  --deadline-period-us 1000      (Scheduling period)"
                 echo "  --input-window-us 2000         (2ms input boost window)"
+                echo "  --keyboard-boost-us 300000     (300ms - competitive tight window)"
+                echo "  --mouse-boost-us 6000          (6ms - covers high-rate polling)"
                 echo "  --wakeup-timer-us 250          (250us BPF timer)"
                 echo "  --avoid-smt                    (Avoids hyperthread contention)"
                 echo "  --mig-max 4                    (Migration rate limiting)"
@@ -311,6 +342,10 @@ PROFILE
                         --arg "1000" \
                         --arg "--input-window-us" \
                         --arg "2000" \
+                        --arg "--keyboard-boost-us" \
+                        --arg "300000" \
+                        --arg "--mouse-boost-us" \
+                        --arg "6000" \
                         --arg "--wakeup-timer-us" \
                         --arg "250" \
                         --arg "--avoid-smt" \
@@ -416,6 +451,10 @@ TUI_PROFILE
                     --arg "--prefer-napi-on-input" \
                     --arg "--input-window-us" \
                     --arg "8000" \
+                    --arg "--keyboard-boost-us" \
+                    --arg "300000" \
+                    --arg "--mouse-boost-us" \
+                    --arg "6000" \
                     --arg "--wakeup-timer-us" \
                     --arg "250" \
                     --arg "--mig-max" \
@@ -525,9 +564,19 @@ run_custom() {
     echo "================================================================================"
     echo
     echo "Enter your custom scx_gamer command-line arguments."
-    echo "Example: --slice-us 100 --input-window-us 1000 --verbose"
+    echo "Example: --slice-us 100 --input-window-us 1000 --keyboard-boost-us 300000 --mouse-boost-us 6000 --verbose"
     echo
     echo "Available flags: Run 'scx_gamer --help' for complete list"
+    echo "Key options:"
+    echo "  --keyboard-boost-us <us>   Keyboard boost duration (default: 1000000 = 1000ms)"
+    echo "                            Lower values (200-500ms) reduce background penalty"
+    echo "  --mouse-boost-us <us>      Mouse boost duration (default: 8000 = 8ms)"
+    echo "                            Lower values (4-6ms) reduce latency variance"
+    echo "  --input-window-us <us>      Global input window (default: 5000 = 5ms)"
+    echo ""
+    echo "Performance Note:"
+    echo "  When running WITHOUT --stats/--monitor/--tui, ring buffer write is"
+    echo "  automatically skipped, saving ~20µs per event for maximum performance."
     echo
     local line
     read -rp "Custom flags: " line

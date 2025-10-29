@@ -47,6 +47,7 @@
 //! - **Efficiency**: Skip redundant processing via cycle tracking
 
 use crossbeam::queue::SegQueue;
+use log::warn;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Input event structure for ring buffer
@@ -175,8 +176,18 @@ impl InputRingBufferManager {
             // Capture timestamp immediately for accurate latency measurement
             let capture_time = std::time::Instant::now();
             
+            // Strict size invariant: ringbuf must deliver exactly one GamerInputEvent
+            if data.len() != std::mem::size_of::<GamerInputEvent>() {
+                warn!(
+                    "Ring buffer: unexpected event size: {} (expected {})",
+                    data.len(),
+                    std::mem::size_of::<GamerInputEvent>()
+                );
+                return 0;
+            }
+
             // Safety: Use unaligned read to avoid alignment UB across targets
-            if data.len() >= std::mem::size_of::<GamerInputEvent>() {
+            {
                 let _event = unsafe { (data.as_ptr() as *const GamerInputEvent).read_unaligned() };
                 // We don't store the event content here (only latency tracking),
                 // classification already happens in BPF and userspace.
@@ -290,8 +301,16 @@ impl InputRingBufferManager {
             // Adjust queue depth
             self.queue_depth.fetch_sub(1, Ordering::Relaxed);
             
-            // Calculate ring buffer latency
-            let latency_ns = processing_start.duration_since(event_with_latency.capture_time).as_nanos() as u64;
+            // Calculate ring buffer processing latency
+            // NOTE: This measures batch processing latency (time from ring buffer callback
+            // to event processing in main loop), NOT end-to-end hardware→userspace latency.
+            // For end-to-end latency, see BPF timestamp in GamerInputEvent struct.
+            // Use checked_duration_since to handle clock adjustments gracefully
+            // Clock adjustments (NTP, time travel, etc.) can cause capture_time > processing_start
+            let latency_ns = event_with_latency.capture_time
+                .checked_duration_since(processing_start)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);  // If clock went backwards, report 0 latency
             
             // Update latency statistics
             self.stats.total_events += 1;

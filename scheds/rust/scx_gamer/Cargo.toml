@@ -21,7 +21,7 @@ scx_utils = { path = "../../../rust/scx_utils", version = "1.0.21", features = [
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0"
 simplelog = "0.12"
-nix = { version = "0.28", default-features = false, features = ["event", "time", "sched", "user"] }
+nix = { version = "0.28", default-features = false, features = ["event", "time", "sched", "user", "fs", "resource"] }
 inotify = "0.10"
 drm = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -112,14 +112,14 @@ static __always_inline void register_interrupt_thread(u32 tid, u8 interrupt_type
 	new_info.is_usb_interrupt = 0;
 
 	/* Insert new entry */
-	int err = bpf_map_update_elem(&interrupt_threads_map, &tid, &new_info, BPF_ANY);
-	if (err) {
-		__sync_fetch_and_add(&interrupt_map_full_errors, 1);
-		return;
-	}
+		int err = bpf_map_update_elem(&interrupt_threads_map, &tid, &new_info, BPF_ANY);
+		if (err) {
+			__atomic_fetch_add(&interrupt_map_full_errors, 1, __ATOMIC_RELAXED);
+			return;
+		}
 
-	__sync_fetch_and_add(&interrupt_detect_new_threads, 1);
-	__sync_fetch_and_add(&interrupt_detect_operations, 1);
+		__atomic_fetch_add(&interrupt_detect_new_threads, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&interrupt_detect_operations, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -141,7 +141,7 @@ int BPF_PROG(detect_interrupt_hardware, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&interrupt_detect_hardware, 1);
+	__atomic_fetch_add(&interrupt_detect_hardware, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as interrupt thread */
 	register_interrupt_thread(tid, INTERRUPT_TYPE_HARDWARE);
@@ -168,7 +168,7 @@ int BPF_PROG(detect_interrupt_hardware_exit, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&interrupt_detect_hardware, 1);
+	__atomic_fetch_add(&interrupt_detect_hardware, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as interrupt thread */
 	register_interrupt_thread(tid, INTERRUPT_TYPE_HARDWARE);
@@ -195,7 +195,7 @@ int BPF_PROG(detect_interrupt_softirq, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&interrupt_detect_softirq, 1);
+	__atomic_fetch_add(&interrupt_detect_softirq, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as softirq thread */
 	register_interrupt_thread(tid, INTERRUPT_TYPE_SOFTIRQ);
@@ -222,7 +222,7 @@ int BPF_PROG(detect_interrupt_softirq_exit, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&interrupt_detect_softirq, 1);
+	__atomic_fetch_add(&interrupt_detect_softirq, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as softirq thread */
 	register_interrupt_thread(tid, INTERRUPT_TYPE_SOFTIRQ);
@@ -249,7 +249,7 @@ int BPF_PROG(detect_interrupt_tasklet, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&interrupt_detect_tasklet, 1);
+	__atomic_fetch_add(&interrupt_detect_tasklet, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as tasklet thread */
 	register_interrupt_thread(tid, INTERRUPT_TYPE_TASKLET);
@@ -276,7 +276,7 @@ int BPF_PROG(detect_interrupt_tasklet_exit, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&interrupt_detect_tasklet, 1);
+	__atomic_fetch_add(&interrupt_detect_tasklet, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as tasklet thread */
 	register_interrupt_thread(tid, INTERRUPT_TYPE_TASKLET);

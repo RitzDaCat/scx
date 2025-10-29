@@ -116,12 +116,12 @@ static __always_inline void register_filesystem_thread(u32 tid, u8 filesystem_ty
 	/* Insert new entry */
 	int err = bpf_map_update_elem(&filesystem_threads_map, &tid, &new_info, BPF_ANY);
 	if (err) {
-		__sync_fetch_and_add(&filesystem_map_full_errors, 1);
+		__atomic_fetch_add(&filesystem_map_full_errors, 1, __ATOMIC_RELAXED);
 		return;
 	}
 
-	__sync_fetch_and_add(&filesystem_detect_new_threads, 1);
-	__sync_fetch_and_add(&filesystem_detect_operations, 1);
+	__atomic_fetch_add(&filesystem_detect_new_threads, 1, __ATOMIC_RELAXED);
+	__atomic_fetch_add(&filesystem_detect_operations, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -143,7 +143,7 @@ int BPF_PROG(detect_filesystem_read, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&filesystem_detect_reads, 1);
+	__atomic_fetch_add(&filesystem_detect_reads, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as filesystem thread */
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_READ);
@@ -170,7 +170,7 @@ int BPF_PROG(detect_filesystem_write, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&filesystem_detect_writes, 1);
+	__atomic_fetch_add(&filesystem_detect_writes, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as filesystem thread */
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_WRITE);
@@ -197,7 +197,7 @@ int BPF_PROG(detect_filesystem_open, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&filesystem_detect_opens, 1);
+	__atomic_fetch_add(&filesystem_detect_opens, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as filesystem thread */
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_OPEN);
@@ -224,7 +224,7 @@ int BPF_PROG(detect_filesystem_close, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&filesystem_detect_closes, 1);
+	__atomic_fetch_add(&filesystem_detect_closes, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as filesystem thread */
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_CLOSE);

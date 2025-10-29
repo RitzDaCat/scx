@@ -80,10 +80,10 @@ static __always_inline void register_storage_thread(u32 tid, u8 type)
 		new_info.is_hot_path = 0;  /* Assume regular I/O until proven otherwise */
 
 		if (bpf_map_update_elem(&storage_threads_map, &tid, &new_info, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&storage_map_full_errors, 1);
+			__atomic_fetch_add(&storage_map_full_errors, 1, __ATOMIC_RELAXED);
 			return;  /* Map full, can't track this thread */
 		}
-		__sync_fetch_and_add(&storage_detect_new_threads, 1);
+		__atomic_fetch_add(&storage_detect_new_threads, 1, __ATOMIC_RELAXED);
 	} else {
 		/* Update existing thread */
 		u64 delta_ns = now - info->last_io_ts;
@@ -98,7 +98,7 @@ static __always_inline void register_storage_thread(u32 tid, u8 type)
 		}
 	}
 
-	__sync_fetch_and_add(&storage_detect_operations, 1);
+	__atomic_fetch_add(&storage_detect_operations, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -120,7 +120,7 @@ int BPF_PROG(detect_storage_block_io, void *q, void *bio)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&storage_detect_block_calls, 1);
+	__atomic_fetch_add(&storage_detect_block_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as storage thread */
 	register_storage_thread(tid, STORAGE_TYPE_UNKNOWN);
@@ -147,7 +147,7 @@ int BPF_PROG(detect_storage_nvme_io, void *nvmeq, void *req)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&storage_detect_nvme_calls, 1);
+	__atomic_fetch_add(&storage_detect_nvme_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as NVMe storage thread */
 	register_storage_thread(tid, STORAGE_TYPE_NVME);
@@ -174,7 +174,7 @@ int BPF_PROG(detect_storage_fs_read, void *file, void *buf, size_t count, void *
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&storage_detect_fs_calls, 1);
+	__atomic_fetch_add(&storage_detect_fs_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as file system storage thread */
 	register_storage_thread(tid, STORAGE_TYPE_FILESYSTEM);

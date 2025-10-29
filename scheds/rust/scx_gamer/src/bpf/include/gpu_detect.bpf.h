@@ -154,10 +154,10 @@ static __always_inline void register_gpu_thread(u32 tid, u8 vendor)
 		new_info.is_render_thread = 1;  /* Assume render thread until proven otherwise */
 
 		if (bpf_map_update_elem(&gpu_threads_map, &tid, &new_info, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&gpu_map_full_errors, 1);
+			__atomic_fetch_add(&gpu_map_full_errors, 1, __ATOMIC_RELAXED);
 			return;  /* Map full, can't track this thread */
 		}
-		__sync_fetch_and_add(&gpu_detect_new_threads, 1);
+		__atomic_fetch_add(&gpu_detect_new_threads, 1, __ATOMIC_RELAXED);
 	} else {
 		/* Update existing thread */
 		u64 delta_ns = now - info->last_submit_ts;
@@ -172,7 +172,7 @@ static __always_inline void register_gpu_thread(u32 tid, u8 vendor)
 		}
 	}
 
-	__sync_fetch_and_add(&gpu_detect_submits, 1);
+	__atomic_fetch_add(&gpu_detect_submits, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -201,9 +201,9 @@ int BPF_PROG(detect_gpu_submit_drm, struct file *filp, unsigned int cmd, unsigne
 
 	/* Track statistics by vendor */
 	if (vendor == GPU_VENDOR_INTEL) {
-		__sync_fetch_and_add(&gpu_detect_intel_calls, 1);
+		__atomic_fetch_add(&gpu_detect_intel_calls, 1, __ATOMIC_RELAXED);
 	} else if (vendor == GPU_VENDOR_AMD) {
-		__sync_fetch_and_add(&gpu_detect_amd_calls, 1);
+		__atomic_fetch_add(&gpu_detect_amd_calls, 1, __ATOMIC_RELAXED);
 	}
 
 	/* Register this thread as GPU submit thread */
@@ -229,7 +229,7 @@ int BPF_KPROBE(detect_gpu_submit_nvidia, struct file *filp,
 	 * since nv_drm_ioctl handles both query and submit operations */
 
 	u32 tid = bpf_get_current_pid_tgid();
-	__sync_fetch_and_add(&gpu_detect_nvidia_calls, 1);
+	__atomic_fetch_add(&gpu_detect_nvidia_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register as NVIDIA GPU thread */
 	register_gpu_thread(tid, GPU_VENDOR_NVIDIA);

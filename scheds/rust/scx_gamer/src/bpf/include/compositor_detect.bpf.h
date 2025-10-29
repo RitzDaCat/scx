@@ -53,11 +53,17 @@ struct {
  */
 volatile u64 compositor_detect_drm_calls;     /* DRM mode set calls */
 volatile u64 compositor_detect_plane_calls;   /* DRM plane operations */
+volatile u64 compositor_detect_page_flips;    /* DRM page flip operations (frame presentation) */
 volatile u64 compositor_detect_operations;   /* Total compositor operations detected */
 volatile u64 compositor_detect_new_threads;  /* New compositor threads discovered */
 
 /* Error tracking */
 volatile u64 compositor_map_full_errors;     /* Failed updates due to map full */
+
+/* NOTE: Frame timing variables (last_page_flip_ns, frame_interval_ns, frame_count)
+ * are defined in main.bpf.c and accessed from scheduler context.
+ * Frame timing updates removed from fentry hooks due to BPF backend limitations.
+ */
 
 /*
  * Helper: Register compositor thread
@@ -79,10 +85,10 @@ static __always_inline void register_compositor_thread(u32 tid, u8 type)
 		new_info.is_primary_compositor = 1;  /* Assume primary until proven otherwise */
 
 		if (bpf_map_update_elem(&compositor_threads_map, &tid, &new_info, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&compositor_map_full_errors, 1);
+			__atomic_fetch_add(&compositor_map_full_errors, 1, __ATOMIC_RELAXED);
 			return;  /* Map full, can't track this thread */
 		}
-		__sync_fetch_and_add(&compositor_detect_new_threads, 1);
+		__atomic_fetch_add(&compositor_detect_new_threads, 1, __ATOMIC_RELAXED);
 	} else {
 		/* Update existing thread */
 		u64 delta_ns = now - info->last_operation_ts;
@@ -97,8 +103,44 @@ static __always_inline void register_compositor_thread(u32 tid, u8 type)
 		}
 	}
 
-	__sync_fetch_and_add(&compositor_detect_operations, 1);
+	__atomic_fetch_add(&compositor_detect_operations, 1, __ATOMIC_RELAXED);
 }
+
+/*
+ * fentry/drm_mode_page_flip: Compositor page flip detection (frame presentation)
+ *
+ * DISABLED: This hook is commented out because drm_mode_page_flip is not available
+ * in all kernel configurations (not exported in kernel BTF). libbpf-rs fails to load
+ * the entire BPF program if any hook fails to attach.
+ *
+ * Impact: Minimal - compositor detection still works via:
+ * 1. drm_mode_setcrtc hook (mode changes)
+ * 2. drm_mode_setplane hook (plane updates)
+ * 3. Name-based detection fallback (thread name matching)
+ *
+ * Frame timing: Already handled in scheduler context (task_dl_with_ctx_cached),
+ * so this hook was primarily for compositor thread classification which is covered
+ * by the other DRM hooks.
+ *
+ * To re-enable: Uncomment this hook and ensure kernel has drm_mode_page_flip exported.
+ */
+/*
+SEC("fentry/drm_mode_page_flip")
+int BPF_PROG(detect_compositor_page_flip, struct drm_device *dev,
+             struct drm_crtc *crtc, struct drm_framebuffer *fb,
+             u32 flags, struct drm_modeset_acquire_ctx *acquire_ctx)
+{
+	u32 tid = bpf_get_current_pid_tgid();
+
+	// Track statistics
+	__atomic_fetch_add(&compositor_detect_page_flips, 1, __ATOMIC_RELAXED);
+
+	// Register this thread as compositor thread
+	register_compositor_thread(tid, COMPOSITOR_TYPE_UNKNOWN);
+
+	return 0;
+}
+*/
 
 /*
  * fentry/drm_mode_setcrtc: Compositor mode setting detection
@@ -121,7 +163,7 @@ int BPF_PROG(detect_compositor_mode_set, struct drm_device *dev,
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&compositor_detect_drm_calls, 1);
+	__atomic_fetch_add(&compositor_detect_drm_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as compositor thread */
 	register_compositor_thread(tid, COMPOSITOR_TYPE_UNKNOWN);
@@ -152,7 +194,7 @@ int BPF_PROG(detect_compositor_plane_set, struct drm_device *dev,
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&compositor_detect_plane_calls, 1);
+	__atomic_fetch_add(&compositor_detect_plane_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as compositor thread */
 	register_compositor_thread(tid, COMPOSITOR_TYPE_UNKNOWN);
