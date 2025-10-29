@@ -13,11 +13,11 @@
 
 `scx_gamer` is a Linux `sched_ext` scheduler optimized for gaming workloads, featuring:
 
-- **⚡ Ultra-low latency detection** - ~100,000x faster than heuristic approaches (200-500ns vs 50-200ms)
-- **🎯 Zero false positives** - Only detects actual kernel operations via BPF hooks
-- **🎮 Complete gaming pipeline optimization** - From input events to display presentation
-- **🛡️ Anti-cheat safe** - Read-only kernel-side monitoring
-- **🧠 LMAX/Real-Time optimized** - Based on high-frequency trading and real-time scheduling principles
+- **Ultra-low latency detection** - ~100,000x faster than heuristic approaches (200-500ns vs 50-200ms)
+- **Zero false positives** - Only detects actual kernel operations via BPF hooks
+- **Complete gaming pipeline optimization** - From input events to display presentation
+- **Anti-cheat safe** - Read-only kernel-side monitoring
+- **LMAX/Real-Time optimized** - Based on high-frequency trading and real-time scheduling principles
 
 ## Quick Start
 
@@ -37,7 +37,11 @@ scx-manager
 # → Click "Apply"
 ```
 
-**📖 Full documentation:** See [docs/QUICK_START.md](docs/QUICK_START.md)
+**Full documentation:** See [docs/QUICK_START.md](docs/QUICK_START.md)
+
+## AI-Assisted Development Disclaimer
+
+**This project has been developed with AI assistance.** Code generation, documentation, and optimization analysis have been aided by AI tools (including Cursor AI/Composer). While AI has been used to accelerate development, all code is reviewed and tested before inclusion. The project maintains standard development practices including code review, testing, and validation.
 
 ## Key Features
 
@@ -77,25 +81,25 @@ scx-manager
 
 Our documentation follows the **[Diátaxis framework](https://diataxis.fr/)**:
 
-### 📚 Tutorials (Learning-oriented)
+### Tutorials (Learning-oriented)
 **Start here if you're new to scx_gamer:**
 - [Quick Start Guide](docs/QUICK_START.md) - Get up and running in 3 steps
 - [Installation Guide](docs/INSTALLER_README.md) - Detailed installation instructions
 
-### 🔧 How-To Guides (Goal-oriented)
+### How-To Guides (Goal-oriented)
 **Step-by-step instructions for specific tasks:**
 - [CachyOS Integration](docs/CACHYOS_INTEGRATION.md) - Integrate with CachyOS GUI
 - [Performance Tuning](docs/INPUT_LATENCY_OPTIMIZATIONS.md) - Optimize input latency
 - [GPU/Frame Optimization](docs/GPU_FRAME_PERFORMANCE_REVIEW.md) - Improve frame presentation
 
-### 📖 Reference (Information-oriented)
+### Reference (Information-oriented)
 **Technical specifications and details:**
 - [Technical Architecture](docs/TECHNICAL_ARCHITECTURE.md) - Complete system architecture
 - [Thread Management](docs/THREADS.md) - Thread scheduling details
 - [Ring Buffer Implementation](docs/RING_BUFFER_IMPLEMENTATION.md) - Low-latency communication
 - [API Reference](docs/PERFORMANCE.md) - Performance characteristics
 
-### 💡 Explanation (Understanding-oriented)
+### Explanation (Understanding-oriented)
 **In-depth discussions and context:**
 - [LMAX Performance Optimizations](docs/LMAX_PERFORMANCE_OPTIMIZATIONS.md) - HFT-inspired optimizations
 - [Real-Time Scheduling](docs/REALTIME_SCHEDULING_OPTIMIZATIONS.md) - Real-time scheduling algorithms
@@ -103,13 +107,13 @@ Our documentation follows the **[Diátaxis framework](https://diataxis.fr/)**:
 - [Page Flip Detection](docs/PAGE_FLIP_VSYNC_MODE_ANALYSIS.md) - VSync mode compatibility
 - [Anti-Cheat Safety](docs/ANTICHEAT_SAFETY.md) - Safety considerations
 
-### 📊 Code Quality & Reviews
+### Code Quality & Reviews
 - [Code Safety Review](docs/CODE_SAFETY_REVIEW.md)
 - [Dead Code Review](docs/DEAD_CODE_REVIEW.md)
 - [Optimization Summary](docs/OPTIMIZATION_IMPLEMENTATION_SUMMARY.md)
 - [Performance Impact Table](docs/COMPREHENSIVE_PERFORMANCE_IMPACT_TABLE.md)
 
-**📑 Full Documentation Index:** [docs/README.md](docs/README.md)
+**Full Documentation Index:** [docs/README.md](docs/README.md)
 
 ## Requirements
 
@@ -123,10 +127,10 @@ Our documentation follows the **[Diátaxis framework](https://diataxis.fr/)**:
 
 | Metric | Baseline | With scx_gamer | Improvement |
 |--------|----------|----------------|-------------|
-| Input Latency | ~1.0ms | ~0.4-0.6ms | **55%** ⬇️ |
-| GPU Completion | ~1.5ms | ~1.4-1.45ms | **3-7%** ⬇️ |
-| Frame Consistency | Variable | Smooth | **Significant** ⬆️ |
-| Detection Speed | 50-200ms | 200-500ns | **~100,000x** ⬆️ |
+| Input Latency | ~1.0ms | ~0.4-0.6ms | **55% reduction** |
+| GPU Completion | ~1.5ms | ~1.4-1.45ms | **3-7% reduction** |
+| Frame Consistency | Variable | Smooth | **Significant improvement** |
+| Detection Speed | 50-200ms | 200-500ns | **~100,000x faster** |
 
 ## Installation Methods
 
