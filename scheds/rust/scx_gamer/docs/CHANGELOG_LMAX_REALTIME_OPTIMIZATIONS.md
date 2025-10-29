@@ -1,6 +1,6 @@
 # Changelog: LMAX/Real-Time Scheduling Optimizations
 
-**Date:** 2025-01-XX  
+**Date:** 2025-10-29  
 **Branch:** add-scx-gamer  
 **Commit:** LMAX/Real-Time Scheduling Optimizations Session
 
