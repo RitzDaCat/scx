@@ -7,9 +7,9 @@
 
 ## Quick Start & User Guides
 
-- **[README.md](./README.md)** - Main project README with installation and usage
-- **[QUICK_START.md](./QUICK_START.md)** - Quick start guide for new users
-- **[INSTALLER_README.md](./INSTALLER_README.md)** - Installation instructions
+- **[QUICK_START.md](./QUICK_START.md)** - Quick start guide with installation and usage (start here!)
+- **[INSTALLER_README.md](./INSTALLER_README.md)** - Detailed installation instructions
+- **[CACHYOS_INTEGRATION.md](./CACHYOS_INTEGRATION.md)** - CachyOS integration guide
 
 ---
 
@@ -73,7 +73,7 @@
 ## Documentation Categories
 
 ### **By Purpose:**
-- **Getting Started:** README.md, QUICK_START.md, INSTALLER_README.md
+- **Getting Started:** QUICK_START.md, INSTALLER_README.md, CACHYOS_INTEGRATION.md
 - **Performance:** OPTIMIZATION_*, PERFORMANCE.md, *LATENCY*.md
 - **Architecture:** TECHNICAL_ARCHITECTURE.md, RING_BUFFER_IMPLEMENTATION.md
 - **Code Quality:** *REVIEW.md, COMPILATION_VERIFICATION.md
