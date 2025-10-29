@@ -19,6 +19,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use inotify::{Inotify, WatchMask, EventMask};
 use log::{info, warn};
+use nix::fcntl;
 
 #[derive(Debug, Clone)]
 pub struct GameInfo {
@@ -179,30 +180,34 @@ fn detection_loop(current_game: Arc<AtomicU32>, current_game_info: Arc<ArcSwap<O
 		Ok(inotify) => {
 			// Set non-blocking mode to prevent shutdown hangs
 			let fd = inotify.as_raw_fd();
-			unsafe {
-				// Get current flags
-				let flags = libc::fcntl(fd, libc::F_GETFL);
-				if flags == -1 {
-					warn!("game detector: failed to get fd flags, falling back to polling");
-					None
-				} else {
-					// Set O_NONBLOCK flag
-					if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-						warn!("game detector: failed to set non-blocking: {}, falling back to polling",
-							std::io::Error::last_os_error());
-						None
-					} else {
-						match inotify.watches().add("/proc", WatchMask::CREATE | WatchMask::ONLYDIR) {
-							Ok(_) => {
-								info!("game detector: using inotify for instant process detection (non-blocking)");
-								Some(inotify)
-							},
-							Err(e) => {
-								warn!("game detector: failed to watch /proc: {}, falling back to polling", e);
-								None
+			// SAFETY: No unsafe needed - nix provides safe fcntl wrapper
+			// FD is valid (from inotify instance), errors handled gracefully
+			match fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL) {
+				Ok(current_flags) => {
+					let flags = fcntl::OFlag::from_bits_truncate(current_flags);
+					let new_flags = flags | fcntl::OFlag::O_NONBLOCK;
+					match fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(new_flags)) {
+						Ok(_) => {
+							match inotify.watches().add("/proc", WatchMask::CREATE | WatchMask::ONLYDIR) {
+								Ok(_) => {
+									info!("game detector: using inotify for instant process detection (non-blocking)");
+									Some(inotify)
+								},
+								Err(e) => {
+									warn!("game detector: failed to watch /proc: {}, falling back to polling", e);
+									None
+								}
 							}
 						}
+						Err(e) => {
+							warn!("game detector: failed to set non-blocking: {}, falling back to polling", e);
+							None
+						}
 					}
+				}
+				Err(e) => {
+					warn!("game detector: failed to get fd flags: {}, falling back to polling", e);
+					None
 				}
 			}
 		},
@@ -416,9 +421,11 @@ fn process_exists(pid: u32) -> bool {
 	let mut cursor = std::io::Cursor::new(&mut buf[..]);
 	// Write directly to stack buffer (no heap allocation)
 	let _ = write!(cursor, "/proc/{}", pid);
-	let len = cursor.position() as usize;
-	let path_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-	std::path::Path::new(path_str).exists()
+    let len = cursor.position() as usize;
+    match std::str::from_utf8(&buf[..len]) {
+        Ok(path_str) => std::path::Path::new(path_str).exists(),
+        Err(_) => false,
+    }
 }
 
 /// Process resource usage stats for game detection

@@ -15,6 +15,8 @@
 /* External tunables */
 extern const volatile bool primary_all;
 extern const volatile u64 input_window_ns;
+extern const volatile u64 keyboard_boost_ns;
+extern const volatile u64 mouse_boost_ns;
 extern volatile u64 input_until_global;
 extern volatile u64 input_lane_until[INPUT_LANE_MAX];
 extern volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
@@ -74,18 +76,18 @@ static __always_inline void fanout_set_input_lane(u8 lane, u64 now)
     /* Simple model: Each input event extends boost window by fixed duration.
      * No rate calculation, no EMA - just "input active for next X ms".
      * 
-     * Per-lane boost durations:
-     * - Mouse: 8ms (covers 1000-8000Hz polling + small movement bursts)
-     * - Keyboard: 1000ms (casual-friendly - covers ability chains and menu navigation)
+     * Per-lane boost durations (tunable from userspace):
+     * - Mouse: Default 8ms (covers 1000-8000Hz polling + small movement bursts)
+     * - Keyboard: Default 1000ms (casual-friendly - covers ability chains and menu navigation)
      * - Controller: 500ms (console-style games with analog input)
      * - Other: NO BOOST (non-gaming devices don't need scheduler priority)
      */
     u64 boost_duration_ns;
     
     if (lane == INPUT_LANE_MOUSE) {
-        boost_duration_ns = 8000000ULL;  /* 8ms - covers high-rate mouse polling */
+        boost_duration_ns = mouse_boost_ns;  /* Tunable: default 8ms */
     } else if (lane == INPUT_LANE_KEYBOARD) {
-        boost_duration_ns = 1000000000ULL; /* 1000ms - casual gaming window */
+        boost_duration_ns = keyboard_boost_ns; /* Tunable: default 1000ms */
     } else if (lane == INPUT_LANE_CONTROLLER) {
         boost_duration_ns = 500000000ULL; /* 500ms - console-style games */
     } else {

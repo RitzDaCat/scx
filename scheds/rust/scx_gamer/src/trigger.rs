@@ -13,11 +13,22 @@ pub struct BpfTrigger;
 impl TriggerOps for BpfTrigger {
     #[inline(always)]
     fn trigger_input_lane(&self, skel: &mut BpfSkel<'_>, lane: super::InputLane) {
-        let _ = bpf_intf::trigger_input_lane(skel, lane);
+        let _result = bpf_intf::trigger_input_lane(skel, lane);
+        // SAFETY: Error logging only in debug builds to avoid performance impact
+        // BPF trigger failures are rare but should be observable during development
+        #[cfg(debug_assertions)]
+        if let Err(err) = _result {
+            log::debug!("BPF trigger_input_lane failed: {} (lane: {:?})", err, lane);
+        }
     }
     #[inline(always)]
     fn trigger_input_with_napi_lane(&self, skel: &mut BpfSkel<'_>, lane: super::InputLane) {
-        let _ = bpf_intf::trigger_input_with_napi_lane(skel, lane);
+        let _result = bpf_intf::trigger_input_with_napi_lane(skel, lane);
+        // SAFETY: Error logging only in debug builds to avoid performance impact
+        #[cfg(debug_assertions)]
+        if let Err(err) = _result {
+            log::debug!("BPF trigger_input_with_napi_lane failed: {} (lane: {:?})", err, lane);
+        }
     }
 }
 

@@ -95,6 +95,15 @@ struct CACHE_ALIGNED task_ctx {
 	/* Audio optimization metrics */
 	u32 audio_buffer_size;		/* Detected audio buffer size (samples) */
 	u32 audio_sample_rate;		/* Detected audio sample rate (Hz) */
+
+	/* Deadline miss detection and auto-recovery */
+	u64 expected_deadline;		/* Deadline calculated at enqueue time */
+	u32 deadline_misses;		/* Count of consecutive deadline misses */
+	u64 last_completion_time;	/* Timestamp when task last completed execution */
+	
+	/* Priority Inheritance Protocol */
+	u8 inherited_boost;		/* Temporarily inherited boost from high-priority waiter */
+	u64 inheritance_expiry;		/* Timestamp when inheritance expires */
 };
 
 /*

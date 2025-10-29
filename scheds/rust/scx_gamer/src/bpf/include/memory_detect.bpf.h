@@ -106,14 +106,14 @@ static __always_inline void register_memory_thread(u32 tid, u8 memory_type)
 	new_info.is_hot_path = 0;
 
 	/* Insert new entry */
-	int err = bpf_map_update_elem(&memory_threads_map, &tid, &new_info, BPF_ANY);
-	if (err) {
-		__sync_fetch_and_add(&memory_map_full_errors, 1);
-		return;
-	}
+		int err = bpf_map_update_elem(&memory_threads_map, &tid, &new_info, BPF_ANY);
+		if (err) {
+			__atomic_fetch_add(&memory_map_full_errors, 1, __ATOMIC_RELAXED);
+			return;
+		}
 
-	__sync_fetch_and_add(&memory_detect_new_threads, 1);
-	__sync_fetch_and_add(&memory_detect_operations, 1);
+		__atomic_fetch_add(&memory_detect_new_threads, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&memory_detect_operations, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -135,7 +135,7 @@ int BPF_PROG(detect_memory_page_fault, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&memory_detect_page_faults, 1);
+	__atomic_fetch_add(&memory_detect_page_faults, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as memory thread */
 	register_memory_thread(tid, MEMORY_TYPE_PAGE_FAULT);
@@ -162,7 +162,7 @@ int BPF_PROG(detect_memory_mm_fault, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&memory_detect_allocations, 1);
+	__atomic_fetch_add(&memory_detect_allocations, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as memory thread */
 	register_memory_thread(tid, MEMORY_TYPE_ALLOCATION);
@@ -189,7 +189,7 @@ int BPF_PROG(detect_memory_allocation, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&memory_detect_allocations, 1);
+	__atomic_fetch_add(&memory_detect_allocations, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as memory thread */
 	register_memory_thread(tid, MEMORY_TYPE_ALLOCATION);
@@ -216,7 +216,7 @@ int BPF_PROG(detect_memory_deallocation, void *args)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&memory_detect_allocations, 1);
+	__atomic_fetch_add(&memory_detect_allocations, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as memory thread */
 	register_memory_thread(tid, MEMORY_TYPE_ALLOCATION);

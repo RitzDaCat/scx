@@ -7,47 +7,8 @@
 // GNU General Public License version 2.
 
 
-// OPTIMIZATION: CPU affinity pinning for input handling thread
-// Improves cache locality and reduces context switching overhead
-#[allow(dead_code)]
-fn pin_current_thread_to_cpu(cpu_id: usize) -> Result<(), std::io::Error> {
-    #[cfg(target_os = "linux")]
-    {
-        unsafe {
-            // Create CPU set with only the specified CPU
-            let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
-            
-            // Clear CPU set
-            libc::CPU_ZERO(&mut cpuset);
-            
-            // Set the specified CPU
-            libc::CPU_SET(cpu_id, &mut cpuset);
-            
-            // Set CPU affinity for current thread
-            let result = libc::sched_setaffinity(
-                0, // Current thread
-                std::mem::size_of::<libc::cpu_set_t>(),
-                &cpuset as *const libc::cpu_set_t,
-            );
-            
-            if result != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-    }
-    
-    #[cfg(not(target_os = "linux"))]
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "CPU affinity pinning not supported on this platform",
-        ));
-    }
-    
-    Ok(())
-}
-
 // Removed: enable_kernel_busy_polling() - no longer needed with interrupt-driven approach
+// Removed: pin_current_thread_to_cpu() - unused function (was for input thread CPU pinning)
 
 mod bpf_skel;
 pub use bpf_skel::*;
@@ -95,7 +56,6 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-// use crossbeam::channel::RecvTimeoutError;
 use evdev::EventType;
 use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
@@ -105,7 +65,8 @@ use libbpf_rs::ProgramInput;
 use log::{info, warn};
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
-use libc::{sched_setscheduler, SCHED_FIFO, SCHED_DEADLINE, sched_param, sched_attr, SCHED_FLAG_DL_OVERRUN};
+use nix::fcntl;
+use libc::{sched_setscheduler, SCHED_FIFO, SCHED_DEADLINE, SCHED_OTHER, sched_param, sched_attr, SCHED_FLAG_DL_OVERRUN};
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -129,8 +90,15 @@ use once_cell::sync::Lazy;
 const SCHEDULER_NAME: &str = "scx_gamer";
 
 // Cache CPU detection to avoid repeated /proc/cpuinfo reads
+// Gracefully handle detection failures with default fallback
 static CPU_INFO: Lazy<CpuInfo> = Lazy::new(|| {
-    CpuInfo::detect().expect("Failed to detect CPU")
+    CpuInfo::detect().unwrap_or_else(|e| {
+        warn!("CPU detection failed: {}, using defaults. ML autotune will use generic profile.", e);
+        CpuInfo {
+            model_name: "Unknown CPU".to_string(),
+            safe_name: "Unknown_CPU".to_string(),
+        }
+    })
 });
 
 // ZERO-LATENCY MODE: No gap debouncing - removed entirely
@@ -322,6 +290,21 @@ struct Opts {
     /// plus game processing time (500-2000µs), ensuring full input pipeline is boosted.
     #[clap(long, default_value = "5000")]
     input_window_us: u64,
+
+    /// Keyboard boost duration in microseconds (default: 1000ms).
+    /// Duration for which keyboard input extends the boost window.
+    /// Lower values (200-500µs) reduce background process penalty but may miss ability chains.
+    /// Higher values (1000-2000µs) better for casual gaming and menu navigation.
+    #[clap(long, default_value = "1000000")]
+    keyboard_boost_us: u64,
+
+    /// Mouse boost duration in microseconds (default: 8ms).
+    /// Duration for which mouse movement extends the boost window.
+    /// Covers high-rate mouse polling (1000-8000Hz) and small movement bursts.
+    /// Lower values (4-6ms) reduce latency variance for competitive FPS.
+    /// Higher values (8-12ms) better for tracking and casual gaming.
+    #[clap(long, default_value = "8000")]
+    mouse_boost_us: u64,
 
     /// Watchdog: if no dispatch progress is observed for N seconds, exit to restore CFS (0=off).
     #[clap(long, default_value = "0")]
@@ -915,6 +898,8 @@ impl<'a> Scheduler<'a> {
         rodata.mig_window_ns = opts.mig_window_ms * 1_000_000;
         rodata.mig_max_per_window = opts.mig_max;
         rodata.input_window_ns = opts.input_window_us * 1000;
+        rodata.keyboard_boost_ns = opts.keyboard_boost_us * 1000;
+        rodata.mouse_boost_ns = opts.mouse_boost_us * 1000;
         rodata.prefer_napi_on_input = opts.prefer_napi_on_input;
         rodata.mm_hint_enabled = !opts.disable_mm_hint;
         rodata.wakeup_timer_ns = if opts.wakeup_timer_us == 0 { 0 } else { opts.wakeup_timer_us.max(250) * 1000 };
@@ -1001,11 +986,18 @@ impl<'a> Scheduler<'a> {
                                 if matches!(dev_type, DeviceType::Mouse | DeviceType::Keyboard) {
                                     let fd = dev.as_raw_fd();
                                     if fd >= 0 {
-                                        // Set O_NONBLOCK for safety
-                                        unsafe {
-                                            let flags = libc::fcntl(fd, libc::F_GETFL);
-                                            if flags >= 0 {
-                                                let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                                        // Set O_NONBLOCK for safety using safe nix wrapper
+                                        // SAFETY: No unsafe needed - nix provides safe fcntl wrapper
+                                        // FD validated >= 0, errors handled gracefully
+                                        match fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL) {
+                                            Ok(current_flags) => {
+                                                let flags = fcntl::OFlag::from_bits_truncate(current_flags);
+                                                let new_flags = flags | fcntl::OFlag::O_NONBLOCK;
+                                                let _ = fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(new_flags));
+                                            }
+                                            Err(_) => {
+                                                // Best-effort: if we can't get flags, skip setting non-blocking
+                                                // Device will still work, just may block on some operations
                                             }
                                         }
                                         let lane = dev_type.lane();
@@ -1195,11 +1187,13 @@ impl<'a> Scheduler<'a> {
             cpu_id: cpu as c_int,
         };
         let input = ProgramInput {
-            // SAFETY: Creating a mutable slice from `args` for BPF program input.
-            // - `args` is a valid cpu_arg struct on the stack
-            // - Lifetime is scoped to this function (args outlives the slice)
-            // - size_of_val returns the correct struct size
-            // - BPF program reads this as immutable context (no concurrent mutation)
+            // SAFETY: Creating a mutable slice from stack-allocated struct for BPF program input.
+            // - `args` is valid cpu_arg struct allocated on the stack
+            // - Lifetime: `args` lives for entire function scope, slice lifetime scoped to BPF call
+            // - Size: `size_of_val(&args)` returns correct struct size
+            // - Alignment: Struct is properly aligned (stack allocation)
+            // - No concurrent mutation: BPF program reads this as immutable context
+            // - This is required FFI boundary - libbpf-rs requires raw pointer/slice
             context_in: Some(unsafe {
                 std::slice::from_raw_parts_mut(
                     &mut args as *mut _ as *mut u8,
@@ -1208,7 +1202,10 @@ impl<'a> Scheduler<'a> {
             }),
             ..Default::default()
         };
-        let out = prog.test_run(input).unwrap();
+        let out = match prog.test_run(input) {
+            Ok(out) => out,
+            Err(_) => return Err(1),
+        };
         if out.return_value != 0 {
             return Err(out.return_value);
         }
@@ -1264,7 +1261,12 @@ impl<'a> Scheduler<'a> {
 
                 for bytes in per_cpu_stats {
                     if bytes.len() < std::mem::size_of::<RawInputStats>() { continue; }
-                    // Safety: read_unaligned from &[u8] matching repr(C) layout
+                    // SAFETY: Reading RawInputStats from per-CPU BPF array bytes
+                    // - Size validated above (bytes.len() >= size_of::<RawInputStats>())
+                    // - Uses read_unaligned() to handle potential misalignment
+                    // - RawInputStats is #[repr(C)] and matches BPF layout exactly
+                    // - BPF guarantees consistent layout via per-CPU array map
+                    // - Zero-copy read required for performance (serialization would add latency)
                     let ris = unsafe { (bytes.as_ptr() as *const RawInputStats).read_unaligned() };
                     total = total.saturating_add(ris.total_events);
                     gaming = gaming.saturating_add(ris.gaming_device_events);
@@ -1376,7 +1378,7 @@ impl<'a> Scheduler<'a> {
         let (stats_response_tx, stats_request_rx) = self
             .stats_server
             .as_ref()
-            .expect("stats server not initialized")
+            .ok_or_else(|| anyhow::anyhow!("Stats server not initialized"))?
             .channels();
 
         // Pin the event loop thread: user-specified or auto-select housekeeping CPU.
@@ -1388,7 +1390,7 @@ impl<'a> Scheduler<'a> {
             } else if let Err(e) = sched_setaffinity(Pid::from_raw(0), &set) {
                 warn!("failed to pin event loop to CPU {}: {}", cpu, e);
             }
-            let auto_msg = if self.opts.event_loop_cpu.is_some() && self.opts.event_loop_cpu.unwrap() == cpu { "" } else { " (auto-selected)" };
+            let auto_msg = if self.opts.event_loop_cpu == Some(cpu) { "" } else { " (auto-selected)" };
             println!("🎯 Event loop pinned to CPU {}{}", cpu, auto_msg);
             info!("🎯 Event loop pinned to CPU {}{}", cpu, auto_msg);
         }
@@ -1400,6 +1402,12 @@ impl<'a> Scheduler<'a> {
                 sched_priority: rt_priority as i32,
             };
             
+            // SAFETY: sched_setscheduler syscall - required for SCHED_FIFO
+            // - Priority clamped to [1, 99] above (valid range)
+            // - Error checked and handled below
+            // - User explicitly requested this feature via --realtime-scheduling flag
+            // - WARNING: Real-time scheduling can lock system if process misbehaves (documented)
+            // Note: No safe wrapper exists in nix crate for SCHED_FIFO (only SCHED_OTHER available)
             unsafe {
                 let result = sched_setscheduler(0, SCHED_FIFO, &param);
                 if result != 0 {
@@ -1418,6 +1426,14 @@ impl<'a> Scheduler<'a> {
             let deadline = self.opts.deadline_deadline_us * 1000;
             let period = self.opts.deadline_period_us * 1000;
             
+            // SAFETY: sched_setattr syscall via libc::syscall - required for SCHED_DEADLINE
+            // - Struct zeroed with std::mem::zeroed() (safe initialization)
+            // - All fields set explicitly (size, policy, flags, runtime, deadline, period)
+            // - Error checked and handled below
+            // - User explicitly requested this feature via --deadline-scheduling flag
+            // - WARNING: Hard real-time scheduling can lock system if misused (documented)
+            // Note: No safe wrapper exists in nix crate for SCHED_DEADLINE (very new kernel feature)
+            // - syscall interface used because sched_setattr() not in libc binding
             unsafe {
                 // Initialize sched_attr with zeros first
                 let mut attr: sched_attr = std::mem::zeroed();
@@ -1521,11 +1537,13 @@ impl<'a> Scheduler<'a> {
         let effective_watchdog_secs: u64 = if self.opts.watchdog_secs == 0 && self.opts.realtime_scheduling { 5 } else { self.opts.watchdog_secs };
         let watchdog_enabled = effective_watchdog_secs > 0;
         let mut last_dispatch_total: u64 = {
-            let bss = self.skel.maps.bss_data.as_ref().unwrap();
+            let bss = self.skel.maps.bss_data.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
             bss.nr_direct_dispatches + bss.nr_shared_dispatches
         };
         let mut last_progress_t = Instant::now();
         let mut last_watchdog_check = Instant::now();
+        let mut rt_demoted = false;
 
         // Monitoring state
         let mut last_metrics_log = Instant::now();
@@ -1542,6 +1560,37 @@ impl<'a> Scheduler<'a> {
         // Every mouse/keyboard event triggers fanout_set_input_window() synchronously
         // BPF input window (default 2ms) provides natural priority boost coalescing
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+            // Watchdog: auto-demote RT/DEADLINE if no scheduler progress
+            if watchdog_enabled && !rt_demoted && last_watchdog_check.elapsed().as_secs() >= 1 {
+                if let Some(bss) = self.skel.maps.bss_data.as_ref() {
+                    let total_now = bss.nr_direct_dispatches + bss.nr_shared_dispatches;
+                    if total_now == last_dispatch_total {
+                        if last_progress_t.elapsed().as_secs() >= effective_watchdog_secs {
+                            // Demote to SCHED_OTHER to prevent system lockup
+                            let param = sched_param { sched_priority: 0 };
+                            unsafe {
+                                let res = sched_setscheduler(0, SCHED_OTHER, &param);
+                                if res == 0 {
+                                    info!(
+                                        "Watchdog: no scheduler progress for {}s; demoted to SCHED_OTHER",
+                                        effective_watchdog_secs
+                                    );
+                                    rt_demoted = true;
+                                } else {
+                                    warn!(
+                                        "Watchdog: failed to demote scheduling policy: {}",
+                                        std::io::Error::last_os_error()
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        last_dispatch_total = total_now;
+                        last_progress_t = Instant::now();
+                    }
+                }
+                last_watchdog_check = Instant::now();
+            }
             // Early: service pending stats requests to avoid starvation during heavy input
             while stats_request_rx.try_recv().is_ok() {
                 let metrics = self.get_metrics();
@@ -1552,7 +1601,10 @@ impl<'a> Scheduler<'a> {
 
                 if let Some(ref mut autotuner) = self.ml_autotuner {
                     let sample = ml_collect::PerformanceSample {
-                        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_else(|_| Duration::ZERO)
+                            .as_secs(),
                         config: opts_to_ml_config(self.opts),
                         metrics: ml_collect::MLCollector::convert_metrics_static(&metrics),
                         game: game_info,
@@ -1572,7 +1624,9 @@ impl<'a> Scheduler<'a> {
             // Kernel wakes us when events arrive, providing 1-5µs latency with 95-98% CPU savings
             const EPOLL_TIMEOUT_MS: u16 = 100; // 100ms timeout for responsive shutdown and stats
             let epoll_start = Instant::now();
-            match self.epoll_fd.as_ref().unwrap().wait(&mut events, Some(EPOLL_TIMEOUT_MS)) {
+            let epfd = self.epoll_fd.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("epoll_fd not initialized in event loop"))?;
+            match epfd.wait(&mut events, Some(EPOLL_TIMEOUT_MS)) {
                 Ok(n) => {
                     if epoll_wait_times.len() < 1000 {
                         epoll_wait_times.push(epoll_start.elapsed().as_nanos() as u64);
@@ -1600,7 +1654,8 @@ impl<'a> Scheduler<'a> {
                 let detected_tgid = self.get_detected_game_tgid();
                 if cached_game_tgid != detected_tgid {
                     cached_game_tgid = detected_tgid;
-                    let bss = self.skel.maps.bss_data.as_mut().unwrap();
+                    let bss = self.skel.maps.bss_data.as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                     // SAFETY: Write to staging area, BPF will copy atomically via get_fg_tgid()
                     // This double-buffering prevents torn reads during hot-path classification
                     bss.detected_fg_tgid_staging = detected_tgid;
@@ -1704,7 +1759,9 @@ impl<'a> Scheduler<'a> {
                         // - Device is already disconnected (EPOLLHUP), so fd is still valid but unusable
                         if fd >= 0 {
                             let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-                            let _ = self.epoll_fd.as_ref().unwrap().delete(bfd);
+                            if let Some(epfd) = self.epoll_fd.as_ref() {
+                                let _ = epfd.delete(bfd);
+                            }
                         }
                     }
                     continue;
@@ -1845,7 +1902,7 @@ impl<'a> Scheduler<'a> {
                     let sample = ml_collect::PerformanceSample {
                         timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or_else(|_| Duration::ZERO)
                             .as_secs(),
                         config: opts_to_ml_config(self.opts),
                         metrics: ml_collect::MLCollector::convert_metrics_static(&metrics),
@@ -1917,7 +1974,8 @@ impl<'a> Scheduler<'a> {
             // Only check every 100ms to reduce BPF map access overhead
             if watchdog_enabled && last_watchdog_check.elapsed() >= Duration::from_millis(100) {
                 last_watchdog_check = Instant::now();
-                let bss = self.skel.maps.bss_data.as_ref().unwrap();
+                let bss = self.skel.maps.bss_data.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                 let dispatch_total = bss.nr_direct_dispatches + bss.nr_shared_dispatches;
                 if dispatch_total != last_dispatch_total {
                     last_dispatch_total = dispatch_total;
@@ -1947,7 +2005,8 @@ impl<'a> Scheduler<'a> {
             // Log migration and hint metrics every 10 seconds
             if last_metrics_log.elapsed() >= Duration::from_secs(10) {
                 last_metrics_log = Instant::now();
-                let bss = self.skel.maps.bss_data.as_ref().unwrap();
+                let bss = self.skel.maps.bss_data.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                 let mig_blocked = bss.nr_mig_blocked;
                 let frame_mig_block = bss.nr_frame_mig_block;
                 let mm_hint_hit = bss.nr_mm_hint_hit;
@@ -2167,9 +2226,12 @@ fn main() -> Result<()> {
     };
 
     let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
+    // SAFETY: Time offset configuration is non-critical - log warning on failure
+    // This prevents initialization panic if timezone is misconfigured
+    if let Err(e) = lcfg.set_time_offset_to_local() {
+        warn!("Failed to set local time offset: {:?}, using UTC", e);
+    }
+    lcfg.set_time_level(simplelog::LevelFilter::Error)
         .set_location_level(simplelog::LevelFilter::Off)
         .set_target_level(simplelog::LevelFilter::Off)
         .set_thread_level(simplelog::LevelFilter::Off);

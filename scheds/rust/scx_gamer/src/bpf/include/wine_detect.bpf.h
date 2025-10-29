@@ -215,18 +215,18 @@ int BPF_UPROBE(wine_thread_priority_set_system,
 		};
 
 		if (bpf_map_update_elem(&wine_threads_map, &tid, &new_info, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&wine_map_full_errors, 1);
+			__atomic_fetch_add(&wine_map_full_errors, 1, __ATOMIC_RELAXED);
 			return 0;  /* Map full, can't track this thread */
 		}
 
 		if (priority == THREAD_PRIORITY_TIME_CRITICAL) {
-			__sync_fetch_and_add(&wine_high_priority_threads, 1);
+			__atomic_fetch_add(&wine_high_priority_threads, 1, __ATOMIC_RELAXED);
 		}
 		if (is_realtime) {
-			__sync_fetch_and_add(&wine_realtime_threads, 1);
+			__atomic_fetch_add(&wine_realtime_threads, 1, __ATOMIC_RELAXED);
 		}
 		if (role != WINE_ROLE_UNKNOWN) {
-			__sync_fetch_and_add(&wine_role_detections, 1);
+			__atomic_fetch_add(&wine_role_detections, 1, __ATOMIC_RELAXED);
 		}
 	} else {
 		/* Update existing thread */
@@ -238,11 +238,11 @@ int BPF_UPROBE(wine_thread_priority_set_system,
 		/* Update role if it changed */
 		if (role != info->detected_role && role != WINE_ROLE_UNKNOWN) {
 			info->detected_role = role;
-			__sync_fetch_and_add(&wine_role_detections, 1);
+			__atomic_fetch_add(&wine_role_detections, 1, __ATOMIC_RELAXED);
 		}
 	}
 
-	__sync_fetch_and_add(&wine_priority_changes, 1);
+	__atomic_fetch_add(&wine_priority_changes, 1, __ATOMIC_RELAXED);
 
 	return 0;  /* Don't interfere with Wine's priority setting */
 }

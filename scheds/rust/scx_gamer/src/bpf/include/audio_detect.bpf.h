@@ -86,10 +86,10 @@ static __always_inline void register_audio_thread(u32 tid, u8 type)
 		new_info.is_game_audio = 0;    /* Assume system audio until proven otherwise */
 
 		if (bpf_map_update_elem(&audio_threads_map, &tid, &new_info, BPF_ANY) < 0) {
-			__sync_fetch_and_add(&audio_map_full_errors, 1);
+			__atomic_fetch_add(&audio_map_full_errors, 1, __ATOMIC_RELAXED);
 			return;  /* Map full, can't track this thread */
 		}
-		__sync_fetch_and_add(&audio_detect_new_threads, 1);
+		__atomic_fetch_add(&audio_detect_new_threads, 1, __ATOMIC_RELAXED);
 	} else {
 		/* Update existing thread */
 		u64 delta_ns = now - info->last_audio_ts;
@@ -104,7 +104,7 @@ static __always_inline void register_audio_thread(u32 tid, u8 type)
 		}
 	}
 
-	__sync_fetch_and_add(&audio_detect_operations, 1);
+	__atomic_fetch_add(&audio_detect_operations, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -126,7 +126,7 @@ int BPF_PROG(detect_audio_alsa_period, void *substream)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&audio_detect_alsa_calls, 1);
+	__atomic_fetch_add(&audio_detect_alsa_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as ALSA audio thread */
 	register_audio_thread(tid, AUDIO_TYPE_ALSA);
@@ -153,7 +153,7 @@ int BPF_PROG(detect_audio_alsa_stop, void *substream)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&audio_detect_alsa_calls, 1);
+	__atomic_fetch_add(&audio_detect_alsa_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as ALSA audio thread */
 	register_audio_thread(tid, AUDIO_TYPE_ALSA);
@@ -180,7 +180,7 @@ int BPF_PROG(detect_audio_alsa_start, void *substream)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&audio_detect_alsa_calls, 1);
+	__atomic_fetch_add(&audio_detect_alsa_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as ALSA audio thread */
 	register_audio_thread(tid, AUDIO_TYPE_ALSA);
@@ -207,7 +207,7 @@ int BPF_PROG(detect_audio_usb_disconnect, void *intf)
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* Track statistics */
-	__sync_fetch_and_add(&audio_detect_usb_calls, 1);
+	__atomic_fetch_add(&audio_detect_usb_calls, 1, __ATOMIC_RELAXED);
 
 	/* Register this thread as USB audio thread */
 	register_audio_thread(tid, AUDIO_TYPE_USB);
