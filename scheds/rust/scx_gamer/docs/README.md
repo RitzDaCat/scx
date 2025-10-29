@@ -1,6 +1,6 @@
 # scx_gamer Documentation Index
 
-**Date:** 2025-01-XX  
+**Date:** 2025-10-29  
 **Purpose:** Central index for all scx_gamer documentation
 
 ---
@@ -117,4 +117,4 @@
 
 ---
 
-**Last Updated:** 2025-01-XX
+**Last Updated:** 2025-10-29
