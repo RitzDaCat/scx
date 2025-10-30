@@ -20,12 +20,12 @@ unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Error checked, result returned
-- ✅ No memory safety issues
-- ✅ CPU ID validated implicitly by kernel
+- [IMPLEMENTED] Safe: Error checked, result returned
+- [IMPLEMENTED] No memory safety issues
+- [IMPLEMENTED] CPU ID validated implicitly by kernel
 
 **Safe Alternative Available:**
-- ✅ **YES** - `nix::sched::sched_setaffinity()` already used elsewhere (line 1396)
+- [STATUS: IMPLEMENTED] **YES** - `nix::sched::sched_setaffinity()` already used elsewhere (line 1396)
 - Performance: Same (nix wraps libc, zero overhead)
 - Recommendation: **Replace with nix** if function is ever used
 
@@ -46,9 +46,9 @@ unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Size clamped to [128, 65536], error checked
-- ✅ Pointer valid (libbpf guarantees lifetime)
-- ✅ Must be called before BPF load (documented)
+- [IMPLEMENTED] Safe: Size clamped to [128, 65536], error checked
+- [IMPLEMENTED] Pointer valid (libbpf guarantees lifetime)
+- [IMPLEMENTED] Must be called before BPF load (documented)
 
 **Safe Alternative Available:**
 - ❌ **NO** - libbpf-rs doesn't expose safe wrapper
@@ -72,11 +72,11 @@ unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: FD validated >= 0, error checked
-- ⚠️ Minor: Ignores SETFL errors (best-effort)
+- [IMPLEMENTED] Safe: FD validated >= 0, error checked
+- [NOTE] Minor: Ignores SETFL errors (best-effort)
 
 **Safe Alternative Available:**
-- ✅ **YES** - `nix::fcntl::fcntl()` provides safe wrapper
+- [STATUS: IMPLEMENTED] **YES** - `nix::fcntl::fcntl()` provides safe wrapper
 - Performance: Same (nix wraps libc, zero overhead)
 - Recommendation: **Replace with nix**
 
@@ -97,9 +97,9 @@ context_in: Some(unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Stack-allocated struct, lifetime scoped
-- ✅ Size validated, no concurrent mutation
-- ✅ Required for BPF FFI boundary
+- [IMPLEMENTED] Safe: Stack-allocated struct, lifetime scoped
+- [IMPLEMENTED] Size validated, no concurrent mutation
+- [IMPLEMENTED] Required for BPF FFI boundary
 
 **Safe Alternative Available:**
 - ❌ **NO** - This is FFI requirement
@@ -118,9 +118,9 @@ let ris = unsafe { (bytes.as_ptr() as *const RawInputStats).read_unaligned() };
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Size validated before call
-- ✅ Uses `read_unaligned()` (handles alignment)
-- ✅ `#[repr(C)]` struct matches BPF layout
+- [IMPLEMENTED] Safe: Size validated before call
+- [IMPLEMENTED] Uses `read_unaligned()` (handles alignment)
+- [IMPLEMENTED] `#[repr(C)]` struct matches BPF layout
 
 **Safe Alternative Available:**
 - ❌ **NO** - Direct memory mapping from BPF
@@ -142,9 +142,9 @@ unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Error checked, user-requested feature
-- ✅ Parameters validated (priority clamped to 1-99)
-- ⚠️ Warning: Can lock system if misused (documented)
+- [IMPLEMENTED] Safe: Error checked, user-requested feature
+- [IMPLEMENTED] Parameters validated (priority clamped to 1-99)
+- [NOTE] Warning: Can lock system if misused (documented)
 
 **Safe Alternative Available:**
 - ❌ **NO** - nix doesn't provide SCHED_FIFO wrapper
@@ -167,9 +167,9 @@ unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Struct zeroed, error checked
-- ✅ Parameters validated (user-provided)
-- ⚠️ Warning: Hard real-time can lock system (documented)
+- [IMPLEMENTED] Safe: Struct zeroed, error checked
+- [IMPLEMENTED] Parameters validated (user-provided)
+- [NOTE] Warning: Hard real-time can lock system (documented)
 
 **Safe Alternative Available:**
 - ❌ **NO** - SCHED_DEADLINE not in nix
@@ -188,10 +188,10 @@ let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 ```
 
 **Safety Analysis:**
-- ✅ Safe: All FDs validated >= 0
-- ✅ Lifetime scoped to function call
-- ✅ Proper cleanup tracked in `registered_epoll_fds`
-- ✅ evdev crate doesn't implement `AsFd` trait
+- [IMPLEMENTED] Safe: All FDs validated >= 0
+- [IMPLEMENTED] Lifetime scoped to function call
+- [IMPLEMENTED] Proper cleanup tracked in `registered_epoll_fds`
+- [IMPLEMENTED] evdev crate doesn't implement `AsFd` trait
 
 **Safe Alternative Available:**
 - ❌ **NO** - Required because evdev 0.12 lacks `AsFd`
@@ -206,22 +206,22 @@ let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 
 ### 13. ProcessEvent Parsing (game_detect_bpf.rs:185)
 **Location:** BPF LSM ring buffer callback  
-**Status:** ✅ **Already fixed** - Uses `read_unaligned()`  
-**Decision:** ✅ **SAFE** - Properly handled.
+**Status:** [STATUS: IMPLEMENTED] **Already fixed** - Uses `read_unaligned()`  
+**Decision:** [STATUS: IMPLEMENTED] **SAFE** - Properly handled.
 
 ---
 
 ### 14. Ring Buffer Parsing (ring_buffer.rs:180)
 **Location:** Ring buffer callback  
-**Status:** ✅ **Already safe** - Uses `read_unaligned()`  
-**Decision:** ✅ **SAFE** - Properly handled.
+**Status:** [STATUS: IMPLEMENTED] **Already safe** - Uses `read_unaligned()`  
+**Decision:** [STATUS: IMPLEMENTED] **SAFE** - Properly handled.
 
 ---
 
 ### 15. sysconf (process_monitor.rs:43)
 **Location:** System clock ticks detection  
-**Status:** ✅ **Already fixed** - Error checked  
-**Decision:** ✅ **SAFE** - Properly handled.
+**Status:** [STATUS: IMPLEMENTED] **Already fixed** - Error checked  
+**Decision:** [STATUS: IMPLEMENTED] **SAFE** - Properly handled.
 
 ---
 
@@ -235,11 +235,11 @@ unsafe {
 ```
 
 **Safety Analysis:**
-- ✅ Safe: Best-effort call (ignores errors)
-- ⚠️ Minor: Ignores errors (intentional)
+- [IMPLEMENTED] Safe: Best-effort call (ignores errors)
+- [NOTE] Minor: Ignores errors (intentional)
 
 **Safe Alternative Available:**
-- ✅ **YES** - `nix::sys::resource::setpriority()` exists
+- [STATUS: IMPLEMENTED] **YES** - `nix::sys::resource::setpriority()` exists
 - Performance: Same (wraps libc)
 
 **Decision:** **REPLACE with nix** - Simple improvement.
@@ -263,10 +263,10 @@ This document reviews all unsafe code blocks in scx_gamer, documents safety inva
 
 ---
 
-## ✅ SAFE ALTERNATIVES IMPLEMENTED (4 instances)
+## [IMPLEMENTED] SAFE ALTERNATIVES IMPLEMENTED (4 instances)
 
 ### 1. fcntl O_NONBLOCK - Device Registration (main.rs:1012)
-**Status:** ✅ **MADE SAFE**  
+**Status:** [STATUS: IMPLEMENTED] **MADE SAFE**  
 **Before:**
 ```rust
 unsafe {
@@ -295,7 +295,7 @@ match fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL) {
 ---
 
 ### 2. fcntl O_NONBLOCK - Game Detector (game_detect.rs:182)
-**Status:** ✅ **MADE SAFE**  
+**Status:** [STATUS: IMPLEMENTED] **MADE SAFE**  
 **Same improvement as above** - replaced unsafe libc::fcntl with nix wrapper
 
 **Impact:** Zero latency (inotify setup happens once at startup)
@@ -303,7 +303,7 @@ match fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL) {
 ---
 
 ### 3. setpriority - TUI Thread (tui.rs:1690)
-**Status:** ✅ **MADE SAFE**  
+**Status:** [STATUS: IMPLEMENTED] **MADE SAFE**  
 **Before:**
 ```rust
 unsafe {
@@ -322,7 +322,7 @@ let _ = resource::setpriority(resource::Priority::Process, 0, 19);
 ---
 
 ### 4. CPU Affinity Pinning (main.rs:16)
-**Status:** ✅ **MADE SAFE**  
+**Status:** [STATUS: IMPLEMENTED] **MADE SAFE**  
 **Before:**
 ```rust
 unsafe {
@@ -352,27 +352,27 @@ These are required for FFI boundaries and cannot be made safe without wrapper li
 
 1. **BPF Map Configuration** (main.rs:938)
    - **Reason:** libbpf-rs FFI boundary
-   - **Safety:** ✅ Documented, validated, error checked
+   - **Safety:** [IMPLEMENTED] Documented, validated, error checked
    - **Alternative:** None (libbpf-rs doesn't expose safe wrapper)
 
 2. **BPF Program Input** (main.rs:1211)
    - **Reason:** libbpf-rs FFI requirement
-   - **Safety:** ✅ Documented, stack-allocated, lifetime scoped
+   - **Safety:** [IMPLEMENTED] Documented, stack-allocated, lifetime scoped
    - **Alternative:** None (required for BPF program input)
 
 3. **BorrowedFd Operations** (main.rs:1489, 1502, 1713, 2001, 2045)
    - **Reason:** evdev crate doesn't implement `AsFd` trait
-   - **Safety:** ✅ All FDs validated, lifetime tracked, cleanup verified
+   - **Safety:** [IMPLEMENTED] All FDs validated, lifetime tracked, cleanup verified
    - **Alternative:** Check if evdev 0.13+ implements `AsFd`
 
 4. **sched_setscheduler** (main.rs:1416)
    - **Reason:** No nix wrapper for SCHED_FIFO
-   - **Safety:** ✅ Documented, parameters validated, error checked
+   - **Safety:** [IMPLEMENTED] Documented, parameters validated, error checked
    - **Alternative:** None (nix only supports SCHED_OTHER)
 
 5. **sched_setattr** (main.rs:1442)
    - **Reason:** No wrapper exists (very new kernel feature)
-   - **Safety:** ✅ Documented, struct zeroed, error checked
+   - **Safety:** [IMPLEMENTED] Documented, struct zeroed, error checked
    - **Alternative:** None (SCHED_DEADLINE not in nix crate)
 
 ### Category 2: Performance Critical (2 instances)
@@ -381,21 +381,21 @@ These require unsafe for zero-copy performance:
 
 6. **Per-CPU Stats Reading** (main.rs:1282)
    - **Reason:** Zero-copy BPF reads
-   - **Safety:** ✅ Size validated, uses `read_unaligned()`, properly documented
+   - **Safety:** [IMPLEMENTED] Size validated, uses `read_unaligned()`, properly documented
    - **Alternative:** Serialization would add ~50-100ns latency (unacceptable)
 
 7. **Ring Buffer Parsing** (ring_buffer.rs:180, game_detect_bpf.rs:185)
    - **Reason:** Zero-copy ring buffer reads
-   - **Safety:** ✅ Size validated, uses `read_unaligned()`, properly documented
+   - **Safety:** [IMPLEMENTED] Size validated, uses `read_unaligned()`, properly documented
    - **Alternative:** Serialization would add latency (unacceptable)
 
 ### Category 3: Already Properly Documented (2 instances)
 
 8. **ProcessEvent Parsing** (game_detect_bpf.rs:185)
-   - **Status:** ✅ Already fixed with `read_unaligned()`
+   - **Status:** [IMPLEMENTED] Already fixed with `read_unaligned()`
 
 9. **sysconf** (process_monitor.rs:43)
-   - **Status:** ✅ Already fixed with error checking
+   - **Status:** [IMPLEMENTED] Already fixed with error checking
 
 ---
 
@@ -430,11 +430,11 @@ These require unsafe for zero-copy performance:
 ## Final Safety Rating: **9.5/10**
 
 **Improvements:**
-- ✅ Eliminated 4 unsafe blocks
-- ✅ Comprehensive documentation for all remaining unsafe blocks
-- ✅ Verified all safety invariants
-- ✅ Zero latency impact
-- ✅ All error paths handled
+- [IMPLEMENTED] Eliminated 4 unsafe blocks
+- [IMPLEMENTED] Comprehensive documentation for all remaining unsafe blocks
+- [IMPLEMENTED] Verified all safety invariants
+- [IMPLEMENTED] Zero latency impact
+- [IMPLEMENTED] All error paths handled
 
 **Remaining Unsafe Blocks:**
 - All properly documented
@@ -445,11 +445,11 @@ These require unsafe for zero-copy performance:
 
 ## Recommendations
 
-### ✅ Completed
-1. ✅ Replaced fcntl with nix wrapper (2 instances)
-2. ✅ Replaced setpriority with nix wrapper (1 instance)
-3. ✅ Replaced CPU affinity with nix wrapper (1 instance)
-4. ✅ Documented all remaining unsafe blocks
+### [IMPLEMENTED] Completed
+1. [IMPLEMENTED] Replaced fcntl with nix wrapper (2 instances)
+2. [IMPLEMENTED] Replaced setpriority with nix wrapper (1 instance)
+3. [IMPLEMENTED] Replaced CPU affinity with nix wrapper (1 instance)
+4. [IMPLEMENTED] Documented all remaining unsafe blocks
 
 ### Future Improvements (Optional)
 1. Monitor evdev crate for `AsFd` trait implementation

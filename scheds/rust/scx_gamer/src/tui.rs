@@ -451,7 +451,7 @@ impl Default for ConfigSummary {
 impl TuiState {
     pub fn new(config: ConfigSummary, history_len: usize, event_capacity: usize) -> Self {
         // Try to find OBS PID
-        let obs_pid = crate::process_monitor::find_obs_pid();
+        let obs_pid = find_obs_pid();
 
         Self {
             paused: false,

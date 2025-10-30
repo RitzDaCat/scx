@@ -15,9 +15,7 @@
 
 ## 1. Functions Marked with `#[allow(dead_code)]`
 
-### 1.1. `pin_current_thread_to_cpu()` - REMOVE ✅
-
-**Location:** `main.rs:12-39`  
+### 1.1. `pin_current_thread_to_cpu()` - REMOVE  **Location:** `main.rs:12-39`  
 **Status:** Never called anywhere in codebase  
 **Usage Check:** 
 ```bash
@@ -31,9 +29,7 @@ grep -r "pin_current_thread_to_cpu" rust/scx_gamer/src/
 
 ---
 
-### 1.2. `get_multi_process_stats()` - REMOVE ✅
-
-**Location:** `process_monitor.rs:128-133`  
+### 1.2. `get_multi_process_stats()` - REMOVE  **Location:** `process_monitor.rs:128-133`  
 **Status:** Never called anywhere in codebase  
 **Usage Check:**
 ```bash
@@ -47,9 +43,9 @@ grep -r "get_multi_process_stats" rust/scx_gamer/src/
 
 ---
 
-### 1.3. `FLAG_WINE`, `FLAG_STEAM`, `FLAG_EXE` Constants - KEEP ⚠️
+### 1.3. `FLAG_WINE`, `FLAG_STEAM`, `FLAG_EXE` Constants - KEEP
 
-**Location:** `game_detect_bpf.rs:38-43`  
+**Note:** These constants are used by BPF code but marked as dead code because Rust compiler cannot detect BPF usage. **Location:** `game_detect_bpf.rs:38-43`  
 **Status:** Used in BPF C code (game_detect.bpf.h)  
 **Usage Check:**
 - BPF C code uses these flags: `FLAG_WINE`, `FLAG_STEAM`, `FLAG_EXE`
@@ -64,9 +60,7 @@ grep -r "get_multi_process_stats" rust/scx_gamer/src/
 
 ## 2. Unused Imports
 
-### 2.1. Commented Import - REMOVE ✅
-
-**Location:** `main.rs:89`  
+### 2.1. Commented Import - REMOVE  **Location:** `main.rs:89`  
 **Current Code:**
 ```rust
 // use crossbeam::channel::RecvTimeoutError;
@@ -81,9 +75,7 @@ grep -r "get_multi_process_stats" rust/scx_gamer/src/
 
 ## 3. Commented-Out Code Blocks
 
-### 3.1. Thread Learning Modules - DOCUMENT ✅
-
-**Location:** `main.rs:61-63, 71-73`  
+### 3.1. Thread Learning Modules - DOCUMENT  **Location:** `main.rs:61-63, 71-73`  
 **Current Code:**
 ```rust
 // Thread learning modules removed - experimental, not production-ready
@@ -102,9 +94,7 @@ grep -r "get_multi_process_stats" rust/scx_gamer/src/
 
 ---
 
-### 3.2. Removed Function Comments - DOCUMENT ✅
-
-Multiple files contain comments documenting removed functionality:
+### 3.2. Removed Function Comments - DOCUMENT Multiple files contain comments documenting removed functionality:
 
 **Examples:**
 - `main.rs:41` - `enable_kernel_busy_polling()` removed
@@ -125,9 +115,9 @@ Multiple files contain comments documenting removed functionality:
 
 ## 4. Unused Code in Active Files
 
-### 4.1. `thread_sampler.rs` and `thread_patterns.rs` - EVALUATE ⚠️
+### 4.1. `thread_sampler.rs` and `thread_patterns.rs` - EVALUATE
 
-**Status:** Files exist but modules not imported  
+**Note:** These files exist but are not imported. Decision needed on whether to remove or relocate. **Status:** Files exist but modules not imported  
 **Files:**
 - `src/thread_sampler.rs` (200 lines)
 - `src/thread_patterns.rs` (existence confirmed)
@@ -151,8 +141,8 @@ Multiple files contain comments documenting removed functionality:
 ### 5.1. Functions That Are Public But May Be Unused
 
 **Checked:**
-- `ProcessMonitor::get_multi_process_stats()` - ✅ Confirmed unused
-- `pin_current_thread_to_cpu()` - ✅ Confirmed unused
+- `ProcessMonitor::get_multi_process_stats()` -  Confirmed unused
+- `pin_current_thread_to_cpu()` -  Confirmed unused
 
 **Status:** All other public functions appear to be used.
 
@@ -166,15 +156,15 @@ Multiple files contain comments documenting removed functionality:
 **Current State:** No unused import warnings observed.
 
 **Imports Verified as Used:**
-- ✅ `MaybeUninit` - Used in `main.rs:2329, 2131`
-- ✅ `EventType` - Used for device detection
-- ✅ `build_id` - Used for version info
-- ✅ `compat` - Used for SCX_OPS flags
-- ✅ `parse_cpu_list` - Used for CPU parsing
-- ✅ `CoreType`, `Topology` - Used for CPU topology
-- ✅ `NR_CPU_IDS` - Used for CPU limit checks
-- ✅ `mpsc` (tui.rs) - Used for metrics channel
-- ✅ `sched_setaffinity`, `CpuSet`, `Pid` (tui.rs) - Used for CPU pinning
+-  `MaybeUninit` - Used in `main.rs:2329, 2131`
+-  `EventType` - Used for device detection
+-  `build_id` - Used for version info
+-  `compat` - Used for SCX_OPS flags
+-  `parse_cpu_list` - Used for CPU parsing
+-  `CoreType`, `Topology` - Used for CPU topology
+-  `NR_CPU_IDS` - Used for CPU limit checks
+-  `mpsc` (tui.rs) - Used for metrics channel
+-  `sched_setaffinity`, `CpuSet`, `Pid` (tui.rs) - Used for CPU pinning
 
 **Status:** All imports appear to be used.
 
@@ -184,18 +174,18 @@ Multiple files contain comments documenting removed functionality:
 
 ### Safe to Remove Immediately (No Impact):
 
-1. ✅ **Remove `pin_current_thread_to_cpu()` function** (main.rs:12-39)
-2. ✅ **Remove `get_multi_process_stats()` function** (process_monitor.rs:128-133)
-3. ✅ **Remove commented import** (main.rs:89)
+1.  **Remove `pin_current_thread_to_cpu()` function** (main.rs:12-39)
+2.  **Remove `get_multi_process_stats()` function** (process_monitor.rs:128-133)
+3.  **Remove commented import** (main.rs:89)
 
 ### Document/Clarify:
 
-4. ⚠️ **Add comment to FLAG constants** explaining BPF FFI usage (game_detect_bpf.rs:38-43)
-5. ⚠️ **Evaluate `thread_sampler.rs` and `thread_patterns.rs`** - remove or move to legacy
+4.  **Add comment to FLAG constants** explaining BPF FFI usage (game_detect_bpf.rs:38-43)
+5.  **Evaluate `thread_sampler.rs` and `thread_patterns.rs`** - remove or move to legacy
 
 ### Keep (Useful Documentation):
 
-6. ✅ **Keep removal comments** - They document historical changes
+6.  **Keep removal comments** - They document historical changes
 
 ---
 
@@ -239,10 +229,10 @@ Multiple files contain comments documenting removed functionality:
 ## 10. Verification Steps
 
 After removal:
-1. ✅ Run `cargo build` - should compile successfully
-2. ✅ Run `cargo test` - all tests should pass
-3. ✅ Run `cargo clippy` - no new warnings
-4. ✅ Verify no external crates depend on removed functions
+1.  Run `cargo build` - should compile successfully
+2.  Run `cargo test` - all tests should pass
+3.  Run `cargo clippy` - no new warnings
+4.  Verify no external crates depend on removed functions
 
 ---
 

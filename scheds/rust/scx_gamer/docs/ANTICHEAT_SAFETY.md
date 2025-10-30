@@ -4,7 +4,7 @@
 
 **scx_gamer is anti-cheat safe.** The scheduler uses kernel-level CPU scheduling APIs and does not access game memory, modify game logic, or provide any competitive advantage. It operates similarly to standard Linux tools like `taskset`, `nice`, and CPU governors.
 
-**Verdict: ✅ SAFE FOR USE WITH ANTI-CHEAT SYSTEMS**
+**Verdict: [IMPLEMENTED] SAFE FOR USE WITH ANTI-CHEAT SYSTEMS**
 
 ---
 
@@ -176,13 +176,13 @@ None of these APIs are inherently malicious or used by cheats.
 
 | Tool | Function | scx_gamer Equivalent | Anti-Cheat Safe? |
 |------|----------|---------------------|------------------|
-| **taskset** | CPU affinity | `select_cpu()` BPF function | ✅ Yes |
-| **nice/renice** | Process priority | vtime adjustments | ✅ Yes |
-| **cpupower** | CPU frequency scaling | cpufreq control | ✅ Yes |
-| **GameMode** (Feral) | Process boosting | Input window boost | ✅ Yes |
-| **perf** | Performance profiling | BPF stats collection | ✅ Yes |
-| **evtest** | Input monitoring | evdev read-only | ✅ Yes |
-| **MangoHud** | Frame timing overlay | ML frame metrics | ✅ Yes |
+| **taskset** | CPU affinity | `select_cpu()` BPF function | [IMPLEMENTED] Yes |
+| **nice/renice** | Process priority | vtime adjustments | [IMPLEMENTED] Yes |
+| **cpupower** | CPU frequency scaling | cpufreq control | [IMPLEMENTED] Yes |
+| **GameMode** (Feral) | Process boosting | Input window boost | [IMPLEMENTED] Yes |
+| **perf** | Performance profiling | BPF stats collection | [IMPLEMENTED] Yes |
+| **evtest** | Input monitoring | evdev read-only | [IMPLEMENTED] Yes |
+| **MangoHud** | Frame timing overlay | ML frame metrics | [IMPLEMENTED] Yes |
 
 **All of these tools are widely used and anti-cheat safe.**
 
@@ -268,14 +268,14 @@ sudo scx_gamer --disable-wine-detect
 
 ## Known Anti-Cheat Compatibility
 
-### ✅ Confirmed Compatible
+### [IMPLEMENTED] Confirmed Compatible
 
 | Anti-Cheat | Status | Notes |
 |------------|--------|-------|
-| **VAC** (Valve) | ✅ Safe | Kernel-level detection rare on Linux |
-| **BattlEye** | ✅ Likely safe | Linux version less invasive than Windows |
-| **EasyAntiCheat** | ✅ Likely safe | No reports of scheduler-related bans |
-| **PunkBuster** | ✅ Safe | Deprecated, minimal kernel scanning |
+| **VAC** (Valve) | [IMPLEMENTED] Safe | Kernel-level detection rare on Linux |
+| **BattlEye** | [IMPLEMENTED] Likely safe | Linux version less invasive than Windows |
+| **EasyAntiCheat** | [IMPLEMENTED] Likely safe | No reports of scheduler-related bans |
+| **PunkBuster** | [IMPLEMENTED] Safe | Deprecated, minimal kernel scanning |
 
 **Reasoning**: Linux anti-cheats generally focus on userspace cheats (memory hacks, input injection). Kernel schedulers are OS infrastructure.
 

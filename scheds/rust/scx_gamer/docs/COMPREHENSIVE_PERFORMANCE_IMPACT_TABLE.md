@@ -43,7 +43,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | NUMA Awareness | **0ns** | Only affects GPU/compositor threads |
 | **Net Input Latency** | **-100-500ns** | Minimal improvement, but no regressions |
 
-**Assessment:** ✅ **No negative impact** - All optimizations are additive, no changes to input hot path.
+**Assessment:**  **No negative impact** - All optimizations are additive, no changes to input hot path.
 
 ---
 
@@ -60,7 +60,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | Pipeline Framework | **0ns** | Not implemented | N/A |
 | **Net Frame Latency** | **-50ns to -5ms** | Variable by scenario | **Significant improvement** |
 
-**Assessment:** ✅ **Significant improvement** - Prevents frame drops and reduces presentation delays.
+**Assessment:**  **Significant improvement** - Prevents frame drops and reduces presentation delays.
 
 ---
 
@@ -76,7 +76,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | NUMA Awareness | ⬆️ **+Low** | ⬆️ **+Low** | ⬆️ **+Low** | Only benefits multi-socket systems |
 | **Net Gaming Performance** | ⬆️ **+High** | ⬆️ **+High** | ⬆️ **+High** | **Significant improvement** |
 
-**Assessment:** ✅ **Significant improvement** - Especially in contention scenarios (heavy CPU load, lock contention).
+**Assessment:**  **Significant improvement** - Especially in contention scenarios (heavy CPU load, lock contention).
 
 ---
 
@@ -92,7 +92,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | NUMA Awareness | +5-15ns/select | Better cache locality reduces work | **Neutral to slightly positive** |
 | **Total CPU Overhead** | **+25-55ns** | Variable benefits | **Negligible overhead** |
 
-**Assessment:** ✅ **Negligible impact** - ~25-55ns overhead is <0.1% of scheduler overhead. Potential benefits from reduced migrations/re-scheduling.
+**Assessment:**  **Negligible impact** - ~25-55ns overhead is <0.1% of scheduler overhead. Potential benefits from reduced migrations/re-scheduling.
 
 ---
 
@@ -108,7 +108,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | Compositor Hook Fix | ⬆️ **+Critical** | None | Fixed BPF load failures |
 | **Net Stability** | ⬆️ **+High** | **Low risk** | **Significant improvement** |
 
-**Assessment:** ✅ **Significant improvement** - Self-tuning features + critical bug fixes improve reliability.
+**Assessment:**  **Significant improvement** - Self-tuning features + critical bug fixes improve reliability.
 
 ---
 
@@ -124,7 +124,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | NUMA Awareness | **0** | N/A | N/A |
 | **Net Priority Inversion** | **-500µs to -5ms** | Lock contention scenarios | **Major improvement** |
 
-**Assessment:** ✅ **Major improvement** - Eliminates blocking delays from priority inversion.
+**Assessment:**  **Major improvement** - Eliminates blocking delays from priority inversion.
 
 ---
 
@@ -140,7 +140,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | NUMA Awareness | **0** | N/A | N/A |
 | **Net Deadline Misses** | **-500µs to -5ms** | Starvation scenarios | **Major improvement** |
 
-**Assessment:** ✅ **Major improvement** - Auto-boost prevents continued deadline misses.
+**Assessment:**  **Major improvement** - Auto-boost prevents continued deadline misses.
 
 ---
 
@@ -156,7 +156,7 @@ This document provides a comprehensive analysis of all optimizations implemented
 | Rate Monotonic | **0** | N/A | N/A |
 | **Net NUMA Impact** | **-50-100ns/access** | Multi-socket systems | **Moderate improvement** |
 
-**Assessment:** ✅ **Moderate improvement** - Only applies to multi-socket systems, but significant benefit when applicable.
+**Assessment:**  **Moderate improvement** - Only applies to multi-socket systems, but significant benefit when applicable.
 
 ---
 
@@ -166,13 +166,13 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Metric | Baseline | After Changes | Change | Assessment |
 |--------|----------|---------------|--------|------------|
-| Input Latency | 53.7µs | 53.6-53.2µs | **-100-500ns** | ✅ Slight improvement |
-| Frame Latency | ~16.67ms | ~16.67ms | **+25-55ns** | ✅ Negligible overhead |
-| CPU Usage | ~100% of 1 core | ~100% of 1 core | **+0.001%** | ✅ Negligible |
-| Frame Drops | 0% | 0% | **0** | ✅ Maintained |
-| **Overall** | **Baseline** | **Baseline + 0ns** | **Neutral** | ✅ **No regression** |
+| Input Latency | 53.7µs | 53.6-53.2µs | **-100-500ns** |  Slight improvement |
+| Frame Latency | ~16.67ms | ~16.67ms | **+25-55ns** |  Negligible overhead |
+| CPU Usage | ~100% of 1 core | ~100% of 1 core | **+0.001%** |  Negligible |
+| Frame Drops | 0% | 0% | **0** |  Maintained |
+| **Overall** | **Baseline** | **Baseline + 0ns** | **Neutral** |  **No regression** |
 
-**Verdict:** ✅ **No negative impact** - Optimizations add minimal overhead, no regressions.
+**Verdict:**  **No negative impact** - Optimizations add minimal overhead, no regressions.
 
 ---
 
@@ -180,14 +180,14 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Metric | Baseline | After Changes | Change | Assessment |
 |--------|----------|---------------|--------|------------|
-| Input Latency | 53.7µs | 53.7µs | **0ns** | ✅ Maintained |
-| Frame Latency | Variable (drops) | Stable | **-500µs to -5ms** | ✅ **Major improvement** |
-| CPU Usage | ~100% of 1 core | ~100% of 1 core | **+0.001%** | ✅ Negligible |
-| Frame Drops | 5-15% | 0-2% | **-5-15%** | ✅ **Major improvement** |
-| GPU Starvation | Yes | Auto-resolved | **Prevented** | ✅ **Major improvement** |
-| **Overall** | **Poor** | **Good** | **+High** | ✅ **Significant improvement** |
+| Input Latency | 53.7µs | 53.7µs | **0ns** |  Maintained |
+| Frame Latency | Variable (drops) | Stable | **-500µs to -5ms** |  **Major improvement** |
+| CPU Usage | ~100% of 1 core | ~100% of 1 core | **+0.001%** |  Negligible |
+| Frame Drops | 5-15% | 0-2% | **-5-15%** |  **Major improvement** |
+| GPU Starvation | Yes | Auto-resolved | **Prevented** |  **Major improvement** |
+| **Overall** | **Poor** | **Good** | **+High** |  **Significant improvement** |
 
-**Verdict:** ✅ **Major improvement** - Auto-boost prevents GPU/compositor starvation, eliminates frame drops.
+**Verdict:**  **Major improvement** - Auto-boost prevents GPU/compositor starvation, eliminates frame drops.
 
 ---
 
@@ -195,14 +195,14 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Metric | Baseline | After Changes | Change | Assessment |
 |--------|----------|---------------|--------|------------|
-| Input Latency | 53.7µs | 53.7µs | **0ns** | ✅ Maintained |
-| Frame Latency | Variable (spikes) | Stable | **-500µs to -5ms** | ✅ **Major improvement** |
-| GPU Blocking | 1-5ms delays | <100ns | **-1ms to -5ms** | ✅ **Major improvement** |
-| Priority Inversion | Common | Prevented | **Eliminated** | ✅ **Major improvement** |
-| Frame Consistency | Poor | Good | **+High** | ✅ **Major improvement** |
-| **Overall** | **Poor** | **Good** | **+High** | ✅ **Significant improvement** |
+| Input Latency | 53.7µs | 53.7µs | **0ns** |  Maintained |
+| Frame Latency | Variable (spikes) | Stable | **-500µs to -5ms** |  **Major improvement** |
+| GPU Blocking | 1-5ms delays | <100ns | **-1ms to -5ms** |  **Major improvement** |
+| Priority Inversion | Common | Prevented | **Eliminated** |  **Major improvement** |
+| Frame Consistency | Poor | Good | **+High** |  **Major improvement** |
+| **Overall** | **Poor** | **Good** | **+High** |  **Significant improvement** |
 
-**Verdict:** ✅ **Major improvement** - Priority inheritance eliminates blocking delays.
+**Verdict:**  **Major improvement** - Priority inheritance eliminates blocking delays.
 
 ---
 
@@ -210,13 +210,13 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Metric | Baseline | After Changes | Change | Assessment |
 |--------|----------|---------------|--------|------------|
-| Input Latency | 53.7µs | 53.7µs | **0ns** | ✅ Maintained |
-| Frame Latency | Variable | Improved | **-50-100ns/access** | ✅ **Moderate improvement** |
-| Memory Access | Cross-node | Same-node | **-50-100ns** | ✅ **Moderate improvement** |
-| Cache Locality | Poor | Good | **+Medium** | ✅ **Moderate improvement** |
-| **Overall** | **Moderate** | **Good** | **+Medium** | ✅ **Moderate improvement** |
+| Input Latency | 53.7µs | 53.7µs | **0ns** |  Maintained |
+| Frame Latency | Variable | Improved | **-50-100ns/access** |  **Moderate improvement** |
+| Memory Access | Cross-node | Same-node | **-50-100ns** |  **Moderate improvement** |
+| Cache Locality | Poor | Good | **+Medium** |  **Moderate improvement** |
+| **Overall** | **Moderate** | **Good** | **+Medium** |  **Moderate improvement** |
 
-**Verdict:** ✅ **Moderate improvement** - Only applies to multi-socket systems, but significant when applicable.
+**Verdict:**  **Moderate improvement** - Only applies to multi-socket systems, but significant when applicable.
 
 ---
 
@@ -226,13 +226,13 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Aspect | Impact | Verdict |
 |--------|--------|---------|
-| **Input Latency** | -100-500ns | ✅ **Slight improvement** |
-| **Frame Latency** | +25-55ns | ✅ **Negligible overhead** |
-| **CPU Usage** | +0.001% | ✅ **Negligible overhead** |
-| **Stability** | ⬆️ +High | ✅ **Significant improvement** |
-| **Overall** | **Neutral to slightly positive** | ✅ **No regressions** |
+| **Input Latency** | -100-500ns |  **Slight improvement** |
+| **Frame Latency** | +25-55ns |  **Negligible overhead** |
+| **CPU Usage** | +0.001% |  **Negligible overhead** |
+| **Stability** | ⬆️ +High |  **Significant improvement** |
+| **Overall** | **Neutral to slightly positive** |  **No regressions** |
 
-**Conclusion:** ✅ **Safe changes** - Minimal overhead, no regressions in normal operation.
+**Conclusion:**  **Safe changes** - Minimal overhead, no regressions in normal operation.
 
 ---
 
@@ -240,14 +240,14 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Aspect | Impact | Verdict |
 |--------|--------|---------|
-| **Input Latency** | 0ns | ✅ **Maintained** |
-| **Frame Latency** | -500µs to -5ms | ✅ **Major improvement** |
-| **Frame Drops** | -5-15% | ✅ **Major improvement** |
-| **Priority Inversion** | -500µs to -5ms | ✅ **Major improvement** |
-| **Deadline Misses** | -500µs to -5ms | ✅ **Major improvement** |
-| **Overall** | **+High** | ✅ **Significant improvement** |
+| **Input Latency** | 0ns |  **Maintained** |
+| **Frame Latency** | -500µs to -5ms |  **Major improvement** |
+| **Frame Drops** | -5-15% |  **Major improvement** |
+| **Priority Inversion** | -500µs to -5ms |  **Major improvement** |
+| **Deadline Misses** | -500µs to -5ms |  **Major improvement** |
+| **Overall** | **+High** |  **Significant improvement** |
 
-**Conclusion:** ✅ **Major improvements** - Optimizations shine in contention scenarios where they're most needed.
+**Conclusion:**  **Major improvements** - Optimizations shine in contention scenarios where they're most needed.
 
 ---
 
@@ -257,32 +257,32 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Metric | Normal Operation | Contention Scenarios | Overall Verdict |
 |--------|------------------|----------------------|-----------------|
-| **Input Latency** | -100-500ns | 0ns | ✅ **Slight improvement** |
-| **Frame Latency** | +25-55ns | -500µs to -5ms | ✅ **Major improvement** |
-| **Scheduling Decisions** | +25-55ns | -500µs to -5ms | ✅ **Major improvement** |
+| **Input Latency** | -100-500ns | 0ns |  **Slight improvement** |
+| **Frame Latency** | +25-55ns | -500µs to -5ms |  **Major improvement** |
+| **Scheduling Decisions** | +25-55ns | -500µs to -5ms |  **Major improvement** |
 
 ### Gaming Performance Impact
 
 | Metric | Normal Operation | Contention Scenarios | Overall Verdict |
 |--------|------------------|----------------------|-----------------|
-| **Frame Pacing** | Maintained | ⬆️ +High | ✅ **Significant improvement** |
-| **Responsiveness** | Maintained | ⬆️ +High | ✅ **Significant improvement** |
-| **Consistency** | Maintained | ⬆️ +High | ✅ **Significant improvement** |
-| **Frame Drops** | 0% (maintained) | -5-15% | ✅ **Major improvement** |
+| **Frame Pacing** | Maintained | ⬆️ +High |  **Significant improvement** |
+| **Responsiveness** | Maintained | ⬆️ +High |  **Significant improvement** |
+| **Consistency** | Maintained | ⬆️ +High |  **Significant improvement** |
+| **Frame Drops** | 0% (maintained) | -5-15% |  **Major improvement** |
 
 ### System Resource Impact
 
 | Metric | Normal Operation | Contention Scenarios | Overall Verdict |
 |--------|------------------|----------------------|-----------------|
-| **CPU Usage** | +0.001% | +0.001% | ✅ **Negligible overhead** |
-| **Memory Usage** | 0 bytes | 0 bytes | ✅ **No change** |
-| **Stability** | ⬆️ +High | ⬆️ +High | ✅ **Significant improvement** |
+| **CPU Usage** | +0.001% | +0.001% |  **Negligible overhead** |
+| **Memory Usage** | 0 bytes | 0 bytes |  **No change** |
+| **Stability** | ⬆️ +High | ⬆️ +High |  **Significant improvement** |
 
 ---
 
 ## Overall Verdict: Is Performance Better?
 
-### ✅ **YES - Performance is Significantly Better**
+###  **YES - Performance is Significantly Better**
 
 **Reasoning:**
 
@@ -306,11 +306,11 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 | Scenario | Performance Change | Verdict |
 |----------|-------------------|---------|
-| **Idle System** | Neutral to +500ns | ✅ **Slight improvement** |
-| **Heavy CPU Load** | +500µs to +5ms | ✅ **Major improvement** |
-| **Lock Contention** | +500µs to +5ms | ✅ **Major improvement** |
-| **Multi-Node Systems** | +50-100ns/access | ✅ **Moderate improvement** |
-| **Overall Average** | **+200µs to +2ms** | ✅ **Significant improvement** |
+| **Idle System** | Neutral to +500ns |  **Slight improvement** |
+| **Heavy CPU Load** | +500µs to +5ms |  **Major improvement** |
+| **Lock Contention** | +500µs to +5ms |  **Major improvement** |
+| **Multi-Node Systems** | +50-100ns/access |  **Moderate improvement** |
+| **Overall Average** | **+200µs to +2ms** |  **Significant improvement** |
 
 ---
 
@@ -326,14 +326,14 @@ This document provides a comprehensive analysis of all optimizations implemented
 
 ## Conclusion
 
-**Overall Performance Assessment: ✅ SIGNIFICANTLY BETTER**
+**Overall Performance Assessment:  SIGNIFICANTLY BETTER**
 
 - **Normal operation:** Minimal overhead, no regressions
 - **Contention scenarios:** Major improvements (500µs-5ms)
 - **Stability:** Significant improvements (self-tuning + bug fixes)
 - **Risk:** Low (all changes are additive, conservative thresholds)
 
-**Recommendation:** ✅ **Deploy** - All optimizations provide net positive benefit with minimal risk.
+**Recommendation:**  **Deploy** - All optimizations provide net positive benefit with minimal risk.
 
 ---
 

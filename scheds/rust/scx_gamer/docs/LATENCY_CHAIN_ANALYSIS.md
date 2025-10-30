@@ -33,12 +33,12 @@
 2. Physics simulation updates world state
 3. Render thread prepares frame data
 
-**Scheduler Impact:** ✅ Already optimized
+**Scheduler Impact:** [IMPLEMENTED] Already optimized
 - Game threads get foreground boost during input window
 - Render threads get GPU boost (level 6)
 
 **Optimization Opportunities:**
-- ⚠️ **None** - Game logic is application-level, not scheduler-controlled
+- [NOTE] **None** - Game logic is application-level, not scheduler-controlled
 
 ---
 
@@ -54,12 +54,12 @@
 5. Commands queued to GPU
 
 **Current Optimizations:**
-- ✅ Fentry hook on `drm_ioctl` (<1ms detection latency)
-- ✅ GPU threads get boost level 6 (8x priority)
-- ✅ Physical core preference (no SMT)
-- ✅ Fast path in deadline calculation (no window checks)
+- [IMPLEMENTED] Fentry hook on `drm_ioctl` (<1ms detection latency)
+- [IMPLEMENTED] GPU threads get boost level 6 (8x priority)
+- [IMPLEMENTED] Physical core preference (no SMT)
+- [IMPLEMENTED] Fast path in deadline calculation (no window checks)
 
-**Scheduler Impact:** ✅ **Optimal**
+**Scheduler Impact:** [STATUS: IMPLEMENTED] **Optimal**
 
 **Code Location:** `include/gpu_detect.bpf.h:191-213`
 
@@ -78,8 +78,8 @@
 **Scheduler Impact:** ❌ **Not controllable** - Hardware-only
 
 **Optimization Opportunities:**
-- ⚠️ **None** - Hardware processing time is fixed
-- ✅ **Future:** Could optimize GPU workload scheduling (out of scope)
+- [NOTE] **None** - Hardware processing time is fixed
+- [STATUS: IMPLEMENTED] **Future:** Could optimize GPU workload scheduling (out of scope)
 
 ---
 
@@ -94,15 +94,15 @@
 4. Frame buffer marked as ready
 
 **Current Optimizations:**
-- ✅ GPU interrupt detection (tracepoint-based)
-- ✅ Boost level 4 (6x priority) - **RECENTLY INCREASED**
-- ✅ Fast wakeup of compositor threads
+- [IMPLEMENTED] GPU interrupt detection (tracepoint-based)
+- [IMPLEMENTED] Boost level 4 (6x priority) - **RECENTLY INCREASED**
+- [IMPLEMENTED] Fast wakeup of compositor threads
 
-**Scheduler Impact:** ✅ **Optimized** (just improved)
+**Scheduler Impact:** [STATUS: IMPLEMENTED] **Optimized** (just improved)
 
 **Optimization Opportunities:**
-- ✅ **DONE:** Increased boost from 2 to 4
-- ⚠️ **Possible:** IRQ affinity pinning (ensure interrupts go to fast cores)
+- [STATUS: IMPLEMENTED] **DONE:** Increased boost from 2 to 4
+- [NOTE] **Possible:** IRQ affinity pinning (ensure interrupts go to fast cores)
 
 **Code Location:** `main.bpf.c:2488-2489`
 
@@ -120,18 +120,18 @@
 5. Calls `drm_mode_page_flip` to present frame
 
 **Current Optimizations:**
-- ✅ Compositor detection (`drm_mode_setcrtc`, `drm_mode_setplane`)
-- ✅ Boost level 5 (7x priority) - **RECENTLY INCREASED**
-- ✅ Physical core preference - **RECENTLY ADDED**
-- ✅ Fast path in deadline calculation (boost_shift >= 5)
+- [IMPLEMENTED] Compositor detection (`drm_mode_setcrtc`, `drm_mode_setplane`)
+- [IMPLEMENTED] Boost level 5 (7x priority) - **RECENTLY INCREASED**
+- [IMPLEMENTED] Physical core preference - **RECENTLY ADDED**
+- [IMPLEMENTED] Fast path in deadline calculation (boost_shift >= 5)
 
-**Scheduler Impact:** ✅ **Optimized** (just improved)
+**Scheduler Impact:** [STATUS: IMPLEMENTED] **Optimized** (just improved)
 
 **Optimization Opportunities:**
-- ✅ **DONE:** Increased boost from 3 to 5
-- ✅ **DONE:** Added physical core preference
-- ⚠️ **Pending:** Page flip detection hook (`drm_mode_page_flip`)
-- ⚠️ **Future:** VSync-aware scheduling (predictive boost before VSync)
+- [STATUS: IMPLEMENTED] **DONE:** Increased boost from 3 to 5
+- [STATUS: IMPLEMENTED] **DONE:** Added physical core preference
+- [NOTE] **Pending:** Page flip detection hook (`drm_mode_page_flip`)
+- [NOTE] **Future:** VSync-aware scheduling (predictive boost before VSync)
 
 **Code Location:** 
 - Boost: `main.bpf.c:2464-2465`
@@ -150,14 +150,14 @@
 4. VSync event scheduled
 
 **Current Optimizations:**
-- ⚠️ **None** - Page flip not yet detected
+- [NOTE] **None** - Page flip not yet detected
 
-**Scheduler Impact:** ⚠️ **Not optimized** (pending implementation)
+**Scheduler Impact:** [NOTE] **Not optimized** (pending implementation)
 
 **Optimization Opportunities:**
 - 🔴 **HIGH PRIORITY:** Add fentry hook on `drm_mode_page_flip`
 - 🔴 **HIGH PRIORITY:** Immediately boost compositor thread when page flip detected
-- ⚠️ **Future:** Track page flip timing for VSync prediction
+- [NOTE] **Future:** Track page flip timing for VSync prediction
 
 **Proposed Implementation:**
 ```c
@@ -196,8 +196,8 @@ int BPF_PROG(detect_compositor_page_flip, struct drm_crtc *crtc,
 **Scheduler Impact:** ❌ **Not controllable** - Hardware timing
 
 **Optimization Opportunities:**
-- ⚠️ **None** - Hardware limits
-- ⚠️ **Future:** VSync-aware scheduling could pre-boost compositor before VSync
+- [NOTE] **None** - Hardware limits
+- [NOTE] **Future:** VSync-aware scheduling could pre-boost compositor before VSync
 
 **Hardware Limits:**
 - **VSync Frequency:** Fixed by display refresh rate
@@ -310,23 +310,23 @@ T+8ms:    Pixel response completes (visible on monitor)
 
 ## Latency Reduction Roadmap
 
-### **Phase 1: Quick Wins** ✅ **COMPLETED**
-- ✅ Increase compositor boost: 3 → 5
-- ✅ Increase GPU interrupt boost: 2 → 4
-- ✅ Add physical core preference for compositor
+### **Phase 1: Quick Wins** [STATUS: IMPLEMENTED] **COMPLETED**
+- [IMPLEMENTED] Increase compositor boost: 3 → 5
+- [IMPLEMENTED] Increase GPU interrupt boost: 2 → 4
+- [IMPLEMENTED] Add physical core preference for compositor
 
 **Expected Benefit:** ~1-2ms reduction
 
 ### **Phase 2: Detection Enhancements** (NEXT)
-- ⚠️ Add page flip detection hook
-- ⚠️ Add frame timing tracking
+- [NOTE] Add page flip detection hook
+- [NOTE] Add frame timing tracking
 
 **Expected Benefit:** ~200-500µs reduction + enables Phase 3
 
 ### **Phase 3: Advanced Optimization** (FUTURE)
-- ⚠️ VSync-aware compositor scheduling
-- ⚠️ GPU interrupt IRQ affinity
-- ⚠️ Frame buffer ready detection
+- [NOTE] VSync-aware compositor scheduling
+- [NOTE] GPU interrupt IRQ affinity
+- [NOTE] Frame buffer ready detection
 
 **Expected Benefit:** Additional ~0.5-1ms reduction
 

@@ -13,11 +13,11 @@
 **Total Latency:** ~150-180µs (BPF path), ~380-400µs (evdev path)
 
 **Key Improvements:**
-1. ✅ Tunable keyboard/mouse boost durations
-2. ✅ Eliminated redundant timestamp calls
-3. ✅ Optimized stats lookups
-4. ✅ Fixed fast path boost duration bug
-5. ✅ Optimized cache timestamp updates
+1. [IMPLEMENTED] Tunable keyboard/mouse boost durations
+2. [IMPLEMENTED] Eliminated redundant timestamp calls
+3. [IMPLEMENTED] Optimized stats lookups
+4. [IMPLEMENTED] Fixed fast path boost duration bug
+5. [IMPLEMENTED] Optimized cache timestamp updates
 
 ---
 
@@ -216,14 +216,14 @@ else
 |-------|----------|------------|----------------------|
 | Hardware → Kernel | ~50µs | ~50µs | None (hardware limitation) |
 | Kernel → BPF Hook | ~10µs | N/A | None (kernel overhead) |
-| BPF Processing | ~40µs | N/A | ✅ Timestamp reuse (-20ns) |
-| Stats Lookup | ~0ns* | N/A | ✅ Conditional lookup (-5ns*) |
-| Ring Buffer Write | ~20µs | N/A | ✅ Timestamp reuse |
+| BPF Processing | ~40µs | N/A | [IMPLEMENTED] Timestamp reuse (-20ns) |
+| Stats Lookup | ~0ns* | N/A | [IMPLEMENTED] Conditional lookup (-5ns*) |
+| Ring Buffer Write | ~20µs | N/A | [IMPLEMENTED] Timestamp reuse |
 | Ring Buffer → Userspace | ~50ns | N/A | None (zero-copy) |
 | evdev Read | N/A | ~100µs | None (syscall overhead) |
 | Userspace Processing | ~10µs | ~50µs | None (already optimized) |
 | BPF Syscall Trigger | ~100ns | ~100ns | None (syscall overhead) |
-| Boost Activation | ~20µs | ~20µs | ✅ Per-lane durations |
+| Boost Activation | ~20µs | ~20µs | [IMPLEMENTED] Per-lane durations |
 | **Total** | **~150-180µs** | **~380-400µs** | **~30-40ns saved** |
 
 \* Stats disabled: 0ns (optimized out), Stats enabled: ~5-10ns
@@ -258,9 +258,7 @@ else
 
 ## 9. Further Optimization Opportunities
 
-### Status: All Practical Optimizations Implemented ✅
-
-**Analysis:** We've implemented all practical, low-risk optimizations for the input latency path. Remaining opportunities are either:
+### Status: All Practical Optimizations Implemented [STATUS: IMPLEMENTED] **Analysis:** We've implemented all practical, low-risk optimizations for the input latency path. Remaining opportunities are either:
 - **Architectural changes** (high complexity, diminishing returns)
 - **Hardware-level** (out of our control)
 - **Micro-optimizations** (complexity > benefit)
@@ -307,13 +305,13 @@ else
 
 | Category | Implemented | Remaining | Status |
 |----------|-------------|-----------|--------|
-| **Timestamp calls** | ✅ Single shared timestamp | Fast path hoisting | ✅ Complete |
-| **Stats lookups** | ✅ Conditional when disabled | None | ✅ Complete |
-| **Boost durations** | ✅ Tunable per-lane | None | ✅ Complete |
-| **Cache operations** | ✅ Timestamp reuse | None | ✅ Complete |
-| **Atomic operations** | ✅ Minimal required | Batching (risky) | ✅ Complete |
-| **Map lookups** | ✅ Per-CPU caching | None | ✅ Complete |
-| **Architecture** | ✅ BPF fentry + ring buffer | Direct BPF boost | ✅ Current optimal |
+| **Timestamp calls** | [IMPLEMENTED] Single shared timestamp | Fast path hoisting | [IMPLEMENTED] Complete |
+| **Stats lookups** | [IMPLEMENTED] Conditional when disabled | None | [IMPLEMENTED] Complete |
+| **Boost durations** | [IMPLEMENTED] Tunable per-lane | None | [IMPLEMENTED] Complete |
+| **Cache operations** | [IMPLEMENTED] Timestamp reuse | None | [IMPLEMENTED] Complete |
+| **Atomic operations** | [IMPLEMENTED] Minimal required | Batching (risky) | [IMPLEMENTED] Complete |
+| **Map lookups** | [IMPLEMENTED] Per-CPU caching | None | [IMPLEMENTED] Complete |
+| **Architecture** | [IMPLEMENTED] BPF fentry + ring buffer | Direct BPF boost | [IMPLEMENTED] Current optimal |
 
 **Conclusion:** All practical optimizations are implemented. Remaining opportunities have:
 - **High complexity** (architectural changes)
@@ -382,11 +380,11 @@ scx_gamer \
 ## 12. Conclusion
 
 **Optimizations Completed:**
-- ✅ Tunable keyboard/mouse boost durations
-- ✅ Eliminated 2-3 redundant timestamp calls
-- ✅ Conditional stats lookup (disabled path optimized)
-- ✅ Fixed fast path boost duration bug
-- ✅ Optimized cache timestamp updates
+- [IMPLEMENTED] Tunable keyboard/mouse boost durations
+- [IMPLEMENTED] Eliminated 2-3 redundant timestamp calls
+- [IMPLEMENTED] Conditional stats lookup (disabled path optimized)
+- [IMPLEMENTED] Fixed fast path boost duration bug
+- [IMPLEMENTED] Optimized cache timestamp updates
 
 **Total Latency Reduction:** ~30-50ns per event (BPF path)  
 **Perceived Improvement:** Significant - tunable boost durations allow optimization for different game types
