@@ -2,7 +2,7 @@
 
 ## Current Architecture (What We Have Now)
 
-### ✅ BPF Fentry Hook Already Does Direct Boost!
+### [IMPLEMENTED] BPF Fentry Hook Already Does Direct Boost!
 
 The current implementation **already does direct boost** in the BPF fentry hook. Here's the flow:
 
@@ -13,7 +13,7 @@ The current implementation **already does direct boost** in the BPF fentry hook.
    ↓ (~10µs)
 3. BPF Fentry Hook (`input_event_raw`) triggered
    ↓
-   ├─→ A) DIRECT BOOST (✅ Already implemented!)
+   ├─→ A) DIRECT BOOST ([IMPLEMENTED] Already implemented!)
    │      - Calls fanout_set_input_window(now)
    │      - Calls fanout_set_input_lane(lane, now)
    │      - Updates input_until_global immediately
@@ -64,11 +64,10 @@ The name is confusing because **direct boost already happens** in BPF. The optim
 
 Currently, there are **two boost paths**:
 
-#### Path 1: BPF Fentry (Primary) ✅
-- **Location:** `input_event_raw` fentry hook
+#### Path 1: BPF Fentry (Primary) [IMPLEMENTED] - **Location:** `input_event_raw` fentry hook
 - **Latency:** ~150-180µs total
 - **Boost:** Directly updates boost windows in BPF
-- **Status:** ✅ Active, working perfectly
+- **Status:** [IMPLEMENTED] Active, working perfectly
 
 #### Path 2: Userspace Syscall (Fallback/Redundant)
 - **Location:** Userspace reads ring buffer → calls `set_input_window` syscall
@@ -118,8 +117,7 @@ BPF fentry hook triggered
     ↓
 [Line 1431-1473] Determine lane (keyboard/mouse)
     ↓
-[Line 1476-1512] ⭐ DIRECT BOOST HAPPENS HERE ⭐
-    ├─ fanout_set_input_window(now)
+[Line 1476-1512] DIRECT BOOST HAPPENS HERE ├─ fanout_set_input_window(now)
     ├─ fanout_set_input_lane(lane, now)
     └─ Update rate tracking
     ↓
@@ -192,12 +190,12 @@ if (event_is_from_fentry_hook(event)) {
 
 **The name "Ring Buffer Direct Boost" is misleading** because:
 
-1. ✅ **Direct boost already happens** in BPF fentry hook
-2. ✅ **Boost latency is already minimal** (~150µs)
+1. [STATUS: IMPLEMENTED] **Direct boost already happens** in BPF fentry hook
+2. [STATUS: IMPLEMENTED] **Boost latency is already minimal** (~150µs)
 3. ❌ **Userspace boost is redundant** but harmless (~100ns overhead)
 4. ❌ **Eliminating redundancy** would add complexity for minimal gain
 
-### Current Status: ✅ Already Optimized
+### Current Status: [IMPLEMENTED] Already Optimized
 
 The boost **already happens directly in BPF** before userspace even wakes up. The ring buffer is primarily for:
 - Event monitoring/statistics

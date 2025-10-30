@@ -16,9 +16,9 @@ This document summarizes:
 
 ---
 
-## ✅ Implemented Optimizations
+## [IMPLEMENTED] Implemented Optimizations
 
-### **Phase 1: Atomic Memory Barriers** ✅ **COMPLETE**
+### **Phase 1: Atomic Memory Barriers** [STATUS: IMPLEMENTED] **COMPLETE**
 
 **What:** Replaced all `__sync_*` operations with `__atomic_*` using `__ATOMIC_RELAXED`
 
@@ -32,11 +32,11 @@ This document summarizes:
 - **Minimal Memory Barriers:** Use relaxed ordering where strict ordering isn't needed
 - **Statistics Counters:** Don't need sequential consistency, only atomicity
 
-**Status:** ✅ **Complete** - All statistics counters now use relaxed atomic operations
+**Status:** [STATUS: IMPLEMENTED] **Complete** - All statistics counters now use relaxed atomic operations
 
 ---
 
-### **Phase 2: Frame-Based Deadline Adjustment** ✅ **COMPLETE**
+### **Phase 2: Frame-Based Deadline Adjustment** [STATUS: IMPLEMENTED] **COMPLETE**
 
 **What:** Frame-aware deadline scheduling for GPU/compositor threads
 
@@ -55,11 +55,11 @@ This document summarizes:
 - **Periodic Task Scheduling:** Frame-aware scheduling aligns with periodic frame presentation
 - **Deadline Guarantees:** More deterministic frame completion timing
 
-**Status:** ✅ **Complete** - Frame timing tracking and deadline adjustment implemented
+**Status:** [STATUS: IMPLEMENTED] **Complete** - Frame timing tracking and deadline adjustment implemented
 
 ---
 
-### **Phase 1 (GPU/Frame): Compositor & GPU Interrupt Prioritization** ✅ **COMPLETE**
+### **Phase 1 (GPU/Frame): Compositor & GPU Interrupt Prioritization** [STATUS: IMPLEMENTED] **COMPLETE**
 
 **What:** Increased compositor and GPU interrupt thread priorities
 
@@ -73,15 +73,15 @@ This document summarizes:
 - **Latency Reduction:** ~1-3ms per frame presentation
 - **Frame Consistency:** Reduced compositor stalls, better frame pacing
 
-**Status:** ✅ **Complete** - All Phase 1 GPU optimizations implemented
+**Status:** [STATUS: IMPLEMENTED] **Complete** - All Phase 1 GPU optimizations implemented
 
 ---
 
-## ⚠️ Remaining Optimization Opportunities
+## [NOTE] Remaining Optimization Opportunities
 
 ### **High Priority** (High Impact, Medium Risk)
 
-#### **1. Priority Inheritance Protocol (PIP)** ⚠️ **NOT IMPLEMENTED**
+#### **1. Priority Inheritance Protocol (PIP)** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** Priority inversion
 - High-priority tasks can block on locks held by low-priority tasks
@@ -100,11 +100,11 @@ This document summarizes:
 - **Latency Reduction:** ~500ns-2µs per lock contention scenario
 - **Deadline Guarantee:** Prevents cascading deadline misses
 
-**Status:** ⚠️ **Pending** - Requires lock tracking infrastructure
+**Status:** [NOTE] **Pending** - Requires lock tracking infrastructure
 
 ---
 
-#### **2. Deadline Miss Detection & Auto-Recovery** ⚠️ **NOT IMPLEMENTED**
+#### **2. Deadline Miss Detection & Auto-Recovery** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** No feedback mechanism for deadline misses
 
@@ -128,13 +128,13 @@ if (completion_time > deadline) {
 - **Latency Reduction:** ~100-200ns (through auto-tuning)
 - **Self-Healing:** Prevents cascading deadline misses
 
-**Status:** ⚠️ **Pending** - Requires completion tracking
+**Status:** [NOTE] **Pending** - Requires completion tracking
 
 ---
 
 ### **Medium Priority** (Medium Impact, Low-Medium Risk)
 
-#### **3. Per-CPU Statistics (Eliminate False Sharing)** ⚠️ **NOT IMPLEMENTED**
+#### **3. Per-CPU Statistics (Eliminate False Sharing)** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** Statistics counters shared across CPUs cause cache line bouncing
 
@@ -158,11 +158,11 @@ struct {
 
 **Trade-off:** More complex userspace aggregation (only needed for stats display)
 
-**Status:** ⚠️ **Pending** - Low priority, only affects stats overhead
+**Status:** [NOTE] **Pending** - Low priority, only affects stats overhead
 
 ---
 
-#### **4. Rate Monotonic Scheduling Integration** ⚠️ **NOT IMPLEMENTED**
+#### **4. Rate Monotonic Scheduling Integration** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** Static priority doesn't adapt to actual task periods
 
@@ -181,11 +181,11 @@ struct {
 - **Latency Reduction:** ~50-100ns (better priority alignment)
 - **Adaptability:** Handles variable frame rates (VRS, DLSS)
 
-**Status:** ⚠️ **Pending** - Medium complexity, requires period detection
+**Status:** [NOTE] **Pending** - Medium complexity, requires period detection
 
 ---
 
-#### **5. Per-CPU Ring Buffers (Single Writer)** ⚠️ **NOT IMPLEMENTED**
+#### **5. Per-CPU Ring Buffers (Single Writer)** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** Multiple BPF CPUs may write to same ring buffer (contention)
 
@@ -207,13 +207,13 @@ struct {
 
 **Trade-off:** More complex userspace aggregation (must read from all CPUs)
 
-**Status:** ⚠️ **Pending** - Medium complexity, only benefits high-contention scenarios
+**Status:** [NOTE] **Pending** - Medium complexity, only benefits high-contention scenarios
 
 ---
 
 ### **Low Priority** (Lower Impact, Higher Risk/Complexity)
 
-#### **6. NUMA-Aware CPU Selection** ⚠️ **NOT IMPLEMENTED**
+#### **6. NUMA-Aware CPU Selection** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** CPU selection doesn't consider NUMA topology
 
@@ -225,11 +225,11 @@ struct {
 - **Latency Savings:** ~50-100ns per memory access
 - **Cache Performance:** Better cache locality on NUMA systems
 
-**Status:** ⚠️ **Pending** - Complex, only benefits multi-socket systems
+**Status:** [NOTE] **Pending** - Complex, only benefits multi-socket systems
 
 ---
 
-#### **7. Memory Prefetching** ⚠️ **NOT IMPLEMENTED**
+#### **7. Memory Prefetching** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** Cache misses in hot paths
 
@@ -241,11 +241,11 @@ struct {
 - **Latency Savings:** ~5-20ns if cache miss avoided
 - **Risk:** Potential cache pollution if misused
 
-**Status:** ⚠️ **Pending** - Low impact, requires profiling to identify hotspots
+**Status:** [NOTE] **Pending** - Low impact, requires profiling to identify hotspots
 
 ---
 
-#### **8. Pipeline-Aware Scheduling** ⚠️ **NOT IMPLEMENTED**
+#### **8. Pipeline-Aware Scheduling** [NOTE] **NOT IMPLEMENTED**
 
 **Problem:** Pipeline stages scheduled independently
 
@@ -257,46 +257,39 @@ struct {
 - **Latency Reduction:** ~100-300ns per stage transition
 - **Frame Pacing:** Better pipeline throughput
 
-**Status:** ⚠️ **Pending** - Complex, requires stage completion detection
+**Status:** [NOTE] **Pending** - Complex, requires stage completion detection
 
 ---
 
 ## 📚 Key Learnings from LMAX Disruptor
 
-### **✅ Applied Learnings**
+### **[IMPLEMENTED] Applied Learnings**
 
-1. **Lock-Free Architecture** ✅
-   - Ring buffer: Lock-free `SegQueue`
+1. **Lock-Free Architecture** [IMPLEMENTED] - Ring buffer: Lock-free `SegQueue`
    - Atomic operations: `Arc<AtomicU32>` for game detection
    - Zero mutex contention in hot paths
 
-2. **Cache-Line Optimization** ✅
-   - `task_ctx` cache-line aligned (64 bytes)
+2. **Cache-Line Optimization** [IMPLEMENTED] - `task_ctx` cache-line aligned (64 bytes)
    - Hot fields in first cache line (0-63 bytes)
    - Cold data separated (64+ bytes)
 
-3. **Minimal Memory Barriers** ✅
-   - Statistics counters use `__ATOMIC_RELAXED`
+3. **Minimal Memory Barriers** [IMPLEMENTED] - Statistics counters use `__ATOMIC_RELAXED`
    - Only atomicity required, not ordering
 
-4. **Zero-Copy Operations** ✅
-   - Ring buffer provides zero-copy handoff
+4. **Zero-Copy Operations** [IMPLEMENTED] - Ring buffer provides zero-copy handoff
    - No unnecessary copies in userspace
 
-5. **Branch Prediction Hints** ✅
-   - `likely()`/`unlikely()` used throughout
+5. **Branch Prediction Hints** [IMPLEMENTED] - `likely()`/`unlikely()` used throughout
    - Hot paths optimized for branch prediction
 
-### **⚠️ Partially Applied Learnings**
+### **[NOTE] Partially Applied Learnings**
 
-1. **Single Writer Principle** ⚠️
-   - ✅ BPF writes to ring buffer (single writer per CPU)
-   - ✅ Userspace reads from ring buffer (single reader)
-   - ⚠️ Multiple BPF CPUs may write simultaneously (needs per-CPU buffers)
+1. **Single Writer Principle** [NOTE] - [IMPLEMENTED] BPF writes to ring buffer (single writer per CPU)
+   - [IMPLEMENTED] Userspace reads from ring buffer (single reader)
+   - [NOTE] Multiple BPF CPUs may write simultaneously (needs per-CPU buffers)
 
-2. **Wait-Free Algorithms** ⚠️
-   - ✅ Lock-free ring buffer
-   - ⚠️ CPU selection may block (needs wait-free variant)
+2. **Wait-Free Algorithms** [NOTE] - [IMPLEMENTED] Lock-free ring buffer
+   - [NOTE] CPU selection may block (needs wait-free variant)
 
 ### **❌ Not Yet Applied**
 
@@ -316,33 +309,28 @@ struct {
 
 ## 📚 Key Learnings from Real-Time Scheduling Theory
 
-### **✅ Applied Learnings**
+### **[IMPLEMENTED] Applied Learnings**
 
-1. **Earliest Deadline First (EDF)** ✅
-   - Currently used for heavy load scenarios
+1. **Earliest Deadline First (EDF)** [IMPLEMENTED] - Currently used for heavy load scenarios
    - Deadline = `vruntime + exec_vruntime`
    - Proven effective in real-time systems
 
-2. **Frame-Based Deadlines** ✅
-   - Deadline adjustment based on frame timing
+2. **Frame-Based Deadlines** [IMPLEMENTED] - Deadline adjustment based on frame timing
    - Ensures GPU/compositor work completes before VSync
    - Aligns with periodic frame presentation
 
-3. **Dynamic Priority Scheduling** ✅
-   - Boost levels adapt to input windows
+3. **Dynamic Priority Scheduling** [IMPLEMENTED] - Boost levels adapt to input windows
    - Wakeup frequency affects priority
    - Adaptive to system load
 
-4. **Fast Path Optimization** ✅
-   - Highest priority threads bypass window checks
+4. **Fast Path Optimization** [IMPLEMENTED] - Highest priority threads bypass window checks
    - Ultra-fast path for GPU/compositor/input threads
    - Saves 50-100ns per scheduling decision
 
-### **⚠️ Partially Applied Learnings**
+### **[NOTE] Partially Applied Learnings**
 
-1. **Fixed Priority Scheduling** ⚠️
-   - ✅ Boost-based priority (close to fixed priority)
-   - ⚠️ Not explicitly mapped to real-time priority levels
+1. **Fixed Priority Scheduling** [NOTE] - [IMPLEMENTED] Boost-based priority (close to fixed priority)
+   - [NOTE] Not explicitly mapped to real-time priority levels
    - Could integrate with SCHED_FIFO/SCHED_DEADLINE
 
 ### **❌ Not Yet Applied**
@@ -369,65 +357,58 @@ struct {
 
 ---
 
-## 🎯 Remaining Implementation Priority
+## [PRIORITY] Remaining Implementation Priority
 
 ### **Tier 1: High Impact, Medium Complexity**
 
-1. **Priority Inheritance Protocol** ⚠️
-   - **Impact:** ~500ns-2µs latency reduction
+1. **Priority Inheritance Protocol** [NOTE] - **Impact:** ~500ns-2µs latency reduction
    - **Complexity:** Medium-High (lock tracking)
    - **Risk:** Medium (complex state management)
 
-2. **Deadline Miss Detection** ⚠️
-   - **Impact:** ~100-200ns + self-healing
+2. **Deadline Miss Detection** [NOTE] - **Impact:** ~100-200ns + self-healing
    - **Complexity:** Medium (completion tracking)
    - **Risk:** Low (additive monitoring)
 
 ### **Tier 2: Medium Impact, Low-Medium Complexity**
 
-3. **Per-CPU Statistics** ⚠️
-   - **Impact:** ~10-30ns per stat update
+3. **Per-CPU Statistics** [NOTE] - **Impact:** ~10-30ns per stat update
    - **Complexity:** Low-Medium (BPF map changes)
    - **Risk:** Low (statistics only)
 
-4. **Rate Monotonic Integration** ⚠️
-   - **Impact:** ~50-100ns + adaptability
+4. **Rate Monotonic Integration** [NOTE] - **Impact:** ~50-100ns + adaptability
    - **Complexity:** Medium (period detection)
    - **Risk:** Low-Medium (dynamic priority changes)
 
 ### **Tier 3: Lower Impact, Higher Complexity**
 
-5. **Per-CPU Ring Buffers** ⚠️
-   - **Impact:** ~20-50ns per write
+5. **Per-CPU Ring Buffers** [NOTE] - **Impact:** ~20-50ns per write
    - **Complexity:** Medium-High (userspace aggregation)
    - **Risk:** Medium (architecture change)
 
-6. **NUMA Awareness** ⚠️
-   - **Impact:** ~50-100ns per memory access (NUMA systems only)
+6. **NUMA Awareness** [NOTE] - **Impact:** ~50-100ns per memory access (NUMA systems only)
    - **Complexity:** High (topology detection)
    - **Risk:** Medium (multi-socket systems only)
 
-7. **Pipeline Scheduling** ⚠️
-   - **Impact:** ~100-300ns per stage transition
+7. **Pipeline Scheduling** [NOTE] - **Impact:** ~100-300ns per stage transition
    - **Complexity:** High (stage detection)
    - **Risk:** Medium (complex coordination)
 
 ---
 
-## 📊 Performance Impact Summary
+## [METRICS] Performance Impact Summary
 
 | Optimization | Status | Impact | Complexity | Priority |
 |-------------|--------|--------|------------|----------|
-| **Atomic Relaxed** | ✅ Complete | High | Low | 🔴 HIGH |
-| **Frame-Based Deadlines** | ✅ Complete | High | Medium | 🔴 HIGH |
-| **Compositor Prioritization** | ✅ Complete | High | Low | 🔴 HIGH |
-| **Priority Inheritance** | ⚠️ Pending | High | Medium-High | 🔴 HIGH |
-| **Deadline Miss Detection** | ⚠️ Pending | Medium-High | Medium | 🔴 HIGH |
-| **Per-CPU Statistics** | ⚠️ Pending | Medium | Low-Medium | 🟡 MEDIUM |
-| **Rate Monotonic** | ⚠️ Pending | Medium | Medium | 🟡 MEDIUM |
-| **Per-CPU Ring Buffers** | ⚠️ Pending | Medium | Medium-High | 🟡 MEDIUM |
-| **NUMA Awareness** | ⚠️ Pending | Medium | High | 🟢 LOW |
-| **Pipeline Scheduling** | ⚠️ Pending | Low-Medium | High | 🟢 LOW |
+| **Atomic Relaxed** | [IMPLEMENTED] Complete | High | Low | 🔴 HIGH |
+| **Frame-Based Deadlines** | [IMPLEMENTED] Complete | High | Medium | 🔴 HIGH |
+| **Compositor Prioritization** | [IMPLEMENTED] Complete | High | Low | 🔴 HIGH |
+| **Priority Inheritance** | [NOTE] Pending | High | Medium-High | 🔴 HIGH |
+| **Deadline Miss Detection** | [NOTE] Pending | Medium-High | Medium | 🔴 HIGH |
+| **Per-CPU Statistics** | [NOTE] Pending | Medium | Low-Medium | 🟡 MEDIUM |
+| **Rate Monotonic** | [NOTE] Pending | Medium | Medium | 🟡 MEDIUM |
+| **Per-CPU Ring Buffers** | [NOTE] Pending | Medium | Medium-High | 🟡 MEDIUM |
+| **NUMA Awareness** | [NOTE] Pending | Medium | High | 🟢 LOW |
+| **Pipeline Scheduling** | [NOTE] Pending | Low-Medium | High | 🟢 LOW |
 
 ---
 
@@ -451,7 +432,7 @@ struct {
    - Use relaxed ordering where possible
    - Sequential consistency is expensive
    - **Applied:** Statistics counters use relaxed
-   - **Complete:** ✅ All statistics optimized
+   - **Complete:** [IMPLEMENTED] All statistics optimized
 
 ### **Real-Time Scheduling Insights**
 
@@ -459,7 +440,7 @@ struct {
    - EDF proven effective for real-time systems
    - Frame-based deadlines improve gaming performance
    - **Applied:** EDF for heavy load, frame-aware deadlines
-   - **Complete:** ✅ Frame-based deadlines implemented
+   - **Complete:** [IMPLEMENTED] Frame-based deadlines implemented
 
 2. **Priority Inversion is Dangerous**
    - Can cause 100x latency increases
@@ -475,7 +456,7 @@ struct {
 
 ---
 
-## 🚀 Next Steps
+## Next Steps
 
 ### **Immediate (High Priority)**
 
@@ -515,7 +496,7 @@ struct {
 
 ---
 
-## 📈 Expected Remaining Improvements
+## Expected Remaining Improvements
 
 **With Priority Inheritance + Deadline Miss Detection:**
 - **Additional Latency Reduction:** ~600ns-2.2µs per contention scenario
@@ -534,24 +515,24 @@ struct {
 
 ---
 
-## ✅ Conclusion
+## [IMPLEMENTED] Conclusion
 
 **Completed:** ~70% of high-priority optimizations
-- ✅ Atomic memory barriers (Phase 1)
-- ✅ Frame-based deadlines (Phase 2)
-- ✅ Compositor/GPU prioritization (Phase 1 GPU)
+- [IMPLEMENTED] Atomic memory barriers (Phase 1)
+- [IMPLEMENTED] Frame-based deadlines (Phase 2)
+- [IMPLEMENTED] Compositor/GPU prioritization (Phase 1 GPU)
 
 **Remaining High-Priority:**
-- ⚠️ Priority Inheritance Protocol
-- ⚠️ Deadline Miss Detection
+- [NOTE] Priority Inheritance Protocol
+- [NOTE] Deadline Miss Detection
 
 **Key Learnings Applied:**
-- ✅ LMAX: Lock-free, cache-line optimization, minimal barriers
-- ✅ Real-Time: EDF, frame-based deadlines, dynamic priority
+- [IMPLEMENTED] LMAX: Lock-free, cache-line optimization, minimal barriers
+- [IMPLEMENTED] Real-Time: EDF, frame-based deadlines, dynamic priority
 
 **Key Learnings Pending:**
-- ⚠️ LMAX: Per-CPU buffers, NUMA awareness
-- ⚠️ Real-Time: Priority Inheritance, Rate Monotonic, deadline miss detection
+- [NOTE] LMAX: Per-CPU buffers, NUMA awareness
+- [NOTE] Real-Time: Priority Inheritance, Rate Monotonic, deadline miss detection
 
 **Recommendation:** Focus on Priority Inheritance and Deadline Miss Detection next, as they provide the highest impact with acceptable complexity.
 

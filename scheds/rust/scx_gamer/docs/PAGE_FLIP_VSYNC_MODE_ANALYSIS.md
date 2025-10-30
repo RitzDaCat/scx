@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-**✅ Page Flip Hook Works for ALL VSync Modes**
+**[IMPLEMENTED] Page Flip Hook Works for ALL VSync Modes**
 
 The `drm_mode_page_flip` function is called **regardless of VSync mode**. VSync mode only affects **when** the page flip happens, not **if** it happens.
 
@@ -56,18 +56,18 @@ This hook fires **every time** `drm_mode_page_flip` is called, regardless of VSy
 **Timeline:**
 ```
 T+0ms:    Compositor calls drm_mode_page_flip(frame1)
-T+0.1ms:  Hook fires ✅ (immediate)
+T+0.1ms:  Hook fires [IMPLEMENTED] (immediate)
 T+4ms:    VSync fires (240Hz display)
 T+4.1ms:  Kernel executes page flip → frame1 displayed
 T+4.2ms:  Compositor calls drm_mode_page_flip(frame2)
-T+4.3ms:  Hook fires ✅ (immediate)
+T+4.3ms:  Hook fires [IMPLEMENTED] (immediate)
 T+8ms:    VSync fires → frame2 displayed
 ```
 
 **Hook Behavior:**
-- ✅ Fires **immediately** when compositor calls page flip
-- ✅ Frequency: Matches frame rate (60-240Hz)
-- ✅ Timing: Predictable (every VSync interval)
+- [IMPLEMENTED] Fires **immediately** when compositor calls page flip
+- [IMPLEMENTED] Frequency: Matches frame rate (60-240Hz)
+- [IMPLEMENTED] Timing: Predictable (every VSync interval)
 
 **Benefits for Our Hook:**
 - **Predictable timing** - can optimize compositor boost before VSync
@@ -87,21 +87,21 @@ T+8ms:    VSync fires → frame2 displayed
 **Timeline:**
 ```
 T+0ms:    Compositor calls drm_mode_page_flip(frame1)
-T+0.1ms:  Hook fires ✅ (immediate)
+T+0.1ms:  Hook fires [IMPLEMENTED] (immediate)
 T+2ms:    Compositor calls drm_mode_page_flip(frame2) [replaces frame1]
-T+2.1ms:  Hook fires ✅ (immediate)
+T+2.1ms:  Hook fires [IMPLEMENTED] (immediate)
 T+4ms:    VSync fires → frame2 displayed (frame1 never shown)
 ```
 
 **Hook Behavior:**
-- ✅ Fires **immediately** when compositor calls page flip
-- ⚠️ Frequency: May be **higher** than refresh rate (if GPU renders faster)
-- ⚠️ Not all hooks correspond to displayed frames (some frames dropped)
+- [IMPLEMENTED] Fires **immediately** when compositor calls page flip
+- [NOTE] Frequency: May be **higher** than refresh rate (if GPU renders faster)
+- [NOTE] Not all hooks correspond to displayed frames (some frames dropped)
 
 **Benefits for Our Hook:**
-- ✅ Still fires on every page flip request
-- ✅ Can detect when compositor is ready (even if frame doesn't display)
-- ⚠️ Need to track actual VSync events to know which frames displayed
+- [IMPLEMENTED] Still fires on every page flip request
+- [IMPLEMENTED] Can detect when compositor is ready (even if frame doesn't display)
+- [NOTE] Need to track actual VSync events to know which frames displayed
 
 **Challenges:**
 - Hook fires more frequently than frames are displayed
@@ -120,23 +120,23 @@ T+4ms:    VSync fires → frame2 displayed (frame1 never shown)
 **Timeline:**
 ```
 T+0ms:    Compositor calls drm_mode_page_flip(frame1)
-T+0.1ms:  Hook fires ✅ (immediate)
+T+0.1ms:  Hook fires [IMPLEMENTED] (immediate)
 T+0.15ms: Kernel executes page flip → frame1 displayed (immediate)
 T+2ms:    Compositor calls drm_mode_page_flip(frame2)
-T+2.1ms:  Hook fires ✅ (immediate)
+T+2.1ms:  Hook fires [IMPLEMENTED] (immediate)
 T+2.15ms: Kernel executes page flip → frame2 displayed (immediate)
 ```
 
 **Hook Behavior:**
-- ✅ Fires **immediately** when compositor calls page flip
-- ⚠️ Frequency: Matches GPU render rate (may be > refresh rate)
-- ⚠️ Timing: **Asynchronous** - no VSync alignment
-- ⚠️ Multiple page flips may happen during one display refresh cycle
+- [IMPLEMENTED] Fires **immediately** when compositor calls page flip
+- [NOTE] Frequency: Matches GPU render rate (may be > refresh rate)
+- [NOTE] Timing: **Asynchronous** - no VSync alignment
+- [NOTE] Multiple page flips may happen during one display refresh cycle
 
 **Benefits for Our Hook:**
-- ✅ Fires on every page flip (no missed events)
-- ✅ Lowest latency detection (immediate flip)
-- ✅ Can detect high-FPS rendering (1000+ FPS)
+- [IMPLEMENTED] Fires on every page flip (no missed events)
+- [IMPLEMENTED] Lowest latency detection (immediate flip)
+- [IMPLEMENTED] Can detect high-FPS rendering (1000+ FPS)
 
 **Challenges:**
 - No predictable timing (can't optimize for VSync)
@@ -171,9 +171,9 @@ int BPF_PROG(detect_compositor_page_flip, struct drm_crtc *crtc,
 ```
 
 **What this detects:**
-- ✅ **Compositor is ready** to present a frame
-- ✅ **Frame presentation request** (regardless of when it actually displays)
-- ✅ **Compositor activity** (useful for boosting compositor threads)
+- [STATUS: IMPLEMENTED] **Compositor is ready** to present a frame
+- [STATUS: IMPLEMENTED] **Frame presentation request** (regardless of when it actually displays)
+- [STATUS: IMPLEMENTED] **Compositor activity** (useful for boosting compositor threads)
 
 **What this does NOT detect:**
 - ❌ Actual VSync timing (when frame is displayed)
@@ -186,7 +186,7 @@ int BPF_PROG(detect_compositor_page_flip, struct drm_crtc *crtc,
 
 ### **VSync ON Mode:**
 
-**Hook Behavior:** ✅ **Optimal**
+**Hook Behavior:** [STATUS: IMPLEMENTED] **Optimal**
 - Fires at predictable intervals (matches refresh rate)
 - Every hook corresponds to a displayed frame
 - Can predict next VSync timing
@@ -214,7 +214,7 @@ if (delta > 0 && delta < 20000000ULL) {  /* < 20ms */
 
 ### **Mailbox Mode:**
 
-**Hook Behavior:** ⚠️ **Functional but needs refinement**
+**Hook Behavior:** [NOTE] **Functional but needs refinement**
 - Fires more frequently than frames are displayed
 - Some hooks don't correspond to displayed frames (dropped frames)
 
@@ -242,7 +242,7 @@ __sync_fetch_and_add(&vsync_event_count, 1);
 
 ### **VSync OFF Mode:**
 
-**Hook Behavior:** ✅ **Works but limited optimization**
+**Hook Behavior:** [STATUS: IMPLEMENTED] **Works but limited optimization**
 - Fires very frequently (matches GPU render rate)
 - No VSync timing to optimize around
 - Asynchronous - can't predict timing
@@ -267,9 +267,9 @@ if (tctx && tctx->is_compositor) {
 
 | Mode | Hook Fires | Frames Displayed | Accuracy |
 |------|------------|------------------|----------|
-| **VSync ON** | Every frame | Every hook | ✅ **100%** - Perfect correlation |
-| **Mailbox** | Every frame | Some hooks | ⚠️ **Variable** - Some frames dropped |
-| **VSync OFF** | Every frame | Some hooks | ⚠️ **Variable** - Display may miss frames |
+| **VSync ON** | Every frame | Every hook | [STATUS: IMPLEMENTED] **100%** - Perfect correlation |
+| **Mailbox** | Every frame | Some hooks | [NOTE] **Variable** - Some frames dropped |
+| **VSync OFF** | Every frame | Some hooks | [NOTE] **Variable** - Display may miss frames |
 
 **Key Insight:** The hook always fires when the compositor requests a page flip. VSync mode affects whether that frame actually gets displayed.
 
@@ -337,7 +337,7 @@ if (freq >= 50 && freq <= 250) {
 
 ## Conclusion
 
-**✅ Page Flip Hook Works for ALL VSync Modes**
+**[IMPLEMENTED] Page Flip Hook Works for ALL VSync Modes**
 
 **Key Points:**
 1. `drm_mode_page_flip` is called regardless of VSync mode
@@ -347,10 +347,10 @@ if (freq >= 50 && freq <= 250) {
 5. VSync-aware optimizations work best in VSync ON mode
 
 **Recommendation:**
-- ✅ **Implement the hook** - it works in all modes
-- ✅ **Boost compositor immediately** - beneficial in all modes
-- ⚠️ **VSync prediction** - only useful in VSync ON/Mailbox modes
-- ⚠️ **Frame drop tracking** - useful in Mailbox/VSync OFF modes
+- [STATUS: IMPLEMENTED] **Implement the hook** - it works in all modes
+- [STATUS: IMPLEMENTED] **Boost compositor immediately** - beneficial in all modes
+- [NOTE] **VSync prediction** - only useful in VSync ON/Mailbox modes
+- [NOTE] **Frame drop tracking** - useful in Mailbox/VSync OFF modes
 
 **Expected Benefits:**
 - **VSync ON:** Optimal - perfect timing correlation

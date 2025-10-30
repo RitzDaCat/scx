@@ -7,7 +7,7 @@
 
 ## Current State Analysis
 
-### ✅ **GPU Thread Detection**
+### [STATUS: IMPLEMENTED] **GPU Thread Detection**
 - **Method:** Fentry hooks on `drm_ioctl` (Intel/AMD), kprobe on `nv_drm_ioctl` (NVIDIA)
 - **Detection Latency:** <1ms (vs 5-10 frames with heuristics)
 - **Accuracy:** 100% (actual kernel API calls)
@@ -15,18 +15,16 @@
 - **CPU Selection:** Forces physical cores (no SMT)
 - **Fast Path:** Enabled in deadline calculation (bypasses window checks)
 
-### ✅ **Compositor Detection**
+### [STATUS: IMPLEMENTED] **Compositor Detection**
 - **Method:** Fentry hooks on `drm_mode_setcrtc` and `drm_mode_setplane`
 - **Detection Latency:** <1ms
 - **Accuracy:** 100% (actual kernel API calls)
-- **Boost Level:** 3 (5x boost) - **Fifth highest priority** ⚠️
-- **CPU Selection:** Standard (no special handling)
+- **Boost Level:** 3 (5x boost) - **Fifth highest priority** [NOTE] - **CPU Selection:** Standard (no special handling)
 - **Fast Path:** Limited (only in boost_shift >= 3 path)
 
-### ✅ **GPU Interrupt Threads**
+### [STATUS: IMPLEMENTED] **GPU Interrupt Threads**
 - **Detection:** Tracepoint-based interrupt detection
-- **Boost Level:** 2 (4x boost) - **Lower than compositor** ⚠️
-- **Purpose:** Frame completion signaling
+- **Boost Level:** 2 (4x boost) - **Lower than compositor** [NOTE] - **Purpose:** Frame completion signaling
 
 ---
 
@@ -231,21 +229,21 @@ Game Logic → GPU Submit → GPU Processing → GPU Interrupt → Compositor �
 ## Implementation Priority
 
 ### **Phase 1: Quick Wins** (High Impact, Low Risk)
-1. ✅ Increase compositor boost to 5
-2. ✅ Increase GPU interrupt boost to 4
-3. ✅ Add physical core preference for compositor
+1. [IMPLEMENTED] Increase compositor boost to 5
+2. [IMPLEMENTED] Increase GPU interrupt boost to 4
+3. [IMPLEMENTED] Add physical core preference for compositor
 
 **Expected Benefit:** ~1-2ms latency reduction, minimal code changes
 
 ### **Phase 2: Detection Enhancements** (Medium Impact, Medium Risk)
-4. ✅ Add page flip detection hook
-5. ⚠️ Frame timing tracking (deferred - VSync events require userspace integration)
+4. [IMPLEMENTED] Add page flip detection hook
+5. [NOTE] Frame timing tracking (deferred - VSync events require userspace integration)
 
 **Expected Benefit:** Enable VSync-aware scheduling, better diagnostics
 
 ### **Phase 3: Advanced Optimization** (Lower Impact, Higher Risk)
-6. ⚠️ VSync-aware compositor scheduling (requires userspace integration)
-7. ⚠️ Frame timing-based dynamic boost adjustment
+6. [NOTE] VSync-aware compositor scheduling (requires userspace integration)
+7. [NOTE] Frame timing-based dynamic boost adjustment
 
 **Expected Benefit:** Additional 0.5-1ms reduction, but requires more complex integration
 

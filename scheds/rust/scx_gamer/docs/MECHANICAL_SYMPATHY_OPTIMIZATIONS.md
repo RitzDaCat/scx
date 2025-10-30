@@ -22,7 +22,7 @@ Mechanical sympathy emphasizes designing software that works **with** hardware c
 
 ## Current State Analysis
 
-### ✅ Already Implemented
+### [IMPLEMENTED] Already Implemented
 
 1. **Cache-Line Alignment**
    - `task_ctx` and `cpu_ctx` are `CACHE_ALIGNED` (64-byte aligned)
@@ -137,7 +137,7 @@ u8 is_compositor_array[MAX_TASKS];
 **Risk:** Medium - requires significant refactoring  
 **Impact:** Low for current design (we don't do bulk checks)
 
-**Status:** ⚠️ **LOW PRIORITY** - Current design doesn't benefit from this
+**Status:** [NOTE] **LOW PRIORITY** - Current design doesn't benefit from this
 
 ---
 
@@ -164,7 +164,7 @@ struct task_ctx_writable {
 **Risk:** Medium - requires structure refactoring  
 **Impact:** Medium - helps if multiple CPUs read classification flags
 
-**Status:** ⚠️ **MEDIUM PRIORITY** - Could help, but classification is write-once
+**Status:** [NOTE] **MEDIUM PRIORITY** - Could help, but classification is write-once
 
 ---
 
@@ -194,7 +194,7 @@ switch (boost_shift) {
 **Risk:** Low - equivalent logic  
 **Impact:** Low - only helps if branches are unpredictable
 
-**Status:** ✅ **IMPLEMENTED** - Already using if/else chains with likely hints
+**Status:** [STATUS: IMPLEMENTED] **IMPLEMENTED** - Already using if/else chains with likely hints
 
 ---
 
@@ -202,8 +202,8 @@ switch (boost_shift) {
 
 **Current:** Some conditions checked multiple times
 
-**Already Optimized:** ✅ Hot path cache structure stores computed results  
-**Status:** ✅ **COMPLETE**
+**Already Optimized:** [IMPLEMENTED] Hot path cache structure stores computed results  
+**Status:** [STATUS: IMPLEMENTED] **COMPLETE**
 
 ---
 
@@ -222,7 +222,7 @@ struct CACHE_ALIGNED per_cpu_stats {
 };
 ```
 
-**Status:** ✅ **VERIFIED** - Structures use `CACHE_ALIGNED` attribute
+**Status:** [STATUS: IMPLEMENTED] **VERIFIED** - Structures use `CACHE_ALIGNED` attribute
 
 ---
 
@@ -239,7 +239,7 @@ stat_inc_local(&cctx->local_nr_mm_hint_hit);
 // If both updated together, consider batching (but current design already optimal)
 ```
 
-**Status:** ✅ **OPTIMAL** - Current per-CPU counters are already optimal
+**Status:** [STATUS: IMPLEMENTED] **OPTIMAL** - Current per-CPU counters are already optimal
 
 ---
 
@@ -255,7 +255,7 @@ stat_inc_local(&cctx->local_nr_mm_hint_hit);
 static __always_inline void helper_function() { ... }
 ```
 
-**Status:** ✅ **VERIFIED** - Hot path functions use `__always_inline`
+**Status:** [STATUS: IMPLEMENTED] **VERIFIED** - Hot path functions use `__always_inline`
 
 ---
 
@@ -263,7 +263,7 @@ static __always_inline void helper_function() { ... }
 
 **Current:** Hot path minimizes function calls
 
-**Status:** ✅ **OPTIMAL** - Most hot paths are inline
+**Status:** [STATUS: IMPLEMENTED] **OPTIMAL** - Most hot paths are inline
 
 ---
 
@@ -271,32 +271,32 @@ static __always_inline void helper_function() { ... }
 
 | Optimization | Impact | Risk | Effort | Priority | Status |
 |-------------|--------|------|--------|----------|--------|
-| **1.1: Prefetch Ring Buffer** | Medium | Low | Low | Medium | ⚠️ Pending |
-| **1.2: Prefetch Task Context** | Medium | Low | Low | Medium | ⚠️ Pending |
-| **1.3: Prefetch CPU Context** | Low-Medium | Low | Low | Low | ⚠️ Pending |
-| **2.1: Structure Arrays** | Low | Medium | High | Low | ⚠️ Not Needed |
-| **2.2: Separate R/O R/W** | Medium | Medium | Medium | Low | ⚠️ Low Priority |
-| **3.1: Switch Statements** | Low | Low | Low | Low | ✅ Already Optimal |
-| **4.1: Cache Padding** | Medium | Low | Low | High | ✅ Complete |
-| **4.2: Write-Combine** | Low | Low | Low | Low | ✅ Already Optimal |
-| **5.1: Inline Functions** | Low | Low | Low | Low | ✅ Verified |
-| **5.2: Function Calls** | Low | Low | Low | Low | ✅ Optimal |
+| **1.1: Prefetch Ring Buffer** | Medium | Low | Low | Medium | [NOTE] Pending |
+| **1.2: Prefetch Task Context** | Medium | Low | Low | Medium | [NOTE] Pending |
+| **1.3: Prefetch CPU Context** | Low-Medium | Low | Low | Low | [NOTE] Pending |
+| **2.1: Structure Arrays** | Low | Medium | High | Low | [NOTE] Not Needed |
+| **2.2: Separate R/O R/W** | Medium | Medium | Medium | Low | [NOTE] Low Priority |
+| **3.1: Switch Statements** | Low | Low | Low | Low | [IMPLEMENTED] Already Optimal |
+| **4.1: Cache Padding** | Medium | Low | Low | High | [IMPLEMENTED] Complete |
+| **4.2: Write-Combine** | Low | Low | Low | Low | [IMPLEMENTED] Already Optimal |
+| **5.1: Inline Functions** | Low | Low | Low | Low | [IMPLEMENTED] Verified |
+| **5.2: Function Calls** | Low | Low | Low | Low | [IMPLEMENTED] Optimal |
 
 ---
 
 ## Recommended Implementation Order
 
 ### Immediate (High Priority):
-1. ✅ Verify cache-line alignment (already done)
-2. ✅ Verify branch prediction hints (already optimal)
-3. ⚠️ Add memory prefetching hints (low risk, medium benefit)
+1. [IMPLEMENTED] Verify cache-line alignment (already done)
+2. [IMPLEMENTED] Verify branch prediction hints (already optimal)
+3. [NOTE] Add memory prefetching hints (low risk, medium benefit)
 
 ### Short-term (Medium Priority):
-4. ⚠️ Profile cache misses to validate prefetching benefits
-5. ⚠️ Consider separating read-only/write-heavy data if profiling shows benefit
+4. [NOTE] Profile cache misses to validate prefetching benefits
+5. [NOTE] Consider separating read-only/write-heavy data if profiling shows benefit
 
 ### Long-term (Lower Priority):
-6. ⚠️ Structure-of-arrays conversion (only if bulk operations needed)
+6. [NOTE] Structure-of-arrays conversion (only if bulk operations needed)
 
 ---
 
@@ -346,12 +346,12 @@ perf c2c report
 
 ## Conclusion
 
-**Current State:** ✅ **EXCELLENT** - Most mechanical sympathy principles already applied
+**Current State:** [STATUS: IMPLEMENTED] **EXCELLENT** - Most mechanical sympathy principles already applied
 
 **Remaining Opportunities:**
-1. ⚠️ **Memory Prefetching** - Low-risk, medium-benefit additions
-2. ⚠️ **Cache Miss Profiling** - Validate current optimizations are working
-3. ⚠️ **Data Separation** - Consider if profiling shows false sharing
+1. [NOTE] **Memory Prefetching** - Low-risk, medium-benefit additions
+2. [NOTE] **Cache Miss Profiling** - Validate current optimizations are working
+3. [NOTE] **Data Separation** - Consider if profiling shows false sharing
 
 **Key Insight:** Current design already implements core mechanical sympathy principles. Remaining optimizations are incremental improvements that require profiling to validate benefits.
 
@@ -363,4 +363,6 @@ perf c2c report
 - [Data-Oriented Design](https://madhadron.com/mechanical_sympathy.html)
 - [Hardware-Aware Coding](https://blog.codingconfessions.com/p/hardware-aware-coding)
 - LMAX Disruptor Architecture
+
+
 

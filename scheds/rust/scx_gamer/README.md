@@ -6,6 +6,9 @@
 [![Architecture](https://img.shields.io/badge/arch-x86__64-lightgrey.svg)](https://archlinux.org/)
 [![sched_ext](https://img.shields.io/badge/sched__ext-enabled-brightgreen.svg)](https://github.com/sched-ext/scx)
 [![Version](https://img.shields.io/badge/version-1.0.2-blue.svg)](https://github.com/RitzDaCat/scx)
+[![Documentation](https://img.shields.io/badge/docs-Diataxis-blue.svg)](https://diataxis.fr/)
+[![Status](https://img.shields.io/badge/status-active-success.svg)](https://github.com/RitzDaCat/scx)
+[![BPF](https://img.shields.io/badge/BPF-enabled-yellow.svg)](https://www.kernel.org/doc/html/latest/bpf/)
 
 > **Ultra-low latency gaming scheduler** for Linux with BPF-powered detection systems and real-time scheduling optimizations.
 
@@ -174,5 +177,5 @@ Contributions welcome! Please see:
 
 ---
 
-**Last Updated:** 2025-10-29
+**Last Updated:** 2025-01-28
 

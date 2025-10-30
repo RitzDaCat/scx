@@ -23,14 +23,14 @@ sudo ./install-cachyos.sh
 ```
 
 **What the installer does:**
-- ✅ Checks system requirements (kernel version, sched_ext support)
-- ✅ Installs scx_gamer binary to `/usr/bin/`
-- ✅ Updates scheduler configuration in `/etc/default/scx`
-- ✅ Generates complete `scx_loader.toml` with all profiles
-- ✅ Builds and installs updated `scx_loader` with scx_gamer support
-- ✅ Creates desktop entry for easy GUI access
-- ✅ Creates custom icon for the scheduler
-- ✅ Verifies installation and provides next steps
+- [IMPLEMENTED] Checks system requirements (kernel version, sched_ext support)
+- [IMPLEMENTED] Installs scx_gamer binary to `/usr/bin/`
+- [IMPLEMENTED] Updates scheduler configuration in `/etc/default/scx`
+- [IMPLEMENTED] Generates complete `scx_loader.toml` with all profiles
+- [IMPLEMENTED] Builds and installs updated `scx_loader` with scx_gamer support
+- [IMPLEMENTED] Creates desktop entry for easy GUI access
+- [IMPLEMENTED] Creates custom icon for the scheduler
+- [IMPLEMENTED] Verifies installation and provides next steps
 
 ### Method 2: PKGBUILD Package (Advanced)
 
@@ -41,12 +41,12 @@ makepkg -si
 ```
 
 **What the package provides:**
-- ✅ Proper Arch/CachyOS package management
-- ✅ Desktop entry and icon
-- ✅ Documentation in `/usr/share/doc/scx-gamer/`
-- ✅ Configuration templates
-- ✅ Post-install and pre-remove hooks
-- ✅ Automatic dependency management
+- [IMPLEMENTED] Proper Arch/CachyOS package management
+- [IMPLEMENTED] Desktop entry and icon
+- [IMPLEMENTED] Documentation in `/usr/share/doc/scx-gamer/`
+- [IMPLEMENTED] Configuration templates
+- [IMPLEMENTED] Post-install and pre-remove hooks
+- [IMPLEMENTED] Automatic dependency management
 
 ### Method 3: Manual Installation
 
@@ -124,14 +124,14 @@ sudo ./verify-installation.sh
 ```
 
 **What it checks:**
-- ✅ System requirements (kernel version, sched_ext support)
-- ✅ Binary installation and permissions
-- ✅ Scheduler configuration
-- ✅ Loader configuration
-- ✅ Desktop integration
-- ✅ Systemd service status
-- ✅ GUI tools availability
-- ✅ Performance tests
+- [IMPLEMENTED] System requirements (kernel version, sched_ext support)
+- [IMPLEMENTED] Binary installation and permissions
+- [IMPLEMENTED] Scheduler configuration
+- [IMPLEMENTED] Loader configuration
+- [IMPLEMENTED] Desktop integration
+- [IMPLEMENTED] Systemd service status
+- [IMPLEMENTED] GUI tools availability
+- [IMPLEMENTED] Performance tests
 
 ### Manual Verification
 ```bash
@@ -158,14 +158,14 @@ sudo ./uninstall-cachyos.sh
 ```
 
 **What the uninstaller does:**
-- ✅ Stops scx_gamer if currently running
-- ✅ Removes binary from `/usr/bin/`
-- ✅ Removes from scheduler configuration
-- ✅ Removes from loader configuration
-- ✅ Removes desktop entry and icon
-- ✅ Restores stable scx_loader from CachyOS repository
-- ✅ Cleans up remaining files
-- ✅ Verifies uninstallation
+- [IMPLEMENTED] Stops scx_gamer if currently running
+- [IMPLEMENTED] Removes binary from `/usr/bin/`
+- [IMPLEMENTED] Removes from scheduler configuration
+- [IMPLEMENTED] Removes from loader configuration
+- [IMPLEMENTED] Removes desktop entry and icon
+- [IMPLEMENTED] Restores stable scx_loader from CachyOS repository
+- [IMPLEMENTED] Cleans up remaining files
+- [IMPLEMENTED] Verifies uninstallation
 
 ### Using Package Manager
 ```bash
