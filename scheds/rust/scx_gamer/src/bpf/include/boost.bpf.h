@@ -205,7 +205,16 @@ static __always_inline bool is_foreground_task_cached(const struct task_struct *
 	u32 fg_tgid = fg_tgid_cached ? fg_tgid_cached :
 	              (detected_fg_tgid ? detected_fg_tgid : foreground_tgid);
 
-	/* Auto-detect mode: if no fg_tgid specified, treat all as foreground */
+	/* Auto-detect mode: if no fg_tgid specified, treat all as foreground
+	 * 
+	 * WARNING: This fallback is used when game detection fails.
+	 * When fg_tgid is 0, thread classification will NOT work (is_exact_game_thread = false),
+	 * meaning input handlers, GPU threads, etc. won't be detected.
+	 * 
+	 * Users should ensure game detection is working or manually specify --foreground-pid.
+	 * Detection should work for: Steam, Battle.net, Epic, GOG, native Linux games via
+	 * resource heuristics (20+ threads, 100MB+ memory) or name patterns (.exe, game/client).
+	 */
 	if (!fg_tgid)
 		return true;
 

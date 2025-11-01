@@ -259,11 +259,24 @@ static __always_inline bool is_gaming_network_thread(const char *comm)
  */
 static __always_inline bool is_system_audio_name(const char *comm)
 {
-	/* PipeWire audio server (modern Linux standard) */
-	if (comm[0] == 'p' && comm[1] == 'i' && comm[2] == 'p' && comm[3] == 'e')
-		return true;
+	/* PipeWire audio server (modern Linux standard)
+	 * Thread names: pipewire, pipewire-pulse, module-rt, data-loop.0, etc.
+	 * Check for "pipewire" prefix (first 8 chars = "pipewire") */
+	if (comm[0] == 'p' && comm[1] == 'i' && comm[2] == 'p' && comm[3] == 'e' &&
+	    comm[4] == 'w' && comm[5] == 'i' && comm[6] == 'r' && comm[7] == 'e')
+		return true;  /* pipewire */
 
-	/* Check for "pipewire" or "pw-" prefix */
+	/* PipeWire module threads (module-rt, module-protocol-pulse, etc.) */
+	if (comm[0] == 'm' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'u' &&
+	    comm[4] == 'l' && comm[5] == 'e' && comm[6] == '-')
+		return true;  /* module-* */
+
+	/* PipeWire data loop threads (data-loop.0, data-loop.1, etc.) */
+	if (comm[0] == 'd' && comm[1] == 'a' && comm[2] == 't' && comm[3] == 'a' &&
+	    comm[4] == '-' && comm[5] == 'l' && comm[6] == 'o' && comm[7] == 'o')
+		return true;  /* data-loop.* */
+
+	/* Check for "pw-" prefix (pipewire worker threads) */
 	if (comm[0] == 'p' && comm[1] == 'w' && comm[2] == '-')
 		return true;  /* pw-* threads */
 
@@ -538,13 +551,30 @@ static __always_inline bool is_game_audio_name(const char *comm)
  */
 static __always_inline bool is_input_handler_name(const char *comm)
 {
+	/* LAYER 1: Engine-specific patterns (highest confidence) */
+	
 	/* Unreal Engine GameThread (handles input + game logic) - HIGHEST PRIORITY */
 	if (comm[0] == 'G' && comm[1] == 'a' && comm[2] == 'm' && comm[3] == 'e' &&
 	    comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r')
 		return true;  /* GameThread - gets 10× boost during input window */
 
+	/* Unity Main Thread (common pattern) */
+	if (comm[0] == 'M' && comm[1] == 'a' && comm[2] == 'i' && comm[3] == 'n' &&
+	    comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r')
+		return true;  /* MainThread */
+
+	/* Generic "Main" thread (many engines use this) */
+	if (comm[0] == 'M' && comm[1] == 'a' && comm[2] == 'i' && comm[3] == 'n')
+		return true;  /* Main, MainThread, MainLoop, etc. */
+
+	/* LAYER 2: Input library patterns (high confidence) */
+	
 	/* SDL input threads (very common in games) */
 	if (comm[0] == 'S' && comm[1] == 'D' && comm[2] == 'L')
+		return true;
+
+	/* GLFW input (common game library) */
+	if (comm[0] == 'g' && comm[1] == 'l' && comm[2] == 'f' && comm[3] == 'w')
 		return true;
 
 	/* Input/event processing threads */
@@ -554,14 +584,12 @@ static __always_inline bool is_input_handler_name(const char *comm)
 	if (comm[0] == 'e' && comm[1] == 'v' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 't')
 		return true;
 
-	/* GLFW input (common game library) */
-	if (comm[0] == 'g' && comm[1] == 'l' && comm[2] == 'f' && comm[3] == 'w')
-		return true;
-
 	/* Qt/GTK input threads (less common in games but possible) */
 	if (comm[0] == 'Q' && comm[1] == 't' && comm[2] == 'I' && comm[3] == 'n')
 		return true;
 
+	/* LAYER 3: Wine/Proton input handling (critical for Linux gaming) */
+	
 	/* Wine XInput controller handling (critical for gamepad input latency) */
 	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' && comm[4] == '_' &&
 	    comm[5] == 'x' && comm[6] == 'i' && comm[7] == 'n')
@@ -580,6 +608,24 @@ static __always_inline bool is_input_handler_name(const char *comm)
 	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' && comm[4] == '_' &&
 	    comm[5] == 'r' && comm[6] == 'a' && comm[7] == 'w')
 		return true;  /* wine_rawinput_* */
+
+	/* LAYER 4: Generic game logic patterns (medium confidence - common but less specific) */
+	
+	/* "Game" prefix (many engines use GameThread, GameLoop, GameLogic, etc.) */
+	if (comm[0] == 'G' && comm[1] == 'a' && comm[2] == 'm' && comm[3] == 'e')
+		return true;  /* GameThread, GameLoop, GameLogic, GameUpdate, etc. */
+
+	/* "Logic" thread (game logic often handles input) */
+	if (comm[0] == 'L' && comm[1] == 'o' && comm[2] == 'g' && comm[3] == 'i' && comm[4] == 'c')
+		return true;  /* LogicThread, Logic */
+
+	/* "Update" thread (update loop often processes input) */
+	if (comm[0] == 'U' && comm[1] == 'p' && comm[2] == 'd' && comm[3] == 'a' && comm[4] == 't' && comm[5] == 'e')
+		return true;  /* UpdateThread, Update */
+
+	/* "Tick" thread (tick loop processes input) */
+	if (comm[0] == 'T' && comm[1] == 'i' && comm[2] == 'c' && comm[3] == 'k')
+		return true;  /* TickThread, Tick */
 
 	return false;
 }
@@ -621,6 +667,20 @@ static __always_inline void classify_gpu_submit(struct task_struct *p, struct ta
 
 static __always_inline void classify_audio(struct task_struct *p, struct task_ctx *tctx)
 {
+	/* LAYER 1 (HIGHEST PRIORITY): TGID-based system audio detection
+	 * Check if this thread belongs to a known audio server process (PipeWire, PulseAudio, etc.).
+	 * This catches ALL threads in audio server processes, regardless of thread name.
+	 * Fast O(1) hash lookup (~20-40ns) vs name pattern matching.
+	 */
+	if (!tctx->is_system_audio) {
+		u32 tgid = (u32)p->tgid;
+		u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
+		if (is_audio_server && *is_audio_server) {
+			tctx->is_system_audio = 1;
+		}
+	}
+	
+	/* LAYER 2: Name-based detection (fallback for threads not in audio server processes) */
 	if (!tctx->is_system_audio && is_system_audio_name(p->comm))
 		tctx->is_system_audio = 1;
 	if (!tctx->is_game_audio && is_game_audio_name(p->comm))

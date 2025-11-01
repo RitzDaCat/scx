@@ -55,6 +55,7 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_save_game:1;		/* Save game thread (game save operations) */
 	u8 is_config_file:1;		/* Config file thread (configuration changes) */
 	u8 is_background:1;		/* Background/batch work */
+	u8 is_network_counted:1;	/* Flag to ensure network threads are counted only once */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
 	u8 boost_shift;			/* 0=no boost, 7=10x boost for input handlers */
@@ -79,6 +80,7 @@ struct CACHE_ALIGNED task_ctx {
 	/* Migration limiter state (scaled token bucket) */
 	u64 mig_tokens;			/* Scaled by MIG_TOKEN_SCALE */
 	u64 mig_last_refill;		/* Last token refill timestamp */
+	u64 last_migration_ns;		/* Timestamp of last migration (for cooldown) */
 
 	/* MM hint rate limiting */
 	u64 mm_hint_last_update;	/* Last MM hint update time */
@@ -86,7 +88,8 @@ struct CACHE_ALIGNED task_ctx {
 	/* Thread classification metrics */
 	u16 low_cpu_samples;		/* Consecutive wakes with <100μs exec */
 	u16 high_cpu_samples;		/* Consecutive wakes with >5ms exec */
-	u32 _pad3;			/* Alignment */
+	u16 input_window_wakeups;	/* Wakes during input windows (for behavioral detection) */
+	u16 total_wakeups_sampled;	/* Total wakeups sampled (for ratio calculation) */
 
 	/* Cache thrashing detection */
 	u64 last_pgfault_total;		/* Last sampled maj_flt + min_flt */
@@ -187,9 +190,41 @@ struct {
 	__uint(max_entries, 8192);	/* Configurable via userspace */
 } mm_last_cpu SEC(".maps");
 
-/* Input event structure for ring buffer */
+/* System audio TGID map (for TGID-based audio server detection)
+ * Maps TGID to whether it's an audio server (PipeWire, ALSA, PulseAudio, etc.)
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);  /* Support up to 256 audio servers */
+	__type(key, u32);          /* TGID */
+	__type(value, u8);         /* 1 = audio server, 0 = not */
+} system_audio_tgids_map SEC(".maps");
+
+/* Deadline miss event structure */
+struct deadline_miss_event {
+	u64 timestamp;		/* When deadline was missed */
+	u32 tid;		/* Thread ID */
+	u64 expected_deadline;	/* Expected deadline (vruntime) */
+	u64 actual_vtime;	/* Actual vruntime (missed deadline) */
+	u64 miss_amount;	/* How much deadline was missed (ns) */
+	u8 thread_type;	/* Thread classification (GPU, input, etc.) */
+	u8 cpu;			/* CPU where miss occurred */
+	u8 boost_shift;		/* Current boost level */
+};
+
+/* GPU submit detection event structure */
+struct gpu_submit_detect_event {
+	u64 timestamp;		/* When GPU thread was detected */
+	u32 tid;		/* Thread ID */
+	u8 detection_method;	/* 0=fentry, 1=name, 2=pattern */
+	u8 gpu_vendor;		/* GPU vendor (Intel/AMD/NVIDIA) */
+};
+
+/* Input event structure for ring buffer
+ * Must match GamerInputEvent in Rust code (ring_buffer.rs)
+ */
 struct gamer_input_event {
-	u64 timestamp;		/* Event timestamp in nanoseconds */
+	u64 timestamp;		/* Event timestamp in nanoseconds (BPF monotonic time) */
 	u16 event_type;		/* Event type (key, mouse movement, etc.) */
 	u16 event_code;		/* Event code (key code, axis, etc.) */
 	s32 event_value;	/* Event value (press/release, delta, etc.) */
@@ -290,18 +325,42 @@ struct {
 	__uint(max_entries, 64 * 1024);
 } input_events_ringbuf_15 SEC(".maps");
 
-/* Eventfd for kernel-to-userspace input event notification
- * This enables interrupt-driven waking instead of busy polling.
- * Userspace writes eventfd file descriptor to this map during initialization.
- * BPF signals eventfd on input events for immediate wake (1-5µs latency).
- * Provides 95-98% CPU savings vs busy polling with lower average latency.
+/* Deadline miss event ring buffer for real-time performance alerts
+ * Emits events when critical threads miss their deadlines
+ * Single buffer (rare events, serialized by scheduler)
+ * Size: 64KB = ~800 events buffered
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, u32);	/* eventfd file descriptor */
-} input_eventfd_map SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 64 * 1024);	/* 64KB ring buffer */
+} deadline_miss_ringbuf SEC(".maps");
+
+/* GPU submit detection event ring buffer for real-time GPU thread tracking
+ * Emits events when GPU threads are first classified (fentry, name, or pattern)
+ * Single buffer (detection events are rare - once per thread)
+ * Size: 32KB = ~400 events buffered
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 32 * 1024);	/* 32KB ring buffer */
+} gpu_submit_detect_ringbuf SEC(".maps");
+
+/* Dispatch event ring buffer for event-driven watchdog monitoring
+ * Emits events when dispatches occur (direct or shared)
+ * Single buffer (events are serialized by scheduler)
+ * Size: 32KB = ~800 events buffered
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 32 * 1024);	/* 32KB ring buffer */
+} dispatch_event_ringbuf SEC(".maps");
+
+/* Dispatch event structure */
+struct dispatch_event {
+	u64 timestamp;		/* When dispatch occurred */
+	u8 dispatch_type;	/* 0=direct, 1=shared, 2=round-robin */
+	u32 cpu;		/* CPU where dispatch occurred */
+};
 
 /* Primary CPU mask */
 private(GAMER) struct bpf_cpumask __kptr *primary_cpumask;
