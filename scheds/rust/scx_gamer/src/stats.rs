@@ -87,6 +87,67 @@ pub struct Metrics {
     pub input_handler_threads: u64,
     #[stat(desc = "Input trigger rate (events/sec, EMA)")]
     pub input_trigger_rate: u64,
+    
+    /* Diagnostic counters for classification debugging */
+    #[stat(desc = "Total classification attempts (gamer_runnable calls)")]
+    pub classification_attempts: u64,
+    #[stat(desc = "Times is_first_classification was true")]
+    pub first_classification_true: u64,
+    #[stat(desc = "Times is_exact_game_thread was true")]
+    pub is_exact_game_thread_true: u64,
+    #[stat(desc = "Times input handler name matched")]
+    pub input_handler_name_match: u64,
+    #[stat(desc = "Times main thread check matched")]
+    pub main_thread_match: u64,
+    #[stat(desc = "Times GPU submit name matched")]
+    pub gpu_submit_name_match: u64,
+    #[stat(desc = "Times GPU submit fentry matched")]
+    pub gpu_submit_fentry_match: u64,
+    #[stat(desc = "GPU runtime pattern samples collected")]
+    pub runtime_pattern_gpu_samples: u64,
+    #[stat(desc = "Audio runtime pattern samples collected")]
+    pub runtime_pattern_audio_samples: u64,
+    #[stat(desc = "Times input handler name check attempted")]
+    pub input_handler_name_check_attempts: u64,
+    #[stat(desc = "Times input handler name pattern matched (before game thread check)")]
+    pub input_handler_name_pattern_match: u64,
+    
+    /* Diagnostic counters for network/audio/background detection */
+    #[stat(desc = "Times is_network_thread() was called")]
+    pub network_fentry_checks: u64,
+    #[stat(desc = "Times network fentry hook found thread")]
+    pub network_fentry_matches: u64,
+    #[stat(desc = "Times is_network_name() was called")]
+    pub network_name_checks: u64,
+    #[stat(desc = "Times network name pattern matched")]
+    pub network_name_matches: u64,
+    #[stat(desc = "Times is_system_audio_thread() was called")]
+    pub system_audio_fentry_checks: u64,
+    #[stat(desc = "Times system audio fentry hook found thread")]
+    pub system_audio_fentry_matches: u64,
+    #[stat(desc = "Times is_system_audio_name() was called")]
+    pub system_audio_name_checks: u64,
+    #[stat(desc = "Times system audio name pattern matched")]
+    pub system_audio_name_matches: u64,
+    #[stat(desc = "Times is_background_name() was called")]
+    pub background_name_checks: u64,
+    #[stat(desc = "Times background name pattern matched")]
+    pub background_name_matches: u64,
+    #[stat(desc = "Times background runtime pattern was checked")]
+    pub background_pattern_checks: u64,
+    #[stat(desc = "Times background pattern samples collected")]
+    pub background_pattern_samples: u64,
+    
+    /* Fentry hook call counters (from network_detect.bpf.h and audio_detect.bpf.h) */
+    #[stat(desc = "Network fentry send calls")]
+    pub network_detect_send_calls: u64,
+    #[stat(desc = "Network fentry recv calls")]
+    pub network_detect_recv_calls: u64,
+    #[stat(desc = "Audio fentry ALSA calls")]
+    pub audio_detect_alsa_calls: u64,
+    #[stat(desc = "Audio fentry USB calls")]
+    pub audio_detect_usb_calls: u64,
+    
     #[stat(desc = "Continuous input mode active (1=yes, 0=no)")]
     pub continuous_input_mode: u64,
     #[stat(desc = "Keyboard lane boost active (1=yes, 0=no)")]
@@ -155,9 +216,219 @@ pub struct Metrics {
     pub prof_deadline_ns: u64,
     #[stat(desc = "deadline calls")]
     pub prof_deadline_calls: u64,
+    
+    /* P0: CPU Placement Verification */
+    #[stat(desc = "GPU threads kept on physical cores (cache affinity)")]
+    pub gpu_phys_kept: u64,
+    #[stat(desc = "Compositor threads kept on physical cores (cache affinity)")]
+    pub compositor_phys_kept: u64,
+    #[stat(desc = "GPU preferred core fallback (when preferred core unavailable)")]
+    pub gpu_pref_fallback: u64,
+    
+    /* P0: Deadline Tracking */
+    #[stat(desc = "Total deadline misses detected")]
+    pub deadline_misses: u64,
+    #[stat(desc = "Auto-boost actions taken (self-healing)")]
+    pub auto_boosts: u64,
+    
+    /* P0: Scheduler State */
+    #[stat(desc = "Scheduler generation counter (incremented on restart/game change)")]
+    pub scheduler_generation: u32,
+    #[stat(desc = "Runtime-detected foreground TGID (vs foreground_tgid config)")]
+    pub detected_fg_tgid: u32,
+    
+    /* P0: Window Status */
+    #[stat(desc = "Input window currently active (1=yes, 0=no)")]
+    pub input_window_active: u64,
+    #[stat(desc = "Frame window currently active (1=yes, 0=no)")]
+    pub frame_window_active: u64,
+    #[stat(desc = "Timestamp when input window expires (ns)")]
+    pub input_window_until_ns: u64,
+    #[stat(desc = "Timestamp when frame window expires (ns)")]
+    pub frame_window_until_ns: u64,
+    
+    /* P1: Boost Distribution */
+    #[stat(desc = "Threads at boost level 0 (no boost)")]
+    pub boost_distribution_0: u64,
+    #[stat(desc = "Threads at boost level 1")]
+    pub boost_distribution_1: u64,
+    #[stat(desc = "Threads at boost level 2")]
+    pub boost_distribution_2: u64,
+    #[stat(desc = "Threads at boost level 3")]
+    pub boost_distribution_3: u64,
+    #[stat(desc = "Threads at boost level 4")]
+    pub boost_distribution_4: u64,
+    #[stat(desc = "Threads at boost level 5")]
+    pub boost_distribution_5: u64,
+    #[stat(desc = "Threads at boost level 6")]
+    pub boost_distribution_6: u64,
+    #[stat(desc = "Threads at boost level 7 (max boost - input handlers)")]
+    pub boost_distribution_7: u64,
+    
+    /* P1: Migration Cooldown */
+    #[stat(desc = "Migrations blocked by cooldown (32ms post-migration)")]
+    pub mig_blocked_cooldown: u64,
+    
+    /* P1: Input Lane Status */
+    #[stat(desc = "Keyboard lane trigger rate (events/sec)")]
+    pub input_lane_keyboard_rate: u32,
+    #[stat(desc = "Mouse lane trigger rate (events/sec)")]
+    pub input_lane_mouse_rate: u32,
+    #[stat(desc = "Other lane trigger rate (events/sec)")]
+    pub input_lane_other_rate: u32,
+    
+    /* P2: Game Detection Details */
+    #[stat(desc = "Game detection method (bpf_lsm, inotify, manual, none)")]
+    pub game_detection_method: String,
+    #[stat(desc = "Game detection confidence score (0-100)")]
+    pub game_detection_score: u8,
+    #[stat(desc = "Game detection timestamp (unix seconds)")]
+    pub game_detection_timestamp: u64,
+    
+    /* P2: Frame Timing */
+    #[stat(desc = "Estimated frame interval (ns, EMA of inter-frame time)")]
+    pub frame_interval_ns: u64,
+    #[stat(desc = "Total frames presented")]
+    pub frame_count: u64,
+    #[stat(desc = "Timestamp of last page flip (ns)")]
+    pub last_page_flip_ns: u64,
+    
+    /* AI Analytics: Latency Percentiles (from histograms) */
+    #[stat(desc = "select_cpu latency p10 (ns)")]
+    pub select_cpu_latency_p10: u64,
+    #[stat(desc = "select_cpu latency p25 (ns)")]
+    pub select_cpu_latency_p25: u64,
+    #[stat(desc = "select_cpu latency p50 (ns)")]
+    pub select_cpu_latency_p50: u64,
+    #[stat(desc = "select_cpu latency p75 (ns)")]
+    pub select_cpu_latency_p75: u64,
+    #[stat(desc = "select_cpu latency p90 (ns)")]
+    pub select_cpu_latency_p90: u64,
+    #[stat(desc = "select_cpu latency p95 (ns)")]
+    pub select_cpu_latency_p95: u64,
+    #[stat(desc = "select_cpu latency p99 (ns)")]
+    pub select_cpu_latency_p99: u64,
+    #[stat(desc = "select_cpu latency p999 (ns)")]
+    pub select_cpu_latency_p999: u64,
+    
+    #[stat(desc = "enqueue latency p10 (ns)")]
+    pub enqueue_latency_p10: u64,
+    #[stat(desc = "enqueue latency p25 (ns)")]
+    pub enqueue_latency_p25: u64,
+    #[stat(desc = "enqueue latency p50 (ns)")]
+    pub enqueue_latency_p50: u64,
+    #[stat(desc = "enqueue latency p75 (ns)")]
+    pub enqueue_latency_p75: u64,
+    #[stat(desc = "enqueue latency p90 (ns)")]
+    pub enqueue_latency_p90: u64,
+    #[stat(desc = "enqueue latency p95 (ns)")]
+    pub enqueue_latency_p95: u64,
+    #[stat(desc = "enqueue latency p99 (ns)")]
+    pub enqueue_latency_p99: u64,
+    #[stat(desc = "enqueue latency p999 (ns)")]
+    pub enqueue_latency_p999: u64,
+    
+    #[stat(desc = "dispatch latency p10 (ns)")]
+    pub dispatch_latency_p10: u64,
+    #[stat(desc = "dispatch latency p25 (ns)")]
+    pub dispatch_latency_p25: u64,
+    #[stat(desc = "dispatch latency p50 (ns)")]
+    pub dispatch_latency_p50: u64,
+    #[stat(desc = "dispatch latency p75 (ns)")]
+    pub dispatch_latency_p75: u64,
+    #[stat(desc = "dispatch latency p90 (ns)")]
+    pub dispatch_latency_p90: u64,
+    #[stat(desc = "dispatch latency p95 (ns)")]
+    pub dispatch_latency_p95: u64,
+    #[stat(desc = "dispatch latency p99 (ns)")]
+    pub dispatch_latency_p99: u64,
+    #[stat(desc = "dispatch latency p999 (ns)")]
+    pub dispatch_latency_p999: u64,
+    
+    /* AI Analytics: Temporal Patterns */
+    #[stat(desc = "Migrations in last 10 seconds")]
+    pub migrations_last_10s: u64,
+    #[stat(desc = "Migrations in last 60 seconds")]
+    pub migrations_last_60s: u64,
+    #[stat(desc = "CPU utilization trend: increasing/decreasing/stable")]
+    pub cpu_util_trend: String,
+    #[stat(desc = "Frame rate trend: increasing/decreasing/stable")]
+    pub frame_rate_trend: String,
+    
+    /* AI Analytics: Classification Confidence Scores */
+    #[stat(desc = "Input handler classification confidence (0-100)")]
+    pub input_handler_confidence: u8,
+    #[stat(desc = "GPU submit classification confidence (0-100)")]
+    pub gpu_submit_confidence: u8,
+    #[stat(desc = "Game audio classification confidence (0-100)")]
+    pub game_audio_confidence: u8,
+    #[stat(desc = "System audio classification confidence (0-100)")]
+    pub system_audio_confidence: u8,
+    #[stat(desc = "Network classification confidence (0-100)")]
+    pub network_confidence: u8,
+    #[stat(desc = "Background classification confidence (0-100)")]
+    pub background_confidence: u8,
+    
+    /* AI Analytics: Thread Type Distribution Percentages */
+    #[stat(desc = "Input handler threads percentage of total")]
+    pub input_handler_pct: f64,
+    #[stat(desc = "GPU submit threads percentage of total")]
+    pub gpu_submit_pct: f64,
+    #[stat(desc = "Game audio threads percentage of total")]
+    pub game_audio_pct: f64,
+    #[stat(desc = "System audio threads percentage of total")]
+    pub system_audio_pct: f64,
+    #[stat(desc = "Compositor threads percentage of total")]
+    pub compositor_pct: f64,
+    #[stat(desc = "Network threads percentage of total")]
+    pub network_pct: f64,
+    #[stat(desc = "Background threads percentage of total")]
+    pub background_pct: f64,
+    #[stat(desc = "Total classified threads")]
+    pub total_classified_threads: u64,
 }
 
 impl Metrics {
+    /// Calculate percentile from histogram buckets (log scale)
+    /// Histogram buckets: 0: <100ns, 1: 100-200ns, 2: 200-400ns, 3: 400-800ns,
+    /// 4: 800ns-1.6us, 5: 1.6-3.2us, 6: 3.2-6.4us, 7: 6.4-12.8us,
+    /// 8: 12.8-25.6us, 9: 25.6-51.2us, 10: 51.2-102.4us, 11: >102.4us
+    pub fn histogram_percentile(hist: &[u64; 12], percentile: f64) -> u64 {
+        let total: u64 = hist.iter().sum();
+        if total == 0 {
+            return 0;
+        }
+        
+        let target_count = (total as f64 * percentile / 100.0) as u64;
+        let mut cumulative = 0u64;
+        
+        // Bucket thresholds (midpoint of each bucket range)
+        let thresholds = [
+            50,      // bucket 0: <100ns (use 50ns as midpoint)
+            150,     // bucket 1: 100-200ns
+            300,     // bucket 2: 200-400ns
+            600,     // bucket 3: 400-800ns
+            1200,    // bucket 4: 800ns-1.6us
+            2400,    // bucket 5: 1.6-3.2us
+            4800,    // bucket 6: 3.2-6.4us
+            9600,    // bucket 7: 6.4-12.8us
+            19200,   // bucket 8: 12.8-25.6us
+            38400,   // bucket 9: 25.6-51.2us
+            76800,   // bucket 10: 51.2-102.4us
+            153600,  // bucket 11: >102.4us (use upper bound estimate)
+        ];
+        
+        for (i, &count) in hist.iter().enumerate() {
+            cumulative += count;
+            if cumulative >= target_count {
+                return thresholds[i];
+            }
+        }
+        
+        // If we didn't find it (shouldn't happen), return last bucket threshold
+        thresholds[11]
+    }
+    
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         let edf_pct = if self.rr_enq + self.edf_enq > 0 {
             (self.edf_enq as f64) * 100.0 / (self.rr_enq + self.edf_enq) as f64
@@ -252,6 +523,39 @@ impl Metrics {
             continuous_input_lane_keyboard: self.continuous_input_lane_keyboard,
             continuous_input_lane_mouse: self.continuous_input_lane_mouse,
             continuous_input_lane_other: self.continuous_input_lane_other,
+            
+            // Diagnostic counters: cumulative totals (show growth over time, not delta)
+            classification_attempts: self.classification_attempts,
+            first_classification_true: self.first_classification_true,
+            is_exact_game_thread_true: self.is_exact_game_thread_true,
+            input_handler_name_match: self.input_handler_name_match,
+            main_thread_match: self.main_thread_match,
+            gpu_submit_name_match: self.gpu_submit_name_match,
+            gpu_submit_fentry_match: self.gpu_submit_fentry_match,
+            runtime_pattern_gpu_samples: self.runtime_pattern_gpu_samples,
+            runtime_pattern_audio_samples: self.runtime_pattern_audio_samples,
+            input_handler_name_check_attempts: self.input_handler_name_check_attempts,
+            input_handler_name_pattern_match: self.input_handler_name_pattern_match,
+            
+            // Diagnostic counters for network/audio/background detection: cumulative totals
+            network_fentry_checks: self.network_fentry_checks,
+            network_fentry_matches: self.network_fentry_matches,
+            network_name_checks: self.network_name_checks,
+            network_name_matches: self.network_name_matches,
+            system_audio_fentry_checks: self.system_audio_fentry_checks,
+            system_audio_fentry_matches: self.system_audio_fentry_matches,
+            system_audio_name_checks: self.system_audio_name_checks,
+            system_audio_name_matches: self.system_audio_name_matches,
+            background_name_checks: self.background_name_checks,
+            background_name_matches: self.background_name_matches,
+            background_pattern_checks: self.background_pattern_checks,
+            background_pattern_samples: self.background_pattern_samples,
+            
+            // Fentry hook call counters: cumulative totals
+            network_detect_send_calls: self.network_detect_send_calls,
+            network_detect_recv_calls: self.network_detect_recv_calls,
+            audio_detect_alsa_calls: self.audio_detect_alsa_calls,
+            audio_detect_usb_calls: self.audio_detect_usb_calls,
 
             // Fentry stats: cumulative totals (show growth over time, not delta)
             fentry_total_events: self.fentry_total_events,
@@ -295,6 +599,103 @@ impl Metrics {
             prof_dispatch_calls: self.prof_dispatch_calls,
             prof_deadline_ns: self.prof_deadline_ns,
             prof_deadline_calls: self.prof_deadline_calls,
+            
+            // P0: CPU Placement Verification - cumulative totals
+            gpu_phys_kept: self.gpu_phys_kept,
+            compositor_phys_kept: self.compositor_phys_kept,
+            gpu_pref_fallback: self.gpu_pref_fallback,
+            
+            // P0: Deadline Tracking - cumulative totals
+            deadline_misses: self.deadline_misses,
+            auto_boosts: self.auto_boosts,
+            
+            // P0: Scheduler State - live values (not deltas)
+            scheduler_generation: self.scheduler_generation,
+            detected_fg_tgid: self.detected_fg_tgid,
+            
+            // P0: Window Status - live values (not deltas)
+            input_window_active: self.input_window_active,
+            frame_window_active: self.frame_window_active,
+            input_window_until_ns: self.input_window_until_ns,
+            frame_window_until_ns: self.frame_window_until_ns,
+            
+            // P1: Boost Distribution - live counts (not deltas)
+            boost_distribution_0: self.boost_distribution_0,
+            boost_distribution_1: self.boost_distribution_1,
+            boost_distribution_2: self.boost_distribution_2,
+            boost_distribution_3: self.boost_distribution_3,
+            boost_distribution_4: self.boost_distribution_4,
+            boost_distribution_5: self.boost_distribution_5,
+            boost_distribution_6: self.boost_distribution_6,
+            boost_distribution_7: self.boost_distribution_7,
+            
+            // P1: Migration Cooldown - cumulative total
+            mig_blocked_cooldown: self.mig_blocked_cooldown,
+            
+            // P1: Input Lane Status - live rates (not deltas)
+            input_lane_keyboard_rate: self.input_lane_keyboard_rate,
+            input_lane_mouse_rate: self.input_lane_mouse_rate,
+            input_lane_other_rate: self.input_lane_other_rate,
+            
+            // P2: Game Detection Details - live values (not deltas)
+            game_detection_method: self.game_detection_method.clone(),
+            game_detection_score: self.game_detection_score,
+            game_detection_timestamp: self.game_detection_timestamp,
+            
+            // P2: Frame Timing - live values (not deltas)
+            frame_interval_ns: self.frame_interval_ns,
+            frame_count: self.frame_count,
+            last_page_flip_ns: self.last_page_flip_ns,
+            
+            // AI Analytics: Latency Percentiles - live values (not deltas)
+            select_cpu_latency_p10: self.select_cpu_latency_p10,
+            select_cpu_latency_p25: self.select_cpu_latency_p25,
+            select_cpu_latency_p50: self.select_cpu_latency_p50,
+            select_cpu_latency_p75: self.select_cpu_latency_p75,
+            select_cpu_latency_p90: self.select_cpu_latency_p90,
+            select_cpu_latency_p95: self.select_cpu_latency_p95,
+            select_cpu_latency_p99: self.select_cpu_latency_p99,
+            select_cpu_latency_p999: self.select_cpu_latency_p999,
+            enqueue_latency_p10: self.enqueue_latency_p10,
+            enqueue_latency_p25: self.enqueue_latency_p25,
+            enqueue_latency_p50: self.enqueue_latency_p50,
+            enqueue_latency_p75: self.enqueue_latency_p75,
+            enqueue_latency_p90: self.enqueue_latency_p90,
+            enqueue_latency_p95: self.enqueue_latency_p95,
+            enqueue_latency_p99: self.enqueue_latency_p99,
+            enqueue_latency_p999: self.enqueue_latency_p999,
+            dispatch_latency_p10: self.dispatch_latency_p10,
+            dispatch_latency_p25: self.dispatch_latency_p25,
+            dispatch_latency_p50: self.dispatch_latency_p50,
+            dispatch_latency_p75: self.dispatch_latency_p75,
+            dispatch_latency_p90: self.dispatch_latency_p90,
+            dispatch_latency_p95: self.dispatch_latency_p95,
+            dispatch_latency_p99: self.dispatch_latency_p99,
+            dispatch_latency_p999: self.dispatch_latency_p999,
+            
+            // AI Analytics: Temporal Patterns - live values (not deltas)
+            migrations_last_10s: self.migrations_last_10s,
+            migrations_last_60s: self.migrations_last_60s,
+            cpu_util_trend: self.cpu_util_trend.clone(),
+            frame_rate_trend: self.frame_rate_trend.clone(),
+            
+            // AI Analytics: Classification Confidence - live values (not deltas)
+            input_handler_confidence: self.input_handler_confidence,
+            gpu_submit_confidence: self.gpu_submit_confidence,
+            game_audio_confidence: self.game_audio_confidence,
+            system_audio_confidence: self.system_audio_confidence,
+            network_confidence: self.network_confidence,
+            background_confidence: self.background_confidence,
+            
+            // AI Analytics: Thread Type Distribution - live values (not deltas)
+            input_handler_pct: self.input_handler_pct,
+            gpu_submit_pct: self.gpu_submit_pct,
+            game_audio_pct: self.game_audio_pct,
+            system_audio_pct: self.system_audio_pct,
+            compositor_pct: self.compositor_pct,
+            network_pct: self.network_pct,
+            background_pct: self.background_pct,
+            total_classified_threads: self.total_classified_threads,
         }
     }
 }

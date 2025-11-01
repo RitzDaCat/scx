@@ -3,12 +3,74 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-BIN_PATH="${REPO_ROOT}/target/release/scx_gamer"
+BUILD_MODE=""  # Will be set to "release" or "debug"
+BIN_PATH=""    # Will be set based on BUILD_MODE
+
+select_build_mode() {
+    while true; do
+        cat <<'BUILD_MENU'
+
+================================================================================
+                         SELECT BUILD MODE
+================================================================================
+
+MODE                   DESCRIPTION
+--------------------------------------------------------------------------------
+1) Release             Production build (optimized, no profiling)
+                       - Binary: target/release/scx_gamer
+                       - Best performance, smallest binary
+                       - Recommended for gaming
+
+2) Debug               Development build with profiling enabled
+                       - Binary: target/debug/scx_gamer
+                       - Profiling enabled (ENABLE_PROFILING)
+                       - Latency histograms active
+                       - ~50-150ns overhead per scheduling decision
+                       - Use for: Debugging, performance analysis
+
+================================================================================
+
+BUILD_MENU
+        read -rp "Select build mode [1-2]: " mode_choice
+        case "${mode_choice}" in
+            1)
+                BUILD_MODE="release"
+                BIN_PATH="${REPO_ROOT}/target/release/scx_gamer"
+                echo
+                echo "Selected: Release build"
+                echo "Binary: ${BIN_PATH}"
+                echo
+                break
+                ;;
+            2)
+                BUILD_MODE="debug"
+                BIN_PATH="${REPO_ROOT}/target/debug/scx_gamer"
+                echo
+                echo "Selected: Debug build (with profiling)"
+                echo "Binary: ${BIN_PATH}"
+                echo
+                break
+                ;;
+            *)
+                echo
+                echo "Invalid selection. Please choose 1 or 2."
+                echo
+                sleep 1
+                ;;
+        esac
+    done
+}
 
 build_scx() {
     echo
-    echo "[scx_gamer] Building release binary..."
-    cargo -C "${REPO_ROOT}" build -p scx_gamer --release
+    if [[ "${BUILD_MODE}" == "debug" ]]; then
+        echo "[scx_gamer] Building debug binary with profiling..."
+        export SCX_GAMER_ENABLE_PROFILING=1
+        cargo -C "${REPO_ROOT}" build -p scx_gamer
+    else
+        echo "[scx_gamer] Building release binary..."
+        cargo -C "${REPO_ROOT}" build -p scx_gamer --release
+    fi
 }
 
 ensure_binary() {
@@ -556,6 +618,148 @@ run_debug() {
         --arg "--verbose"
 }
 
+run_debug_api() {
+    ensure_binary
+    echo
+    local port="8080"
+    while true; do
+        cat <<'DEBUG_API_MENU'
+
+================================================================================
+                         DEBUG API MODE
+================================================================================
+
+The Debug API exposes scheduler metrics via HTTP for debugging and monitoring.
+Metrics update every 1 second and are available as JSON.
+
+API Endpoints:
+  - http://127.0.0.1:PORT/metrics  - Get current scheduler metrics
+  - http://127.0.0.1:PORT/health    - Health check
+  - http://127.0.0.1:PORT/          - API information
+
+You can query metrics using curl:
+  curl http://127.0.0.1:PORT/metrics | jq .
+
+PROFILE                DESCRIPTION
+--------------------------------------------------------------------------------
+1) Baseline + API       Default settings with debug API enabled
+                       - Good for testing and debugging
+
+2) Esports + API        Competitive gaming profile with API
+                       - Full optimizations + metric access
+
+3) TUI + API            TUI Dashboard with debug API enabled
+                       - Visual monitoring + HTTP access
+
+4) Custom + API         Custom flags with debug API enabled
+                       - Use your own flags + API
+
+q) Back to main menu
+
+================================================================================
+DEBUG_API_MENU
+        read -rp "Select profile [1-4, q]: " profile_choice
+        case "${profile_choice}" in
+            1)
+                echo
+                echo "Launching: Baseline Profile with Debug API (port ${port})"
+                echo
+                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
+                echo
+                launch_scx "Baseline + Debug API" \
+                    --env "RUST_LOG=info" \
+                    --arg "--debug-api" \
+                    --arg "${port}" \
+                    --arg "--slice-us" \
+                    --arg "1000"
+                return
+                ;;
+            2)
+                echo
+                echo "Launching: Esports Profile with Debug API (port ${port})"
+                echo "Active optimizations: Full competitive tuning suite"
+                echo
+                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
+                echo
+                launch_scx "Esports + Debug API" \
+                    --env "RUST_LOG=info" \
+                    --arg "--debug-api" \
+                    --arg "${port}" \
+                    --arg "--slice-us" \
+                    --arg "250" \
+                    --arg "--wakeup-timer-us" \
+                    --arg "250" \
+                    --arg "--input-window-us" \
+                    --arg "8000" \
+                    --arg "--keyboard-boost-us" \
+                    --arg "300000" \
+                    --arg "--mouse-boost-us" \
+                    --arg "6000" \
+                    --arg "--mig-max" \
+                    --arg "4" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--avoid-smt" \
+                    --arg "--prefer-napi-on-input"
+                return
+                ;;
+            3)
+                echo
+                echo "Launching: TUI Dashboard with Debug API (port ${port})"
+                echo "Active optimizations: Preferred idle scan, MM affinity"
+                echo
+                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
+                echo
+                launch_scx "TUI + Debug API" \
+                    --env "RUST_LOG=info" \
+                    --arg "--tui" \
+                    --arg "0.1" \
+                    --arg "--debug-api" \
+                    --arg "${port}" \
+                    --arg "--preferred-idle-scan" \
+                    --arg "--mm-affinity"
+                return
+                ;;
+            4)
+                echo
+                echo "================================================================================"
+                echo "                         CUSTOM FLAGS + DEBUG API"
+                echo "================================================================================"
+                echo
+                echo "Enter your custom scx_gamer command-line arguments."
+                echo "The --debug-api ${port} flag will be added automatically."
+                echo
+                echo "Example: --slice-us 250 --input-window-us 8000 --avoid-smt"
+                echo
+                local line
+                read -rp "Custom flags: " line
+                if [[ -z "${line}" ]]; then
+                    echo
+                    echo "No flags provided. Cancelled."
+                    echo
+                    return
+                fi
+                read -ra CUSTOM_ARGS <<<"${line}"
+                echo
+                echo "Launching with custom arguments + Debug API:"
+                echo "  Custom: ${CUSTOM_ARGS[*]}"
+                echo "  API: --debug-api ${port}"
+                echo
+                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
+                echo "================================================================================"
+                echo
+                sudo "${BIN_PATH}" "${CUSTOM_ARGS[@]}" --debug-api "${port}"
+                return
+                ;;
+            q|Q|0)
+                return
+                ;;
+            *)
+                echo "Invalid profile: ${profile_choice}"
+                ;;
+        esac
+    done
+}
+
 run_custom() {
     ensure_binary
     echo
@@ -624,7 +828,11 @@ MODE                   DESCRIPTION
 7) Debug Mode          Maximum logging for troubleshooting
                        - RUST_LOG=debug, LIBBPF_LOG=debug
 
-8) Custom Flags        Manually enter scheduler command-line arguments
+8) Debug API Mode      Start with HTTP API for metric access
+                       - Exposes metrics at http://127.0.0.1:8080/metrics
+                       - Useful for debugging with AI assistants
+
+9) Custom Flags        Manually enter scheduler command-line arguments
                        - For advanced users and testing
 
 q) Quit                Exit launcher
@@ -633,10 +841,21 @@ q) Quit                Exit launcher
 MENU
 }
 
+# Select build mode first (release or debug)
+select_build_mode
+
+# Main menu loop
 while true; do
     show_menu
     echo
-    read -rp "Select mode [1-8, q]: " choice
+    # Display build mode (capitalize first letter)
+    if [[ "${BUILD_MODE}" == "release" ]]; then
+        echo "Current build mode: Release (${BIN_PATH})"
+    else
+        echo "Current build mode: Debug (${BIN_PATH})"
+    fi
+    echo
+    read -rp "Select mode [1-9, q]: " choice
     case "${choice}" in
         1) run_standard ;;
         2) run_verbose ;;
@@ -645,7 +864,8 @@ while true; do
         5) run_ml_profiles ;;
         6) run_ml_full ;;
         7) run_debug ;;
-        8) run_custom ;;
+        8) run_debug_api ;;
+        9) run_custom ;;
         q|Q|0) 
             echo
             echo "Exiting scx_gamer launcher."
@@ -655,7 +875,7 @@ while true; do
         *) 
             echo
             echo "Invalid selection: ${choice}"
-            echo "Please choose 1-8 or q to quit."
+            echo "Please choose 1-9 or q to quit."
             echo
             ;;
     esac

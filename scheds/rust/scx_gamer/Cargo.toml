@@ -37,7 +37,7 @@ arc-swap = "1.7"
 ratatui = "0.29"
 crossterm = "0.28"
 udev = "0.8"
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "time", "signal"] }
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "time", "signal", "io-util", "net"] }
 tokio-util = "0.7"
 futures = "0.3"
 tempfile = "3.23.0"

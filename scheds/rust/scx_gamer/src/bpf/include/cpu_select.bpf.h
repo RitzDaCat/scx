@@ -345,7 +345,7 @@ static s32 pick_idle_physical_core(struct task_struct *p, s32 prev_cpu, u64 now)
  *
  * Returns: CPU ID >= 0, or -EBUSY if no idle CPU found
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
+static s32 __attribute__((unused)) pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
                          u64 wake_flags, bool from_enqueue, u64 now)
 {
 	const struct cpumask *primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
