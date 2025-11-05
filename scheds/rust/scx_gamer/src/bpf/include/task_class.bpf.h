@@ -674,7 +674,11 @@ static __always_inline void classify_audio(struct task_struct *p, struct task_ct
 	 */
 	if (!tctx->is_system_audio) {
 		u32 tgid = (u32)p->tgid;
-		u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
+		/* PERFORMANCE HIERARCHY: Per-CPU hash lookup (Tier 1, 20-50ns) vs shared hash (Tier 3, 100-300ns)
+		 * Each CPU maintains its own bucket, eliminating shared map contention
+		 * Read from current CPU's bucket (same data across all CPUs since TGID is global) */
+		s32 cpu = bpf_get_smp_processor_id();
+		u8 *is_audio_server = bpf_map_lookup_percpu_elem(&system_audio_tgids_map, &tgid, cpu);
 		if (is_audio_server && *is_audio_server) {
 			tctx->is_system_audio = 1;
 		}
