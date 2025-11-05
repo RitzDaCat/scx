@@ -60,8 +60,6 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use evdev::EventType;
-use libbpf_rs::libbpf_sys;
-use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -1035,21 +1033,8 @@ impl<'a> Scheduler<'a> {
         // Enable stats collection when any consumer is active (stats, monitor, TUI, or debug API)
         rodata.no_stats = !(opts.stats.is_some() || opts.monitor.is_some() || opts.tui.is_some() || opts.debug_api.is_some());
 
-        // Configure mm_last_cpu LRU size before load
-        let mm_size = opts.mm_hint_size.clamp(128, 65536);
-        // SAFETY: BPF map `mm_last_cpu` is valid at this point (skel is open but not loaded).
-        // `mm_size` is clamped to [128, 65536] above, within BPF map size limits.
-        // libbpf guarantees the map pointer remains valid for the lifetime of `skel`.
-        // This call MUST happen before scx_ops_load!() to configure the map size.
-        let ret = unsafe {
-            libbpf_sys::bpf_map__set_max_entries(
-                skel.maps.mm_last_cpu.as_libbpf_object().as_ptr(),
-                mm_size,
-            )
-        };
-        if ret != 0 {
-            bail!("Failed to set mm_last_cpu map size to {}: error {}", mm_size, ret);
-        }
+        // MM hint removed - map configuration no longer needed
+        // MM hint map (mm_last_cpu) removed for gaming workloads - low cache locality benefit, high overhead
 
         // Define the primary scheduling domain.
         let primary_cpus = if let Some(ref domain) = opts.primary_domain {
@@ -1465,7 +1450,7 @@ impl<'a> Scheduler<'a> {
             win_frame_ns: bss.win_frame_ns_total,
             timer_elapsed_ns: bss.timer_elapsed_ns_total,
             idle_pick: bss.nr_idle_cpu_pick,
-            mm_hint_hit: bss.nr_mm_hint_hit,
+            mm_hint_hit: 0,  // MM hint removed
             fg_cpu_pct: if bss.total_runtime_ns_total > 0 { bss.fg_runtime_ns_total.saturating_mul(100) / bss.total_runtime_ns_total } else { 0 },
             input_trig: bss.nr_input_trig,
             frame_trig: bss.nr_frame_trig,
@@ -2266,7 +2251,7 @@ impl<'a> Scheduler<'a> {
         let mut last_metrics_log = Instant::now();
         let mut prev_mig_blocked: u64 = 0;
         let mut prev_frame_mig_block: u64 = 0;
-        let mut prev_mm_hint_hit: u64 = 0;
+        // MM hint removed - was let mut prev_mm_hint_hit: u64 = 0;
         let mut prev_idle_pick: u64 = 0;
 
         // Event loop
@@ -2788,29 +2773,25 @@ impl<'a> Scheduler<'a> {
                     .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                 let mig_blocked = bss.nr_mig_blocked;
                 let frame_mig_block = bss.nr_frame_mig_block;
-                let mm_hint_hit = bss.nr_mm_hint_hit;
                 let idle_pick = bss.nr_idle_cpu_pick;
 
                 let delta_mig_blocked = mig_blocked.saturating_sub(prev_mig_blocked);
                 let delta_frame_mig = frame_mig_block.saturating_sub(prev_frame_mig_block);
-                let delta_hint_hit = mm_hint_hit.saturating_sub(prev_mm_hint_hit);
-                let delta_idle_pick = idle_pick.saturating_sub(prev_idle_pick);
+                // MM hint removed - was let delta_hint_hit = mm_hint_hit.saturating_sub(prev_mm_hint_hit);
+                // delta_idle_pick calculated but not currently logged (may be added to metrics in future)
+                let _delta_idle_pick = idle_pick.saturating_sub(prev_idle_pick);
 
-                if delta_mig_blocked > 0 || delta_frame_mig > 0 || delta_hint_hit > 0 {
-                    let hint_rate = if delta_idle_pick > 0 {
-                        (delta_hint_hit * 100) as f64 / delta_idle_pick as f64
-                    } else {
-                        0.0
-                    };
+                if delta_mig_blocked > 0 || delta_frame_mig > 0 {
+                    // MM hint removed - was hint_rate calculation
                     info!(
-                        "metrics: mig_blocked={}, frame_mig_blocked={}, mm_hint_hit_rate={:.1}% ({}/{})",
-                        delta_mig_blocked, delta_frame_mig, hint_rate, delta_hint_hit, delta_idle_pick
+                        "metrics: mig_blocked={}, frame_mig_blocked={}, mm_hint_hit_rate=N/A (removed)",
+                        delta_mig_blocked, delta_frame_mig
                     );
                 }
 
                 prev_mig_blocked = mig_blocked;
                 prev_frame_mig_block = frame_mig_block;
-                prev_mm_hint_hit = mm_hint_hit;
+                // MM hint removed - was prev_mm_hint_hit = mm_hint_hit;
                 prev_idle_pick = idle_pick;
             }
 

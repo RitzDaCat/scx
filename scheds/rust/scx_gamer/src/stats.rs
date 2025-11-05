@@ -62,7 +62,7 @@ pub struct Metrics {
     #[stat(desc = "Idle CPU pick hits in interval")]
     pub idle_pick: u64,
     #[stat(desc = "Per-mm hint hits in interval")]
-    pub mm_hint_hit: u64,
+    pub mm_hint_hit: u64,  // Always 0 - MM hint removed
     #[stat(desc = "Foreground runtime share % (0-100)")]
     pub fg_cpu_pct: u64,
     #[stat(desc = "Input triggers in interval")]
@@ -506,7 +506,7 @@ impl Metrics {
             win_frame_ns: self.win_frame_ns.saturating_sub(prev.win_frame_ns),
             timer_elapsed_ns: self.timer_elapsed_ns.saturating_sub(prev.timer_elapsed_ns),
             idle_pick: self.idle_pick.saturating_sub(prev.idle_pick),
-            mm_hint_hit: self.mm_hint_hit.saturating_sub(prev.mm_hint_hit),
+            mm_hint_hit: 0,  // MM hint removed
             fg_cpu_pct: self.fg_cpu_pct,
             input_trig: self.input_trig.saturating_sub(prev.input_trig),
             frame_trig: self.frame_trig.saturating_sub(prev.frame_trig),

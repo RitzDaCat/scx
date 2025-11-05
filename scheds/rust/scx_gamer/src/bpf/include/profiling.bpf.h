@@ -47,9 +47,7 @@ extern volatile u64 prof_deadline_calls;
 extern volatile u64 prof_pick_idle_ns_total;
 extern volatile u64 prof_pick_idle_calls;
 
-/* mm_hint lookup profiling */
-extern volatile u64 prof_mm_hint_ns_total;
-extern volatile u64 prof_mm_hint_calls;
+/* MM hint profiling removed - was prof_mm_hint_ns_total, prof_mm_hint_calls */
 
 /*
  * Profiling Macros

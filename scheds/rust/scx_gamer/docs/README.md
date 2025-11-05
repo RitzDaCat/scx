@@ -1,158 +1,163 @@
-# scx_gamer Documentation Index
+# scx_gamer Documentation
 
-[![Documentation](https://img.shields.io/badge/docs-Diataxis-blue.svg)](https://diataxis.fr/)
-[![Total Documents](https://img.shields.io/badge/documents-53-blue.svg)](./)
-[![Documentation Size](https://img.shields.io/badge/size-~500KB+-lightgrey.svg)](./)
-[![Last Updated](https://img.shields.io/badge/updated-2025--01--28-success.svg)](./)
+**Last Updated:** 2025-11-05
 
-**Date:** 2025-01-28  
-**Purpose:** Central index for all scx_gamer documentation  
-**Framework:** Organized according to [Diátaxis](https://diataxis.fr/) principles  
-**Standards:** Scientific documentation style, peer-review ready, GitHub Markdown compliant
+This directory contains comprehensive documentation for the scx_gamer scheduler, organized by category.
 
 ---
 
-## Documentation Structure (Diátaxis Framework)
+## 📁 Documentation Structure
 
-Our documentation is organized into four types, each serving a different purpose:
+### [architecture/](architecture/)
+**System architecture and design documentation**
+- `TECHNICAL_ARCHITECTURE.md` - Complete technical architecture overview
+- `ARCHITECTURE_REVIEW.md` - Architecture review and analysis
+- `CACHYOS_ARCHITECTURE.md` - CachyOS integration architecture
 
-1. **Tutorials** - Learning-oriented, teach concepts step-by-step
-2. **How-To Guides** - Goal-oriented, solve specific problems
-3. **Reference** - Information-oriented, technical specifications
-4. **Explanation** - Understanding-oriented, provide context and insights
+### [code-review/](code-review/)
+**Code review findings and analysis**
+- `COMPREHENSIVE_CODE_REVIEW.md` - Full code review with recommendations
+- `CODE_REVIEW_FINDINGS.md` - Specific code review findings
+- `RUST_CODE_REVIEW_FINDINGS.md` - Rust-specific code review
+- `USERSPACE_CODE_REVIEW.md` - Userspace code analysis
+- `CODE_SAFETY_REVIEW.md` - Safety and correctness review
+- `DEAD_CODE_REVIEW.md` - Dead code analysis
+- `SCHEDULER_FUNCTIONALITY_REVIEW.md` - Scheduler functionality review
+- `SCHEDULER_FUNCTIONALITY_BEFORE_API.md` - Pre-API functionality analysis
+- `TUI_CODE_REVIEW.md` - TUI code review
+- `TUI_DEBUGGING_REVIEW.md` - TUI debugging analysis
+- `THREAD_CLASSIFICATION_REVIEW.md` - Thread classification review
 
----
+### [performance/](performance/)
+**Performance analysis and optimization reviews**
+- `PERFORMANCE.md` - General performance documentation
+- `PERFORMANCE_REVIEW.md` - Performance review
+- `ADVANCED_PERFORMANCE_REVIEW.md` - Advanced performance analysis
+- `CATEGORY_PERFORMANCE_REVIEW.md` - Category-specific performance
+- `COMPREHENSIVE_PERFORMANCE_IMPACT_TABLE.md` - Performance impact table
+- `PERFORMANCE_VS_VISIBILITY_CHANGES.md` - Performance vs visibility trade-offs
+- `HELPER_FUNCTION_PERFORMANCE_ANALYSIS.md` - Helper function performance
+- `FILESYSTEM_PERFORMANCE_REVIEW.md` - Filesystem performance
+- `GPU_FRAME_PERFORMANCE_REVIEW.md` - GPU frame performance
+- `INPUT_LATENCY_OPTIMIZATIONS.md` - Input latency optimizations
+- `FINAL_INPUT_LATENCY_REVIEW.md` - Final input latency review
+- `LATENCY_CHAIN_ANALYSIS.md` - Latency chain analysis
+- `INPUT_CHAIN_REVIEW.md` - Input chain review
 
-## Tutorials (Learning-Oriented)
+### [optimization/](optimization/)
+**Specific optimization implementations and techniques**
+- `OPTIMIZATION_IMPLEMENTATION_SUMMARY.md` - Optimization summary
+- `OPTIMIZATION_STATUS_AND_LEARNINGS.md` - Optimization status
+- `MECHANICAL_SYMPATHY_OPTIMIZATIONS.md` - Mechanical sympathy patterns
+- `HFT_LOW_LATENCY_PATTERNS_ANALYSIS.md` - HFT low-latency patterns
+- `HFT_ADDITIONAL_PATTERNS_ANALYSIS.md` - Additional HFT patterns
+- `HFT_LOOP_UNROLLING_IMPLEMENTATION.md` - Loop unrolling implementation
+- `LOOP_UNROLLING_IMPLEMENTATION.md` - Loop unrolling details
+- `LMAX_DETAILED_EXPLANATION.md` - LMAX Disruptor explanation
+- `LMAX_IMPLEMENTATION_SUMMARY.md` - LMAX implementation summary
+- `LMAX_MECHANICAL_SYMPATHY_ANALYSIS.md` - LMAX mechanical sympathy
+- `LMAX_PERFORMANCE_OPTIMIZATIONS.md` - LMAX performance optimizations
+- `LMAX_REMAINING_OPTIMIZATIONS.md` - Remaining LMAX optimizations
+- `RING_BUFFER_IMPLEMENTATION.md` - Ring buffer implementation
+- `RING_BUFFER_ANALYSIS.md` - Ring buffer analysis
+- `RING_BUFFER_DIRECT_BOOST_EXPLAINED.md` - Ring buffer boost explanation
+- `PER_CPU_RING_BUFFER_IMPLEMENTATION.md` - Per-CPU ring buffer
+- `REALTIME_SCHEDULING_OPTIMIZATIONS.md` - Real-time scheduling optimizations
+- `CPU_CONTEXT_PREFETCHING_ENHANCEMENT.md` - CPU context prefetching
+- `PREFETCHING_9800X3D_ANALYSIS.md` - Prefetching analysis (9800X3D)
+- `POLLING_ELIMINATION_REVIEW.md` - Polling elimination review
+- `INPUT_LOCK_FREE_ANALYSIS.md` - Lock-free input analysis
 
-**Purpose:** Guide users through learning scx_gamer concepts step-by-step.
+### [detection/](detection/)
+**Thread and game detection documentation**
+- `GAME_DETECTION_ROBUSTNESS.md` - Game detection robustness
+- `DETECTION_ROBUSTNESS_ANALYSIS.md` - Detection robustness analysis
+- `AUDIO_DETECTION_STRATEGY.md` - Audio detection strategy
+- `GPU_WAKEUP_FRAME_RATE_VERIFICATION.md` - GPU wakeup frame rate
+- `FRAME_RATE_DETECTION_ANALYSIS.md` - Frame rate detection
+- `WAYLAND_FRAME_RATE_DETECTION.md` - Wayland frame rate detection
+- `LOW_PRIORITY_ISSUES_ANALYSIS.md` - Low priority issues
 
-- **[QUICK_START.md](./QUICK_START.md)** - **Start here!** Get up and running in 3 steps
-- **[INSTALLER_README.md](./INSTALLER_README.md)** - Detailed installation instructions with all methods
+### [integration/](integration/)
+**System integration and installation**
+- `CACHYOS_INTEGRATION.md` - CachyOS integration guide
+- `INSTALLER_README.md` - Installation instructions
+- `COMPILATION_VERIFICATION.md` - Compilation verification
+- `VERIFICATION_GUIDE.md` - Verification guide
 
----
+### [academic/](academic/)
+**Academic resources and research analysis**
+- `ACADEMIC_RESOURCES.md` - Comprehensive academic resources (papers, books)
+- `LIU_LAYLAND_1973_ANALYSIS.md` - Liu & Layland (1973) paper analysis
 
-## How-To Guides (Goal-Oriented)
+### [api/](api/)
+**Debug API and metrics documentation**
+- `DEBUG_API.md` - Debug API documentation
+- `DEBUG_API_METRICS_PROPOSAL.md` - Debug API metrics proposal
+- `AI_ANALYTICS_METRICS_PROPOSAL.md` - AI analytics metrics proposal
 
-**Purpose:** Step-by-step instructions to accomplish specific tasks.
+### [changelog/](changelog/)
+**Change logs and version history**
+- `CHANGELOG.md` - Main changelog
+- `CHANGELOG_LMAX_REALTIME_OPTIMIZATIONS.md` - LMAX/real-time changelog
+- `BPF_VERIFIER_OPTIMIZATIONS_CHANGELOG.md` - BPF verifier optimizations changelog
 
-### Installation & Setup
-- **[CACHYOS_INTEGRATION.md](./CACHYOS_INTEGRATION.md)** - Integrate scx_gamer with CachyOS GUI manager
-- **[INSTALLER_README.md](./INSTALLER_README.md)** - Installation methods and configuration
+### [safety/](safety/)
+**Safety, security, and anticheat analysis**
+- `SAFETY_REVIEW.md` - Safety review
+- `ANTICHEAT_SAFETY.md` - Anticheat safety analysis
+- `PAGE_FLIP_ANTICHEAT_SAFETY.md` - Page flip anticheat safety
+- `WAYLAND_ANTICHEAT_SAFETY_ANALYSIS.md` - Wayland anticheat safety
+- `PAGE_FLIP_VSYNC_MODE_ANALYSIS.md` - Page flip VSync mode analysis
 
-### Performance Optimization
-- **[INPUT_LATENCY_OPTIMIZATIONS.md](./INPUT_LATENCY_OPTIMIZATIONS.md)** - Optimize input latency for gaming
-- **[FINAL_INPUT_LATENCY_REVIEW.md](./FINAL_INPUT_LATENCY_REVIEW.md)** - Fine-tune input responsiveness
-- **[GPU_FRAME_PERFORMANCE_REVIEW.md](./GPU_FRAME_PERFORMANCE_REVIEW.md)** - Improve GPU and frame presentation
-
-### Troubleshooting
-- **[COMPILATION_VERIFICATION.md](./COMPILATION_VERIFICATION.md)** - Fix compilation issues
-- **[DEAD_CODE_REVIEW.md](./DEAD_CODE_REVIEW.md)** - Clean up unused code
-- **[BPF_VERIFIER_BOUNDS_CHECK_FIX.md](./BPF_VERIFIER_BOUNDS_CHECK_FIX.md)** - Fix BPF verifier errors
-
----
-
-## Reference (Information-Oriented)
-
-**Purpose:** Technical specifications, API details, and factual information.
-
-### Architecture & Design
-- **[TECHNICAL_ARCHITECTURE.md](./TECHNICAL_ARCHITECTURE.md)** - Complete system architecture and design
-- **[RING_BUFFER_IMPLEMENTATION.md](./RING_BUFFER_IMPLEMENTATION.md)** - Ring buffer implementation details
-- **[THREADS.md](./THREADS.md)** - Thread management and scheduling specifications
-- **[CACHYOS_ARCHITECTURE.md](./CACHYOS_ARCHITECTURE.md)** - CachyOS-specific architecture details
-
-### Performance & Metrics
-- **[PERFORMANCE.md](./PERFORMANCE.md)** - Performance characteristics and benchmarks
-- **[COMPREHENSIVE_PERFORMANCE_IMPACT_TABLE.md](./COMPREHENSIVE_PERFORMANCE_IMPACT_TABLE.md)** - Complete performance impact matrix
-- **[OPTIMIZATION_IMPLEMENTATION_SUMMARY.md](./OPTIMIZATION_IMPLEMENTATION_SUMMARY.md)** - Optimization details and expected latency changes
-- **[HELPER_FUNCTION_PERFORMANCE_ANALYSIS.md](./HELPER_FUNCTION_PERFORMANCE_ANALYSIS.md)** - Performance impact of helper functions
-
-### Code Reference
-- **[CODE_SAFETY_REVIEW.md](./CODE_SAFETY_REVIEW.md)** - Code safety specifications and unsafe block analysis
-- **[SAFETY_REVIEW.md](./SAFETY_REVIEW.md)** - Safety review of error handling and unsafe blocks
-- **[INPUT_CHAIN_REVIEW.md](./INPUT_CHAIN_REVIEW.md)** - Input event processing chain specifications
-
-### Platform & Integration
-- **[ANTICHEAT_SAFETY.md](./ANTICHEAT_SAFETY.md)** - Anti-cheat safety specifications
-- **[ML.md](./ML.md)** - Machine learning integration reference
-
----
-
-## Explanation (Understanding-Oriented)
-
-**Purpose:** Provide context, insights, and deeper understanding of why and how things work.
-
-### Performance & Optimization Insights
-- **[LMAX_PERFORMANCE_OPTIMIZATIONS.md](./LMAX_PERFORMANCE_OPTIMIZATIONS.md)** - Why and how LMAX Disruptor principles improve performance
-- **[REALTIME_SCHEDULING_OPTIMIZATIONS.md](./REALTIME_SCHEDULING_OPTIMIZATIONS.md)** - Real-time scheduling algorithms and their application
-- **[OPTIMIZATION_STATUS_AND_LEARNINGS.md](./OPTIMIZATION_STATUS_AND_LEARNINGS.md)** - Learnings from optimization research and implementation
-
-### Latency & Timing Analysis
-- **[LATENCY_CHAIN_ANALYSIS.md](./LATENCY_CHAIN_ANALYSIS.md)** - Understanding the end-to-end latency chain from game to display
-- **[INPUT_CHAIN_REVIEW.md](./INPUT_CHAIN_REVIEW.md)** - How input events flow through the system
-- **[RING_BUFFER_DIRECT_BOOST_EXPLAINED.md](./RING_BUFFER_DIRECT_BOOST_EXPLAINED.md)** - Why ring buffer direct boost reduces latency
-
-### GPU & Frame Presentation
-- **[PAGE_FLIP_VSYNC_MODE_ANALYSIS.md](./PAGE_FLIP_VSYNC_MODE_ANALYSIS.md)** - How page flip detection works with different VSync modes
-- **[PAGE_FLIP_ANTICHEAT_SAFETY.md](./PAGE_FLIP_ANTICHEAT_SAFETY.md)** - Why page flip detection is anti-cheat safe
-- **[GPU_FRAME_PERFORMANCE_REVIEW.md](./GPU_FRAME_PERFORMANCE_REVIEW.md)** - Understanding GPU and frame presentation optimization
-
-### Code Quality & Reviews
-- **[DEAD_CODE_REVIEW.md](./DEAD_CODE_REVIEW.md)** - Analysis of unused code and optimization opportunities
-- **[COMPILATION_VERIFICATION.md](./COMPILATION_VERIFICATION.md)** - Build system and compilation insights
-- **[BPF_VERIFIER_OPTIMIZATIONS_CHANGELOG.md](./BPF_VERIFIER_OPTIMIZATIONS_CHANGELOG.md)** - BPF verifier fixes and optimization preservation
-
----
-
-## Additional Documentation
-
-### Changelogs
-- **[CHANGELOG.md](./CHANGELOG.md)** - Project changelog
-- **[CHANGELOG_LMAX_REALTIME_OPTIMIZATIONS.md](./CHANGELOG_LMAX_REALTIME_OPTIMIZATIONS.md)** - Detailed changelog for LMAX/Real-Time optimizations
-- **[BPF_VERIFIER_OPTIMIZATIONS_CHANGELOG.md](./BPF_VERIFIER_OPTIMIZATIONS_CHANGELOG.md)** - BPF verifier compatibility fixes and impact analysis
-
-### Legacy Categories (By Session)
-- **LMAX/Real-Time Session:** OPTIMIZATION_*, LMAX_*, REALTIME_*, COMPREHENSIVE_*
-- **Input Latency Session:** INPUT_*, FINAL_INPUT_*
-- **GPU/Frame Session:** GPU_*, PAGE_FLIP_*, LATENCY_CHAIN_*
-- **Code Review Session:** CODE_SAFETY_*, SAFETY_*, DEAD_CODE_*
-
----
-
-## Document Statistics
-
-| Metric | Value |
-|--------|-------|
-| **Total Documents** | 53 markdown files |
-| **Total Size** | ~500KB+ of documentation |
-| **Coverage** | Architecture, Performance, Optimizations, Code Quality, Integration |
-| **Framework** | Diataxis (Tutorials, How-To, Reference, Explanation) |
-| **Style** | Scientific, peer-review ready |
-| **Format** | GitHub Markdown with Shields.io badges |
+### [guides/](guides/)
+**User guides and quick references**
+- `QUICK_START.md` - Quick start guide
+- `README.md` - General documentation README
+- `THREADS.md` - Thread documentation
+- `ML.md` - Machine learning documentation
+- `BPF_VERIFIER_BOUNDS_CHECK_FIX.md` - BPF verifier bounds check fix
+- `DOCUMENTATION_CONSOLIDATION_PLAN.md` - Documentation consolidation plan
 
 ---
 
-## Quick Reference by Topic
+## 🚀 Quick Navigation
 
-**Want to understand performance impact?**
-→ Start with `COMPREHENSIVE_PERFORMANCE_IMPACT_TABLE.md`
+**New to scx_gamer?** Start here:
+1. [guides/QUICK_START.md](guides/QUICK_START.md)
+2. [architecture/TECHNICAL_ARCHITECTURE.md](architecture/TECHNICAL_ARCHITECTURE.md)
+3. [guides/README.md](guides/README.md)
 
-**Want to understand what was optimized?**
-→ Read `OPTIMIZATION_IMPLEMENTATION_SUMMARY.md`
+**Want to understand the code?**
+1. [code-review/COMPREHENSIVE_CODE_REVIEW.md](code-review/COMPREHENSIVE_CODE_REVIEW.md)
+2. [architecture/TECHNICAL_ARCHITECTURE.md](architecture/TECHNICAL_ARCHITECTURE.md)
 
-**Want to understand input latency?**
-→ Read `INPUT_LATENCY_OPTIMIZATIONS.md` and `FINAL_INPUT_LATENCY_REVIEW.md`
+**Looking for academic resources?**
+1. [academic/ACADEMIC_RESOURCES.md](academic/ACADEMIC_RESOURCES.md) - Impact-prioritized papers and books
 
-**Want to understand GPU/frame performance?**
-→ Read `GPU_FRAME_PERFORMANCE_REVIEW.md` and `LATENCY_CHAIN_ANALYSIS.md`
-
-**Want to understand code safety?**
-→ Read `CODE_SAFETY_REVIEW.md` and `SAFETY_REVIEW.md`
-
-**Want to understand architecture?**
-→ Read `TECHNICAL_ARCHITECTURE.md`
+**Performance optimization?**
+1. [performance/PERFORMANCE.md](performance/PERFORMANCE.md)
+2. [optimization/OPTIMIZATION_IMPLEMENTATION_SUMMARY.md](optimization/OPTIMIZATION_IMPLEMENTATION_SUMMARY.md)
 
 ---
 
-**Last Updated:** 2025-01-28
+## 📊 Documentation Statistics
+
+- **Total Documents:** ~70+ markdown files
+- **Categories:** 11 organized categories
+- **Last Organized:** 2025-11-05
+
+---
+
+## 🔍 Search Tips
+
+Use your editor's search functionality:
+- **Architecture:** Search in `architecture/`
+- **Performance:** Search in `performance/` or `optimization/`
+- **Code Issues:** Search in `code-review/`
+- **Academic Papers:** Search in `academic/`
+
+---
+
+**Note:** Some documentation may reference old file paths. If you find broken links, please update them or file an issue.
+

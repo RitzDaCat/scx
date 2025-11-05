@@ -42,7 +42,7 @@ extern volatile u64 timer_elapsed_ns_total;
 
 /* Selection quality metrics */
 extern volatile u64 nr_idle_cpu_pick;
-extern volatile u64 nr_mm_hint_hit;
+/* MM hint removed - was extern volatile u64 nr_mm_hint_hit; */
 
 /* Runtime accounting */
 extern volatile u64 fg_runtime_ns_total;
