@@ -629,7 +629,9 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         let types::topo_level(index) = types::topo_level::TOPO_LLC;
         let ptr = self.skel.maps.bss_data.as_ref().unwrap().topo_nodes[index as usize][dom.id];
-        let dom_ctx = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+        let dom_ctx = unsafe {
+            &mut *std::ptr::with_exposed_provenance_mut::<types::dom_ctx>(ptr as usize)
+        };
         let active_tasks = &mut dom_ctx.active_tasks;
 
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);

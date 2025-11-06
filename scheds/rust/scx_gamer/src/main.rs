@@ -2428,18 +2428,11 @@ impl<'a> Scheduler<'a> {
                 // Handle dispatch event ring buffer (event-driven watchdog monitoring)
                 if tag == DISPATCH_EVENT_TAG {
                     // PERF: Edge-triggered mode requires draining ALL events before returning
-                    // Loop until no more events available to ensure nothing is missed
+                    // More efficient polling: poll once per iteration, break on error (empty buffer)
                     if let Some(ref mut rb) = self.dispatch_event_ringbuf {
-                        loop {
-                            // Poll ring buffer to process events
-                            if let Err(e) = rb.poll(std::time::Duration::from_millis(0)) {
-                                warn!("Dispatch event ring buffer poll error: {}", e);
-                                break;
-                            }
-                            // Check if more events available
-                            if rb.poll(std::time::Duration::from_millis(0)).is_err() {
-                                break;
-                            }
+                        while rb.poll(std::time::Duration::from_millis(0)).is_ok() {
+                            // Continue polling - callback processes events automatically
+                            // Loop terminates when poll returns Err (buffer empty)
                         }
                     }
                     continue;  // Move to next epoll event
@@ -2449,23 +2442,17 @@ impl<'a> Scheduler<'a> {
                 if tag == RING_BUFFER_TAG {
                     // Ring buffer has input events available
                     // PERF: Edge-triggered mode requires draining ALL events before returning
-                    // Loop until no more events available to ensure nothing is missed
+                    // More efficient while-let pattern: poll until buffer is empty
                     if let Some(ref mut rb) = self.input_ring_buffer {
-                        loop {
-                            // Poll ring buffer to process events
-                            if let Err(e) = rb.poll_once() {
-                                warn!("Ring buffer poll error: {}", e);
-                                break;
-                            }
-                            // Process events will be called below in the normal flow
+                        while let Ok(()) = rb.poll_once() {
+                            // Process events from the callback-incremented counter
                             let (events_processed, _) = rb.process_events();
                             if events_processed > 0 {
                                 ring_buffer_processing_count += events_processed as u64;
                                 ring_buffer_handled_input_this_cycle = true;
-                            } else {
-                                // No more events - edge-triggered mode requirement
-                                break;
                             }
+                            // Loop continues while poll_once() succeeds (more events available)
+                            // Automatically terminates when buffer is empty (poll_once returns Err)
                         }
                     }
                     continue;  // Move to next epoll event

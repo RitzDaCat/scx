@@ -92,7 +92,11 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
         );
     }
 
-    let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap) };
+    let ptr = unsafe {
+        &mut *std::ptr::with_exposed_provenance_mut::<[u64; 10]>(
+            args.bitmap as usize,
+        )
+    };
 
     let (valid_mask, _) = ptr.split_at_mut(mask.len());
     valid_mask.clone_from_slice(mask);
