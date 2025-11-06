@@ -234,6 +234,18 @@ struct {
 	__uint(max_entries, 1);
 } input_arrived_for_game SEC(".maps");
 
+// This map is used to signal from the compositor to the game thread.
+// When the compositor wakes due to input, it writes the current time to this
+// per-CPU map. When the game thread subsequently wakes, it checks this flag
+// to determine if it should be force-dispatched. This avoids a slow shared
+// map lookup and eliminates lock contention.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u64);
+} compositor_woke_for_game SEC(".maps");
+
 /* WAKEUP CHAIN FRONT-RUN: Per-CPU input handler thread PID storage
  * Stores the PID of the input handler thread for force dispatch.
  * Updated when input handler thread is classified in gamer_runnable().
@@ -248,25 +260,6 @@ struct {
 	__type(value, u32);         /* PID of input handler thread */
 	__uint(max_entries, 1);
 } input_handler_pid_map SEC(".maps");
-
-/* WAKEUP CHAIN FRONT-RUN: Game thread task_struct pointer storage
- * Stores a pointer to the main game thread for instant force dispatch.
- * Updated when a critical game thread (input/gpu) is classified.
- *
- * PERFORMANCE HIERARCHY: Hash map (Tier 3, 30-60ns) - necessary for global access
- * Key: TGID (thread group ID) of the game process
- * Value: Pointer (u64) to the game thread's task_struct
- * 
- * NOTE: We use a hash map instead of per-CPU array because the compositor
- * might wake on a different CPU than where the game thread was classified.
- * Hash map allows global access from any CPU with minimal overhead.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16);   /* Support up to 16 concurrent games */
-	__type(key, u32);           /* TGID */
-	__type(value, u64);         /* task_struct pointer of game thread */
-} game_thread_ptr_map SEC(".maps");
 
 /* WAKEUP CHAIN FRONT-RUN: Audio thread task_struct pointer storage
  * Stores a pointer to the main audio server thread (PipeWire/PulseAudio)

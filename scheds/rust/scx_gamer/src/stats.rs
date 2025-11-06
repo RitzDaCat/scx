@@ -433,17 +433,6 @@ impl Metrics {
         let edf_pct = if self.rr_enq + self.edf_enq > 0 {
             (self.edf_enq as f64) * 100.0 / (self.rr_enq + self.edf_enq) as f64
         } else { 0.0 };
-        let fg = if !self.fg_app.is_empty() {
-            let mut label = format!("  FG {}", self.fg_app);
-            if self.fg_fullscreen != 0 {
-                label.push_str(" [fs]");
-            }
-            label
-        } else if self.fg_pid != 0 {
-            format!("  FG {}", self.fg_pid)
-        } else {
-            String::new()
-        };
         let (in_pct, fr_pct) = if self.timer_elapsed_ns > 0 {
             (
                 (self.win_input_ns as f64) * 100.0 / (self.timer_elapsed_ns as f64),
@@ -454,19 +443,33 @@ impl Metrics {
 
         let now = Local::now();
         writeln!(w, "┌─ {} {} ─", crate::SCHEDULER_NAME, now.format("%H:%M:%S"))?;
-        writeln!(w, "│ CPU {:>5.1}% (avg {:>5.1}%)  EDF {:>4.1}%{}",
-                 (self.cpu_util as f64) * 100.0 / 1024.0,
-                 (self.cpu_util_avg as f64) * 100.0 / 1024.0,
-                 edf_pct, fg)?;
+        // Write CPU and EDF line without allocating intermediate Strings
+        write!(w, "│ CPU {:>5.1}% (avg {:>5.1}%)  EDF {:>4.1}%",
+               (self.cpu_util as f64) * 100.0 / 1024.0,
+               (self.cpu_util_avg as f64) * 100.0 / 1024.0,
+               edf_pct)?;
+        // Conditionally write foreground info without allocations
+        if !self.fg_app.is_empty() {
+            write!(w, "  FG {}", self.fg_app)?;
+            if self.fg_fullscreen != 0 {
+                write!(w, " [fs]")?;
+            }
+        } else if self.fg_pid != 0 {
+            write!(w, "  FG {}", self.fg_pid)?;
+        }
+        writeln!(w)?;
         writeln!(w, "│ q: rr {:>6}  edf {:>6}  dir {:>6} ({:>4.0}%)  sh {:>6}",
                  self.rr_enq, self.edf_enq, self.direct, direct_pct, self.shared)?;
-        let input_mode_indicator = if self.continuous_input_mode != 0 {
-            format!("CONT@{}/s", self.input_trigger_rate)
+        // Write win line without allocating intermediate Strings
+        write!(w, "│ win: in {:>4.0}%  fr {:>4.0}%   hint: idle {:>6}  mm {:>6}   FG {:>3}%   trig ",
+               in_pct, fr_pct, self.idle_pick, self.mm_hint_hit, self.fg_cpu_pct)?;
+        // Conditionally write input mode indicator without allocations
+        if self.continuous_input_mode != 0 {
+            write!(w, "CONT@{}/s", self.input_trigger_rate)?;
         } else {
-            format!("i:{:>5}", self.input_trig)
-        };
-        writeln!(w, "│ win: in {:>4.0}%  fr {:>4.0}%   hint: idle {:>6}  mm {:>6}   FG {:>3}%   trig {} f:{:>5}",
-                 in_pct, fr_pct, self.idle_pick, self.mm_hint_hit, self.fg_cpu_pct, input_mode_indicator, self.frame_trig)?;
+            write!(w, "i:{:>5}", self.input_trig)?;
+        }
+        writeln!(w, " f:{:>5}", self.frame_trig)?;
         writeln!(w, "│ mig {:>6}  blk {:>6}  sync {:>6}  fblk {:>6}  syncfast {:>6}",
                  self.migrations, self.mig_blocked, self.sync_local, self.frame_mig_block, self.sync_wake_fast)?;
         writeln!(w, "│ threads: input {:>2}  gpu {:>2}  sys_aud {:>2}  gm_aud {:>2}  comp {:>2}  net {:>2}  bg {:>2}",

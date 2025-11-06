@@ -475,13 +475,15 @@ impl<'a> Scheduler<'a> {
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
-                // XXX Remove this by using the topo node's cpumask.
-                let ptr = bss_data.topo_nodes[index as usize][dom.id()];
-                let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
-                update_bpf_mask(domc.cpumask, &dom.mask())?;
+				// XXX Remove this by using the topo node's cpumask.
+				let ptr = bss_data.topo_nodes[index as usize][dom.id()];
+				let domc = unsafe {
+					&mut *std::ptr::with_exposed_provenance_mut::<types::dom_ctx>(ptr as usize)
+				};
+				update_bpf_mask(domc.cpumask, &dom.mask())?;
 
-                bss_data.dom_numa_id_map[dom.id()] =
-                    numa.try_into().expect("NUMA ID could not fit into 32 bits");
+				bss_data.dom_numa_id_map[dom.id()] =
+					numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
                 info!(" DOM[{:02}] mask= {}", dom.id(), dom.mask());
             }
@@ -495,7 +497,9 @@ impl<'a> Scheduler<'a> {
             let mut ctx = dom.ctx.lock().unwrap();
 
             let ptr = skel.maps.bss_data.as_mut().unwrap().topo_nodes[index as usize][*id];
-            let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+            let domc = unsafe {
+                &mut *std::ptr::with_exposed_provenance_mut::<types::dom_ctx>(ptr as usize)
+            };
             *ctx = Some(domc);
         }
 

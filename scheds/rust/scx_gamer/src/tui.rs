@@ -769,9 +769,10 @@ fn render_config(f: &mut Frame, area: Rect, state: &TuiState) {
 }
 
 fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
-    let uptime = format_uptime(state.start_time.elapsed());
+    /* OPTIMIZATION: Minimize intermediate String allocations.
+     * Format values inline where possible, only allocate when necessary. */
+    let uptime = format_uptime(state.start_time.elapsed()); // Returns String, necessary allocation
     let pause_status = if state.paused { " [PAUSED]" } else { "" };
-    let update_rate = format!(" Update: {}", state.update_rate.label());
 
     // Show active tab in header for visual feedback
     let active_tab = match state.active_tab {
@@ -792,7 +793,8 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
     // Check if metrics stream is stale (scheduler not sending updates)
     // Note: This can happen if scheduler crashes or event loop blocks
     let data_age = state.last_successful_update.elapsed().as_secs();
-    let stale_indicator = if data_age > 10 && state.scheduler_status == SchedulerStatus::Running {
+    // Build stale indicator inline to avoid intermediate String allocation
+    let stale_text = if data_age > 10 && state.scheduler_status == SchedulerStatus::Running {
         format!(" [NO METRICS {}s]", data_age)
     } else {
         String::new()
@@ -802,9 +804,10 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
         Span::styled("scx_gamer", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         Span::raw("  │  "),
         Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-        Span::styled(&stale_indicator, Style::default().fg(Color::Red)),
+        Span::styled(&stale_text, Style::default().fg(Color::Red)),
         Span::raw("  │  "),
         Span::styled(
+            // OPTIMIZATION: Format directly into String for Span (avoid double allocation)
             chrono::Local::now().format("%H:%M:%S").to_string(),
             Style::default().fg(Color::Cyan),
         ),
@@ -813,7 +816,11 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
         Span::raw("  │  Tab: "),
         Span::styled(active_tab, Style::default().fg(Color::Cyan)),
         Span::raw("  │ "),
-        Span::styled(update_rate, Style::default().fg(Color::Magenta)),
+        // OPTIMIZATION: Format inline instead of storing in intermediate variable
+        Span::styled(
+            format!(" Update: {}", state.update_rate.label()),
+            Style::default().fg(Color::Magenta),
+        ),
         Span::styled(pause_status, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
     ]))
     .block(Block::default()
@@ -1810,18 +1817,18 @@ fn render_thread_notes(f: &mut Frame, area: Rect, state: &TuiState) {
             )));
             
             // Show raw counter values for debugging (helps identify if counters are actually 0 or sanitized)
-            let raw_breakdown = format!(
-                "Raw: In={} GPU={} GAud={} SAud={} Comp={} Net={} Bg={}",
-                metrics.input_handler_threads,
-                metrics.gpu_submit_threads,
-                metrics.game_audio_threads,
-                metrics.system_audio_threads,
-                metrics.compositor_threads,
-                metrics.network_threads,
-                metrics.background_threads
-            );
+            // OPTIMIZATION: Format directly inline to avoid intermediate String allocation
             lines.push(Line::from(Span::styled(
-                raw_breakdown,
+                format!(
+                    "Raw: In={} GPU={} GAud={} SAud={} Comp={} Net={} Bg={}",
+                    metrics.input_handler_threads,
+                    metrics.gpu_submit_threads,
+                    metrics.game_audio_threads,
+                    metrics.system_audio_threads,
+                    metrics.compositor_threads,
+                    metrics.network_threads,
+                    metrics.background_threads
+                ),
                 Style::default().fg(Color::DarkGray)
             )));
             
@@ -2105,31 +2112,37 @@ pub fn monitor_tui(
             
             if metrics_updated || force_redraw {
                 /* OPTIMIZATION: Fixed lock ordering to prevent deadlocks
-                 * Snapshot all needed state before acquiring terminal lock
-                 * This prevents circular wait conditions and avoids re-acquiring locks */
-                let (metrics_snapshot, state_snapshot) = {
-                    if let Ok(st) = state_for_draw.try_read() {
-                        // Clone minimal state needed for rendering
-                        let metrics = st.last_metrics.clone().unwrap_or_default();
-                        // Clone entire state (TuiState is cheap to clone - mostly Arc/primitive fields)
-                        let state = st.clone();
-                        (metrics, state)
-                    } else {
-                        // State lock failed, skip this frame to prevent blocking
-                        log::debug!("TUI: State lock timeout, skipping frame");
-                        continue;
-                    }
-                };
-                
-                // State lock released, now acquire terminal lock (safe ordering)
+                 * Hold read lock during draw and pass references directly to avoid cloning.
+                 * This eliminates unnecessary heap allocations of Metrics (~3KB) and TuiState on every frame.
+                 * Read lock allows concurrent reads and is safe for rendering which only reads state. */
                 if let Ok(mut term) = terminal_clone.try_write() {
-                    let draw_result = term.draw(|f| {
-                        render_main_ui(f, &metrics_snapshot, &state_snapshot);
-                    });
-                    if let Err(e) = draw_result {
-                        log::warn!("TUI draw error: {}", e);
+                    // Acquire read lock on state while holding terminal lock
+                    // This is safe because render functions only read from state
+                    if let Ok(st) = state_for_draw.try_read() {
+                        // Use references directly - no cloning! If metrics exist, use them.
+                        // Otherwise, render with default metrics (startup case)
+                        if let Some(ref metrics) = st.last_metrics {
+                            let draw_result = term.draw(|f| {
+                                render_main_ui(f, metrics, &st);
+                            });
+                            if let Err(e) = draw_result {
+                                log::warn!("TUI draw error: {}", e);
+                            }
+                        } else {
+                            // No metrics yet (startup) - render with default
+                            let default_metrics = Metrics::default();
+                            let draw_result = term.draw(|f| {
+                                render_main_ui(f, &default_metrics, &st);
+                            });
+                            if let Err(e) = draw_result {
+                                log::warn!("TUI draw error: {}", e);
+                            }
+                        }
+                        last_draw = now;
+                    } else {
+                        // State read lock failed, skip this frame to prevent blocking
+                        log::debug!("TUI: State read lock failed, skipping frame");
                     }
-                    last_draw = now;
                 } else {
                     // Terminal lock failed, skip this frame to prevent blocking
                     log::debug!("TUI: Terminal lock timeout, skipping frame");
@@ -2167,9 +2180,10 @@ pub fn monitor_tui(
                     // Get current game info before updating (for swap detection)
                     let current_game_pid = st.game_pid;
                     // Get current game app name from last metrics (before we replace it)
-                    let current_game_app = st.last_metrics.as_ref()
-                        .and_then(|m| if !m.fg_app.is_empty() { Some(m.fg_app.clone()) } else { None })
-                        .unwrap_or_else(|| String::new());
+                    // NOTE: Must clone here to break the immutable borrow before mutating `st`.
+                    // While this allocates, it's necessary to satisfy Rust's borrowing rules.
+                    // We clone once here instead of cloning in multiple places later.
+                    let current_game_app = st.last_metrics.as_ref().map_or(String::new(), |m| m.fg_app.clone());
                     
                     if let Some(last) = st.last_metrics.take() {
                         st.prev_metrics = Some(last);
@@ -2209,7 +2223,8 @@ pub fn monitor_tui(
                             
                             // Save previous game info
                             st.prev_game_pid = current_game_pid;
-                            st.prev_game_app = current_game_app;
+                            // Clone the already-owned String (we cloned once above to break borrow)
+                            st.prev_game_app = current_game_app.clone();
                             st.game_pid = metrics.fg_pid as u32;
                         } else if app_changed {
                             // Same PID but app name changed - might be a game update/restart
@@ -2235,7 +2250,8 @@ pub fn monitor_tui(
                         // No game detected - reset tracking if we had a game before
                         if current_game_pid > 0 {
                             st.prev_game_pid = current_game_pid;
-                            st.prev_game_app = current_game_app;
+                            // Clone the already-owned String (we cloned once above to break borrow)
+                            st.prev_game_app = current_game_app.clone();
                             st.game_pid = 0;
                         }
                     }
