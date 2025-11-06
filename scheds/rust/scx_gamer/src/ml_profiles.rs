@@ -188,7 +188,7 @@ mod tests {
         manager.save_profile(profile).unwrap();
 
         // Reload from disk
-        let mut manager2 = ProfileManager::new(temp_dir.path()).unwrap();
+        let manager2 = ProfileManager::new(temp_dir.path()).unwrap();
         let loaded = manager2.get_profile("TestGame.exe").unwrap();
 
         assert_eq!(loaded.game_name, "TestGame.exe");
