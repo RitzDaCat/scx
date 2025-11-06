@@ -38,8 +38,10 @@ pub struct MockTrigger {
 }
 
 #[cfg(test)]
-impl Default for MockTrigger {
-    fn default() -> Self {
+impl MockTrigger {
+    /// Creates a new `MockTrigger`.
+    #[allow(dead_code)]
+    pub fn new() -> Self {
         Self {
             input_count: std::sync::atomic::AtomicU64::new(0),
         }

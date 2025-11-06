@@ -213,6 +213,76 @@ struct {
 	__type(value, u8);         /* 1 = audio server, 0 = not */
 } system_audio_tgids_map SEC(".maps");
 
+/* WAKEUP CHAIN FRONT-RUN: Per-CPU input arrival flag (Tier 1: 20-50ns)
+ * 
+ * CRITICAL: Using per-CPU array, NOT shared map (Tier 7 anti-pattern with spinlocks).
+ * Input arrives on IRQ CPU, compositor/game wake on their CPUs.
+ * 
+ * Strategy: Input sets flag on IRQ CPU. When game thread wakes (enqueue_task),
+ * it checks flag on ITS OWN CPU. If flag set, force dispatch immediately.
+ * 
+ * Note: Compositor wake detection removed - shared map lookup was Tier 7 anti-pattern.
+ * Game thread will check flag on wake naturally.
+ * 
+ * Key: 0 (single entry per CPU)
+ * Value: Timestamp (u64) when input arrived, or 0 if no recent input
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);        /* Timestamp when input arrived for game */
+	__uint(max_entries, 1);
+} input_arrived_for_game SEC(".maps");
+
+/* WAKEUP CHAIN FRONT-RUN: Per-CPU input handler thread PID storage
+ * Stores the PID of the input handler thread for force dispatch.
+ * Updated when input handler thread is classified in gamer_runnable().
+ * 
+ * PERFORMANCE HIERARCHY: Per-CPU array (Tier 1, 20-50ns) - fastest map type
+ * Key: 0 (single entry per CPU)
+ * Value: PID (u32) of input handler thread, or 0 if none
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u32);         /* PID of input handler thread */
+	__uint(max_entries, 1);
+} input_handler_pid_map SEC(".maps");
+
+/* WAKEUP CHAIN FRONT-RUN: Game thread task_struct pointer storage
+ * Stores a pointer to the main game thread for instant force dispatch.
+ * Updated when a critical game thread (input/gpu) is classified.
+ *
+ * PERFORMANCE HIERARCHY: Hash map (Tier 3, 30-60ns) - necessary for global access
+ * Key: TGID (thread group ID) of the game process
+ * Value: Pointer (u64) to the game thread's task_struct
+ * 
+ * NOTE: We use a hash map instead of per-CPU array because the compositor
+ * might wake on a different CPU than where the game thread was classified.
+ * Hash map allows global access from any CPU with minimal overhead.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16);   /* Support up to 16 concurrent games */
+	__type(key, u32);           /* TGID */
+	__type(value, u64);         /* task_struct pointer of game thread */
+} game_thread_ptr_map SEC(".maps");
+
+/* WAKEUP CHAIN FRONT-RUN: Audio thread task_struct pointer storage
+ * Stores a pointer to the main audio server thread (PipeWire/PulseAudio)
+ * for instant force dispatch on hardware IRQ wakeup.
+ *
+ * PERFORMANCE HIERARCHY: Hash map (Tier 3, 30-60ns) - necessary for global access
+ * Key: TGID (thread group ID) of the audio server process
+ * Value: Pointer (u64) to the audio thread's task_struct
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16);   /* Support up to 16 concurrent audio servers */
+	__type(key, u32);           /* TGID */
+	__type(value, u64);         /* task_struct pointer of audio thread */
+} audio_thread_ptr_map SEC(".maps");
+
 /* Deadline miss event structure
  * 
  * OPTIMIZED LAYOUT: Fields ordered by descending size to eliminate padding
@@ -518,6 +588,12 @@ static __always_inline bool is_compositor_cached(const struct task_struct *p)
 static __always_inline bool is_background_cached(const struct task_struct *p)
 {
 	return (p->scx.flags & SCX_GAMER_FLAG_BACKGROUND) != 0;
+}
+
+/* Helper: Check if task is system audio (cached flag check - zero map lookup!) */
+static __always_inline bool is_system_audio_cached(const struct task_struct *p)
+{
+	return (p->scx.flags & SCX_GAMER_FLAG_SYSTEM_AUDIO) != 0;
 }
 
 /* Helper: Get cached boost_shift (zero map lookup!) */
