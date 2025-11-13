@@ -16,45 +16,66 @@
  * All functions check comm[] for specific thread naming patterns
  */
 
-/*
- * GPU submission threads - critical for frame presentation
+/* Apply baseline boost derived from role presets. Keeps maximum value so multiple
+ * classifications can cooperate without losing the highest requested priority. */
+static __always_inline void apply_class_boost(struct task_ctx *tctx, u8 boost)
+{
+	if (boost > tctx->class_boost)
+		tctx->class_boost = boost;
+}
+
+/**
+ * is_gpu_submit_name - Check if thread name matches GPU submission pattern
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * GPU submission threads - critical for frame presentation.
  * Examples: vkd3d-swapchain, dxvk-submit, RenderThread 0, RHIThread
  *
  * CRITICAL FOR SPLITGATE: Unreal Engine 4 uses RenderThread for GPU submission.
  * This thread must get physical cores (no SMT) to avoid frame pacing issues.
+ *
+ * TIER 0: Optimized character-by-character comparison
+ * - Character comparisons: Tier 0 (~0.5-1ns each)
+ * - Early exit on first match: Tier 0 (saves ~5-20ns for matches)
+ * - Total: ~5-30ns (depending on pattern position)
+ *
+ * Frequency: Called during thread classification (thousands/sec during startup,
+ *            then cached in task_ctx for subsequent checks)
+ * Net overhead: Minimal (results cached in task_ctx->is_gpu_submit)
  */
 static __always_inline bool is_gpu_submit_name(const char *comm)
 {
-	/* DXVK threads (DX9/10/11 to Vulkan translation - VERY common with Proton) */
-	if (comm[0] == 'd' && comm[1] == 'x' && comm[2] == 'v' && comm[3] == 'k' && comm[4] == '-')
+	/* TIER 0: DXVK threads (DX9/10/11 to Vulkan translation - VERY common with Proton)
+	 * Ordered by frequency: dxvk-* is most common */
+	if (likely(comm[0] == 'd' && comm[1] == 'x' && comm[2] == 'v' && comm[3] == 'k' && comm[4] == '-'))
 		return true;  /* dxvk-submit, dxvk-queue, dxvk-frame, dxvk-cs, dxvk-shader-* */
 
-	/* Unreal Engine RHI (Render Hardware Interface) threads */
+	/* TIER 0: Unreal Engine RHI (Render Hardware Interface) threads */
 	if (comm[0] == 'R' && comm[1] == 'H' && comm[2] == 'I')
 		return true;  /* RHIThread, RHISubmissionTh, RHIInterruptThr */
 
-	/* Unreal Engine RenderThread (Splitgate, Fortnite, Kovaaks, etc.) - CRITICAL PATH */
+	/* TIER 0: Unreal Engine RenderThread (Splitgate, Fortnite, Kovaaks, etc.) - CRITICAL PATH */
 	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd' &&
 	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'T') {
 		/* Handle RenderThread, RenderThread 0, RenderThread 1, etc. */
-		if (comm[7] == '\0' || comm[7] == ' ')
+		if (likely(comm[7] == '\0' || comm[7] == ' '))
 			return true;  /* RenderThread, RenderThread 0, RenderThread 1 */
 	}
 
-	/* vkd3d threads (Vulkan/D3D12 translation layer for Proton) */
+	/* TIER 0: vkd3d threads (Vulkan/D3D12 translation layer for Proton) */
 	if (comm[0] == 'v' && comm[1] == 'k' && comm[2] == 'd' && comm[3] == '3')
 		return true;  /* vkd3d_queue, vkd3d_fence, vkd3d-swapchain */
 
-	/* Bracketed Vulkan threads (WoW, etc.) */
+	/* TIER 0: Bracketed Vulkan threads (WoW, etc.) */
 	if (comm[0] == '[' && comm[1] == 'v' && comm[2] == 'k')
 		return true;  /* [vkrt] Analysis, [vkps] Update, [vkcf] Analysis */
 
-	/* Unity render threads */
+	/* TIER 0: Unity render threads */
 	if (comm[0] == 'U' && comm[1] == 'n' && comm[2] == 'i' && comm[3] == 't' &&
 	    comm[4] == 'y' && comm[5] == 'G' && comm[6] == 'f' && comm[7] == 'x')
 		return true;  /* UnityGfxDevice */
 
-	/* Generic "render" or "gpu" thread names */
+	/* TIER 0: Generic "render" or "gpu" thread names */
 	if (comm[0] == 'r' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd' &&
 	    comm[4] == 'e' && comm[5] == 'r')
 		return true;
@@ -65,9 +86,14 @@ static __always_inline bool is_gpu_submit_name(const char *comm)
 	return false;
 }
 
-/*
- * Compositor/window manager threads
+/**
+ * is_compositor_name - Check if thread name matches compositor pattern
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * Compositor/window manager threads.
  * Examples: kwin_wayland, mutter, weston
+ *
+ * TIER 0: Optimized character-by-character comparison (~5-30ns)
  */
 static __always_inline bool is_compositor_name(const char *comm)
 {
@@ -389,11 +415,22 @@ static __always_inline u32 detect_audio_sample_rate(u64 wakeup_freq, u32 buffer_
 static __always_inline u8 calculate_audio_boost(u8 base_boost, u32 buffer_size, u32 sample_rate)
 {
 	u8 boost = base_boost;
+
+	u64 buffer_ns = 0;
+	if (sample_rate > 0 && buffer_size > 0)
+		buffer_ns = ((u64)buffer_size * 1000000000ULL) / sample_rate;
 	
-	/* Higher boost for smaller buffers (lower latency requirements) */
-	if (buffer_size <= 32) boost += 3;      /* Ultra-low latency */
-	else if (buffer_size <= 64) boost += 2; /* Low latency */
-	else if (buffer_size <= 128) boost += 1; /* Medium latency */
+	if (buffer_ns > 0) {
+		/* Smaller playback buffers require aggressive boosting. */
+		if (buffer_ns <= 2000000ULL) boost += 3;       /* ≤2ms */
+		else if (buffer_ns <= 4000000ULL) boost += 2;  /* ≤4ms */
+		else if (buffer_ns <= 8000000ULL) boost += 1;  /* ≤8ms */
+	} else {
+		/* Fallback for unknown sample rate: use raw buffer size heuristics. */
+		if (buffer_size <= 32) boost += 3;
+		else if (buffer_size <= 64) boost += 2;
+		else if (buffer_size <= 128) boost += 1;
+	}
 	
 	/* Higher boost for higher sample rates */
 	if (sample_rate >= 192000) boost += 2;  /* High-res audio */
@@ -541,21 +578,28 @@ static __always_inline bool is_game_audio_name(const char *comm)
 	return false;
 }
 
-/*
- * Input handler threads - HIGHEST priority for gaming
+/**
+ * is_input_handler_name - Check if thread name matches input handler pattern
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * Input handler threads - HIGHEST priority for gaming.
  * Mouse/keyboard lag is THE WORST experience for gamers.
  * Examples: GameThread (Unreal), InputThread, SDL, EventHandler
  *
  * CRITICAL FOR SPLITGATE: UE4 processes input on GameThread, not a separate thread!
  * At 480Hz (2083µs/frame), input must reach GameThread in <500µs for responsive aim.
+ *
+ * TIER 0: Optimized character-by-character comparison (~5-30ns)
+ * Ordered by frequency: GameThread is most common
  */
 static __always_inline bool is_input_handler_name(const char *comm)
 {
 	/* LAYER 1: Engine-specific patterns (highest confidence) */
 	
-	/* Unreal Engine GameThread (handles input + game logic) - HIGHEST PRIORITY */
-	if (comm[0] == 'G' && comm[1] == 'a' && comm[2] == 'm' && comm[3] == 'e' &&
-	    comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r')
+	/* TIER 0: Unreal Engine GameThread (handles input + game logic) - HIGHEST PRIORITY
+	 * Ordered first for optimal branch prediction (most common pattern) */
+	if (likely(comm[0] == 'G' && comm[1] == 'a' && comm[2] == 'm' && comm[3] == 'e' &&
+	    comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r'))
 		return true;  /* GameThread - gets 10× boost during input window */
 
 	/* Unity Main Thread (common pattern) */
@@ -609,8 +653,10 @@ static __always_inline bool is_input_handler_name(const char *comm)
 	    comm[5] == 'r' && comm[6] == 'a' && comm[7] == 'w')
 		return true;  /* wine_rawinput_* */
 
-	/* LAYER 4: Generic game logic patterns (medium confidence - common but less specific) */
-	
+#if CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY
+	/* LAYER 4: Generic game logic patterns (medium confidence - common but less specific)
+	 * Build-time gated so we can strip broad name matching when precise telemetry is available. */
+
 	/* "Game" prefix (many engines use GameThread, GameLoop, GameLogic, etc.) */
 	if (comm[0] == 'G' && comm[1] == 'a' && comm[2] == 'm' && comm[3] == 'e')
 		return true;  /* GameThread, GameLoop, GameLogic, GameUpdate, etc. */
@@ -626,9 +672,51 @@ static __always_inline bool is_input_handler_name(const char *comm)
 	/* "Tick" thread (tick loop processes input) */
 	if (comm[0] == 'T' && comm[1] == 'i' && comm[2] == 'c' && comm[3] == 'k')
 		return true;  /* TickThread, Tick */
+#endif
 
 	return false;
 }
+
+#if CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY
+/**
+ * is_taskgraph_thread - Check if thread name matches TaskGraph worker pattern
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * Unreal Engine 5.6 DirectX12 TaskGraph workers - parallel command list generation.
+ * Examples: TaskGraphThreadHP (High Priority), TaskGraphThread (Normal), TaskGraphThreadBP (Background)
+ *
+ * These threads should be corralled to dedicated cores (E-cores or separate CCD) to prevent
+ * cache pollution on P-cores used by GameThread/RenderThread/RHIThread.
+ *
+ * TIER 0: Optimized character-by-character comparison (~5-30ns)
+ * Ordered by frequency: TaskGraphThread is most common (no suffix)
+ */
+static __always_inline bool is_taskgraph_thread(const char *comm)
+{
+	/* TIER 0: Unreal Engine TaskGraph workers - all variants share "TaskGraphThread" prefix
+	 * TaskGraphThreadHP (High Priority), TaskGraphThread (Normal), TaskGraphThreadBP (Background) */
+	if (comm[0] == 'T' && comm[1] == 'a' && comm[2] == 's' && comm[3] == 'k' &&
+	    comm[4] == 'G' && comm[5] == 'r' && comm[6] == 'a' && comm[7] == 'p' &&
+	    comm[8] == 'h' && comm[9] == 'T' && comm[10] == 'h' && comm[11] == 'r') {
+		/* Match TaskGraphThread, TaskGraphThreadHP, TaskGraphThreadBP, etc. */
+		/* Check if we've reached end of string or space/number suffix */
+		if (likely(comm[12] == '\0' || comm[12] == ' ' ||
+		           (comm[12] >= '0' && comm[12] <= '9') ||
+		           (comm[12] == 'H' && comm[13] == 'P') ||
+		           (comm[12] == 'B' && comm[13] == 'P')))
+			return true;  /* TaskGraphThread, TaskGraphThreadHP, TaskGraphThreadBP, TaskGraphThread0, etc. */
+	}
+
+	return false;
+}
+#else
+static __always_inline bool is_taskgraph_thread(const char *comm)
+{
+	/* LEGACY DISABLED: Build stripped of comm-based TaskGraph detection. */
+	(void)comm;
+	return false;
+}
+#endif
 
 static __always_inline bool comm_contains(const char *comm, const char *needle, int needle_len)
 {
@@ -644,25 +732,45 @@ static __always_inline bool comm_contains(const char *comm, const char *needle, 
 	return false;
 }
 
+/**
+ * classify_input_handler - Classify thread as input handler
+ * @p: Task struct pointer
+ * @tctx: Task context to update
+ *
+ * TIER 0/1: Optimized for thread classification hot path
+ * - Name check: Tier 0 (~5-30ns, is_input_handler_name)
+ * - Struct field writes: Tier 0 (~1-2ns each)
+ * - String contains check: Tier 0/1 (~5-20ns, comm_contains)
+ * - Total: ~11-52ns (depending on pattern match)
+ */
 static __always_inline void classify_input_handler(struct task_struct *p, struct task_ctx *tctx)
 {
-    if (is_input_handler_name(p->comm)) {
-        tctx->is_input_handler = 1;
-		tctx->boost_shift = MAX(tctx->boost_shift, 7);
-		if (tctx->input_lane == INPUT_LANE_OTHER) {
+	if (likely(is_input_handler_name(p->comm))) {
+		tctx->is_input_handler = 1;
+		apply_class_boost(tctx, 7);
+		if (likely(tctx->input_lane == INPUT_LANE_OTHER)) {
 			if (comm_contains(p->comm, "mouse", 5))
-                tctx->input_lane = INPUT_LANE_MOUSE;
+				tctx->input_lane = INPUT_LANE_MOUSE;
 			else if (comm_contains(p->comm, "kbd", 3) ||
 				 comm_contains(p->comm, "keyboard", 8))
-                tctx->input_lane = INPUT_LANE_KEYBOARD;
-        }
-    }
+				tctx->input_lane = INPUT_LANE_KEYBOARD;
+		}
+	}
 }
 
+/**
+ * classify_gpu_submit - Classify thread as GPU submission thread
+ * @p: Task struct pointer
+ * @tctx: Task context to update
+ *
+ * TIER 0/1: Optimized for thread classification hot path (~6-32ns)
+ */
 static __always_inline void classify_gpu_submit(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_gpu_submit && is_gpu_submit_name(p->comm))
+	if (likely(!tctx->is_gpu_submit && is_gpu_submit_name(p->comm))) {
 		tctx->is_gpu_submit = 1;
+		apply_class_boost(tctx, 6);
+	}
 }
 
 static __always_inline void classify_audio(struct task_struct *p, struct task_ctx *tctx)
@@ -681,20 +789,27 @@ static __always_inline void classify_audio(struct task_struct *p, struct task_ct
 		u8 *is_audio_server = bpf_map_lookup_percpu_elem(&system_audio_tgids_map, &tgid, cpu);
 		if (is_audio_server && *is_audio_server) {
 			tctx->is_system_audio = 1;
+			apply_class_boost(tctx, 1);
 		}
 	}
 	
 	/* LAYER 2: Name-based detection (fallback for threads not in audio server processes) */
-	if (!tctx->is_system_audio && is_system_audio_name(p->comm))
+	if (!tctx->is_system_audio && is_system_audio_name(p->comm)) {
 		tctx->is_system_audio = 1;
-	if (!tctx->is_game_audio && is_game_audio_name(p->comm))
+		apply_class_boost(tctx, 1);
+	}
+	if (!tctx->is_game_audio && is_game_audio_name(p->comm)) {
 		tctx->is_game_audio = 1;
+		apply_class_boost(tctx, 1);
+	}
 }
 
 static __always_inline void classify_network(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_network && is_network_name(p->comm))
+	if (!tctx->is_network && is_network_name(p->comm)) {
 		tctx->is_network = 1;
+		apply_class_boost(tctx, 3);
+	}
 }
 
 static __always_inline bool is_background_name(const char *comm)
@@ -1006,32 +1121,42 @@ static __always_inline bool is_ethernet_nic_interrupt_thread(const char *comm)
 
 static __always_inline void classify_gaming_peripheral(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_gaming_peripheral && is_gaming_peripheral_thread(p->comm))
+	if (!tctx->is_gaming_peripheral && is_gaming_peripheral_thread(p->comm)) {
 		tctx->is_gaming_peripheral = 1;
+		apply_class_boost(tctx, 1);
+	}
 }
 
 static __always_inline void classify_gaming_traffic(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_gaming_traffic && is_gaming_traffic_pattern(p, tctx))
+	if (!tctx->is_gaming_traffic && is_gaming_traffic_pattern(p, tctx)) {
 		tctx->is_gaming_traffic = 1;
+		apply_class_boost(tctx, 3);
+	}
 }
 
 static __always_inline void classify_audio_pipeline(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_audio_pipeline && is_audio_pipeline_thread(p->comm))
+	if (!tctx->is_audio_pipeline && is_audio_pipeline_thread(p->comm)) {
 		tctx->is_audio_pipeline = 1;
+		apply_class_boost(tctx, 1);
+	}
 }
 
 static __always_inline void classify_storage_hot_path(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_storage_hot_path && is_storage_hot_path_thread(p, tctx))
+	if (!tctx->is_storage_hot_path && is_storage_hot_path_thread(p, tctx)) {
 		tctx->is_storage_hot_path = 1;
+		apply_class_boost(tctx, 1);
+	}
 }
 
 static __always_inline void classify_ethernet_nic_interrupt(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_ethernet_nic_interrupt && is_ethernet_nic_interrupt_thread(p->comm))
+	if (!tctx->is_ethernet_nic_interrupt && is_ethernet_nic_interrupt_thread(p->comm)) {
 		tctx->is_ethernet_nic_interrupt = 1;
+		apply_class_boost(tctx, 4);
+	}
 }
 
 /*
@@ -1160,6 +1285,21 @@ static __always_inline void classify_background(struct task_struct *p, struct ta
 		tctx->is_background = 1;
 }
 
+/**
+ * classify_task - Classify thread into categories
+ * @p: Task struct pointer
+ * @tctx: Task context to update
+ *
+ * TIER 1: Thread classification (called during thread wakeup)
+ * - Multiple name pattern checks: Tier 0 (~5-30ns each)
+ * - Struct field writes: Tier 0 (~1-2ns each)
+ * - Map lookups (for audio): Tier 1 (~20-50ns)
+ * - Total: ~100-500ns (depending on matches)
+ *
+ * Frequency: Called during thread classification (thousands/sec during startup,
+ *            then cached in task_ctx for subsequent checks)
+ * Net overhead: Minimal (results cached in task_ctx)
+ */
 static __always_inline void classify_task(struct task_struct *p, struct task_ctx *tctx)
 {
     classify_input_handler(p, tctx);
@@ -1178,7 +1318,7 @@ static __always_inline void classify_task(struct task_struct *p, struct task_ctx
     classify_chromium(p, tctx);         /* Chromium throttling */
     classify_background(p, tctx);
 
-    if (!tctx->input_lane)
+    if (unlikely(!tctx->input_lane))
         tctx->input_lane = INPUT_LANE_OTHER;
  }
 

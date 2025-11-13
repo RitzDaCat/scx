@@ -5,22 +5,56 @@
  *
  * All scheduler tunables, thresholds, and constants.
  * This file is AI-friendly: ~100 lines, single responsibility.
+ *
+ * TIER 0: All macros are compile-time constants (zero runtime cost)
+ * This file contains only preprocessor definitions that are evaluated at compile time.
+ * No runtime overhead - all values are substituted directly into code during compilation.
  */
 #ifndef __GAMER_CONFIG_BPF_H
 #define __GAMER_CONFIG_BPF_H
 
 /*
+ * CCD Classification
+ *
+ * TIER 0: Compile-time constants
+ */
+#define CCD_CLASS_UNKNOWN	0
+#define CCD_CLASS_CACHE		1
+#define CCD_CLASS_FREQ		2
+
+/*
+ * Feature Toggles
+ *
+ * TIER 0: Compile-time constants (zero runtime cost)
+ * These provide coarse build-time control over optional subsystems so we can
+ * strip legacy heuristics or high-volume telemetry in lean deployments.
+ */
+#ifndef CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY
+#define CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY	1
+#endif
+
+#ifndef CONFIG_GAMER_ENABLE_EXTENDED_STATS
+#define CONFIG_GAMER_ENABLE_EXTENDED_STATS	1
+#endif
+
+/*
  * CPU Configuration
+ *
+ * TIER 0: Compile-time constant
  */
 #define MAX_CPUS	256
 
 /*
  * Dispatch Queue IDs
+ *
+ * TIER 0: Compile-time constant
  */
 #define SHARED_DSQ	0
 
 /*
  * Performance Tuning Thresholds
+ *
+ * TIER 0: All compile-time constants (zero runtime cost)
  */
 
 /* Interactive scheduling thresholds */
@@ -34,6 +68,8 @@
 
 /*
  * Thread Classification Thresholds
+ *
+ * TIER 0: All compile-time constants (zero runtime cost)
  */
 
 /* GPU submission thread detection */
@@ -48,6 +84,8 @@
 
 /*
  * CPU Frequency Scaling
+ *
+ * TIER 0: Compile-time arithmetic (evaluated at compile time)
  */
 #define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
 #define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
@@ -55,16 +93,22 @@
 /*
  * Memory Management
  * Optimized for high refresh rate gaming (240Hz+ = 2-4ms frame budget)
+ *
+ * TIER 0: Compile-time constant
  */
 #define MM_HINT_UPDATE_INTERVAL_NS	2000000ULL	/* 2ms (was 10ms) - allows ~2 updates per 240Hz frame */
 
 /*
  * Migration Control
+ *
+ * TIER 0: Compile-time constant
  */
 #define MIG_TOKEN_SCALE			1024ULL		/* Token bucket scaling factor */
 
 /*
  * Userspace Command Flags (BSS cmd_flags bits)
+ *
+ * TIER 0: Compile-time bit shift operations (evaluated at compile time)
  */
 #define CMD_INPUT	(1u << 0)	/* Input event trigger */
 #define CMD_FRAME	(1u << 1)	/* Frame event trigger */
@@ -72,10 +116,15 @@
 
 /*
  * Kick Bitmap Configuration
+ *
+ * TIER 0: Compile-time arithmetic (evaluated at compile time)
  */
 #define KICK_WORDS	((MAX_CPUS + 63) / 64)
 
-/* NAPI preference tracking */
+/* NAPI preference tracking
+ *
+ * TIER 0: Compile-time constants
+ */
 #define NET_RX_SOFTIRQ	3
 #define NET_TX_SOFTIRQ	2
 #define NAPI_PREFER_TIMEOUT_NS	(5ULL * NSEC_PER_MSEC)

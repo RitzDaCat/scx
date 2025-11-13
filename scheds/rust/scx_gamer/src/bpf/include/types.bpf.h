@@ -55,13 +55,18 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_save_game:1;		/* Save game thread (game save operations) */
 	u8 is_config_file:1;		/* Config file thread (configuration changes) */
 	u8 is_background:1;		/* Background/batch work */
+	u8 is_taskgraph_worker:1;	/* Unreal Engine TaskGraph worker thread (UE5.6 DX12) */
 	u8 is_network_counted:1;	/* Flag to ensure network threads are counted only once */
 	u8 is_per_cpu_kthread:1;	/* Per-CPU kernel thread (kworker, ksoftirqd) - cached detection */
 	u8 is_per_cpu_kthread_set:1;	/* Flag indicating per-CPU kthread detection was computed */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
 	u8 boost_shift;			/* 0=no boost, 7=10x boost for input handlers */
-	u8 input_lane;		/* lane classification (keyboard/mouse/other) */
+	u8 graphics_api_cached:2;	/* Cached graphics API mode (0=unknown, 1=DX11, 2=DX12, 3=unset) - TIER 0 access */
+	u8 _api_pad:6;			/* Padding to maintain alignment */
+	u8 input_lane;			/* lane classification (keyboard/mouse/other) */
+	u8 class_boost;			/* Baseline boost derived from role presets (0-7) */
+	u8 gpu_vendor_cached;		/* Cached GPU vendor (0=unknown, 1=intel, 2=amd, 3=nvidia) */
 	s8 per_cpu_bound_cpu;		/* Cached bound CPU ID for per-CPU kthreads (-1 if not bound) */
 
 	/* Scheduler generation tracking (bytes 2-3) - detects scheduler restarts */
@@ -111,6 +116,24 @@ struct CACHE_ALIGNED task_ctx {
 	u64 inheritance_expiry;		/* Timestamp when inheritance expires */
 	u8 original_boost_shift;	/* Original boost_shift before inheritance (for restoration) */
 	u32 lock_holder_pid;		/* PID of task holding lock we're waiting for */
+	
+	/* UE5.6 DX12 Wake Chain Boosting */
+	u8 wake_chain_boost;		/* Temporary boost from wake chain (0-2, added to base boost) */
+	u64 wake_chain_expiry;		/* Timestamp when wake chain boost expires */
+
+	/* Frame deadline feedback loop (per-thread state)
+	 * Tracks frame lateness to provide responsive boost adjustments without static tuning. */
+	u8 frame_feedback_boost;	/* Additional boost from frame feedback (0-2) */
+	u8 frame_deadline_recorded;	/* Flag: 1 if current frame deadline miss already accounted */
+	u16 frame_miss_streak;		/* Consecutive frame deadlines missed */
+	u16 frame_hit_streak;		/* Consecutive frame deadlines met (used to decay boost) */
+	u16 _frame_pad;			/* Padding for alignment */
+	u64 frame_boost_expiry;		/* Timestamp when frame feedback boost expires */
+	u64 frame_deadline_seen;	/* Last frame deadline timestamp evaluated */
+	u64 render_start_ns;		/* Timestamp when task began render work */
+	u64 render_end_ns;		/* Timestamp when task completed render work */
+	u64 render_frame_time_ns;	/* Last frame time observed */
+	u8 render_phase_class;		/* 0=unknown,1=CPU-bound,2=GPU-bound */
 	
 	/* Rate Monotonic Scheduling (RMS) - Liu & Layland (1973) */
 	u8 rms_priority;		/* RMS priority (0-7, shorter period = higher priority) */
@@ -181,6 +204,21 @@ _Static_assert(sizeof(struct cpu_ctx) % 64 == 0,
  * BPF Maps
  */
 
+/* Engine micro-profile cache: keyed by thread name (comm) to store observed behavior. */
+struct engine_profile_key {
+	char comm[TASK_COMM_LEN];	/* TASK_COMM_LEN = 16 (includes terminating NUL) */
+};
+
+struct engine_profile_entry {
+	u32 avg_exec_ns;		/* Average exec time per wake (ns) */
+	u32 avg_wakeup_freq;		/* Average wakeups per 100ms (scaled like wakeup_freq) */
+	u8 last_boost;			/* Last observed boost_shift for this thread */
+	u8 reserved;			/* Reserved for future flags (API mode, etc.) */
+	u16 sample_count;		/* Number of samples contributing (saturating) */
+	u32 _pad;			/* Explicit padding for 8-byte alignment */
+	u64 last_updated_ns;		/* Timestamp for aging */
+};
+
 /* Task storage */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -188,6 +226,14 @@ struct {
 	__type(key, int);
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
+
+/* Engine micro-profile cache (LRU hash to avoid unbounded growth). */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 256);	/* Track up to 256 distinct thread names */
+	__type(key, struct engine_profile_key);
+	__type(value, struct engine_profile_entry);
+} engine_profile_map SEC(".maps");
 
 /* Per-CPU storage */
 struct {
@@ -212,6 +258,31 @@ struct {
 	__type(key, u32);          /* TGID */
 	__type(value, u8);         /* 1 = audio server, 0 = not */
 } system_audio_tgids_map SEC(".maps");
+
+/* GPU vendor tracking per game process (TGID → vendor) */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, u32);   /* TGID */
+	__type(value, u8);  /* GPU vendor */
+} gpu_vendor_by_tgid_map SEC(".maps");
+
+/* Audio thread classification caches (kernel fentry detection → scheduler fast path)
+ * Key: TID (thread id)
+ * Value: 1 if classified (stored as u8 for compactness) */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, u32);   /* TID */
+	__type(value, u8);  /* 1 = system audio */
+} system_audio_threads_map SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, u32);   /* TID */
+	__type(value, u8);  /* 1 = game audio */
+} game_audio_threads_map SEC(".maps");
 
 /* WAKEUP CHAIN FRONT-RUN: Per-CPU input arrival flag (Tier 1: 20-50ns)
  * 
@@ -260,6 +331,23 @@ struct {
 	__type(value, u32);         /* PID of input handler thread */
 	__uint(max_entries, 1);
 } input_handler_pid_map SEC(".maps");
+
+/* GRAPHICS API DETECTION: Per-process DirectX version tracking
+ * Detects DX11 (dxvk-*) vs DX12 (vkd3d-*, RHIThread) to adapt scheduler behavior.
+ * 
+ * DX11: Simple 2-thread model (GameThread → RenderThread), RenderThread is bottleneck
+ * DX12: Parallel model (GameThread → RenderThread → RHIThread → TaskGraph), handoff latency is bottleneck
+ * 
+ * PERFORMANCE HIERARCHY: Hash map (Tier 3, 30-60ns) - per-process, not per-thread
+ * Key: TGID (thread group ID) of the game process
+ * Value: Graphics API mode (0=unknown, 1=DX11, 2=DX12)
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u32);         /* TGID */
+	__type(value, u8);        /* Graphics API: 0=unknown, 1=DX11, 2=DX12 */
+	__uint(max_entries, 64);  /* Support up to 64 concurrent game processes */
+} graphics_api_map SEC(".maps");
 
 /* WAKEUP CHAIN FRONT-RUN: Audio thread task_struct pointer storage
  * Stores a pointer to the main audio server thread (PipeWire/PulseAudio)
@@ -521,6 +609,17 @@ private(GAMER) struct bpf_cpumask __kptr *primary_cpumask;
 /*
  * Context Lookup Helpers
  */
+/**
+ * try_lookup_task_ctx - Lookup task context from task storage
+ * @p: Task struct pointer
+ *
+ * TIER 1: Task storage lookup
+ * - Map lookup: Tier 1 (~20-50ns, task storage)
+ * - Total: ~20-50ns
+ *
+ * Frequency: Called in hot paths when context not already loaded
+ * Net overhead: Minimal (results cached in hot_path_cache)
+ */
 static inline struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
@@ -559,53 +658,113 @@ static inline struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 #define SCX_GAMER_BOOST_SHIFT_MASK          (0xFFULL << 48)
 #define SCX_GAMER_BOOST_SHIFT_SHIFT         48
 
-/* Helper: Check if task is GPU submit (cached flag check - zero map lookup!) */
+/**
+ * is_gpu_submit_cached - Check if task is GPU submit (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check - zero map lookup!
+ * - Bitwise AND: Tier 0 (~0.5-1ns)
+ * - Comparison: Tier 0 (~0.5-1ns)
+ * - Total: ~1-2ns
+ *
+ * Frequency: Called in select_cpu hot path (millions/sec)
+ * Net overhead: Minimal (register access vs ~20-50ns map lookup)
+ */
 static __always_inline bool is_gpu_submit_cached(const struct task_struct *p)
 {
-	return (p->scx.flags & SCX_GAMER_FLAG_GPU_SUBMIT) != 0;
+	return likely((p->scx.flags & SCX_GAMER_FLAG_GPU_SUBMIT) != 0);
 }
 
-/* Helper: Check if task is input handler (cached flag check - zero map lookup!) */
+/**
+ * is_input_handler_cached - Check if task is input handler (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ */
 static __always_inline bool is_input_handler_cached(const struct task_struct *p)
 {
-	return (p->scx.flags & SCX_GAMER_FLAG_INPUT_HANDLER) != 0;
+	return likely((p->scx.flags & SCX_GAMER_FLAG_INPUT_HANDLER) != 0);
 }
 
-/* Helper: Check if task is compositor (cached flag check - zero map lookup!) */
+/**
+ * is_compositor_cached - Check if task is compositor (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ */
 static __always_inline bool is_compositor_cached(const struct task_struct *p)
 {
-	return (p->scx.flags & SCX_GAMER_FLAG_COMPOSITOR) != 0;
+	return likely((p->scx.flags & SCX_GAMER_FLAG_COMPOSITOR) != 0);
 }
 
-/* Helper: Check if task is background (cached flag check - zero map lookup!) */
+/**
+ * is_background_cached - Check if task is background (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ */
 static __always_inline bool is_background_cached(const struct task_struct *p)
 {
-	return (p->scx.flags & SCX_GAMER_FLAG_BACKGROUND) != 0;
+	return likely((p->scx.flags & SCX_GAMER_FLAG_BACKGROUND) != 0);
 }
 
-/* Helper: Check if task is system audio (cached flag check - zero map lookup!) */
+/**
+ * is_system_audio_cached - Check if task is system audio (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ */
 static __always_inline bool is_system_audio_cached(const struct task_struct *p)
 {
-	return (p->scx.flags & SCX_GAMER_FLAG_SYSTEM_AUDIO) != 0;
+	return likely((p->scx.flags & SCX_GAMER_FLAG_SYSTEM_AUDIO) != 0);
 }
 
-/* Helper: Get cached boost_shift (zero map lookup!) */
+/**
+ * get_boost_shift_cached - Get cached boost_shift (zero map lookup!)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag extraction
+ * - Bitwise AND: Tier 0 (~0.5-1ns)
+ * - Bit shift: Tier 0 (~0.5-1ns)
+ * - Total: ~1-2ns
+ *
+ * Frequency: Called in deadline calculation hot path (millions/sec)
+ * Net overhead: Minimal (register access vs ~20-50ns map lookup)
+ */
 static __always_inline u8 get_boost_shift_cached(const struct task_struct *p)
 {
 	return (u8)((p->scx.flags & SCX_GAMER_BOOST_SHIFT_MASK) >> SCX_GAMER_BOOST_SHIFT_SHIFT);
 }
 
-/* Helper: Update flag cache from task_ctx (call when classification changes) */
+/**
+ * update_task_flags_cache - Update flag cache from task_ctx
+ * @p: Task struct pointer
+ * @tctx: Task context pointer
+ *
+ * Call when classification changes to update cached flags in task_struct.
+ * This eliminates map lookups for fast path checks.
+ *
+ * TIER 0/1: Optimized for classification updates
+ * - Conditional check: Tier 0 (~0.5-1ns)
+ * - Bitwise operations: Tier 0 (~0.5-1ns each)
+ * - Struct field write: Tier 0 (~1-2ns)
+ * - Total: ~10-20ns (depending on flags set)
+ *
+ * Frequency: Called during thread classification (thousands/sec during startup,
+ *            then cached for subsequent checks)
+ * Net overhead: Minimal (one-time cost per thread classification)
+ */
 static __always_inline void update_task_flags_cache(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx)
+	/* TIER 0: Early exit if no context (~0.5-1ns) */
+	if (unlikely(!tctx))
 		return;
 	
-	/* Build flags mask from task_ctx classification */
+	/* TIER 0: Build flags mask from task_ctx classification (bitwise OR, ~0.5-1ns each) */
 	u64 flags = 0;
-	if (tctx->is_gpu_submit)
+	if (likely(tctx->is_gpu_submit))
 		flags |= SCX_GAMER_FLAG_GPU_SUBMIT;
-	if (tctx->is_input_handler)
+	if (likely(tctx->is_input_handler))
 		flags |= SCX_GAMER_FLAG_INPUT_HANDLER;
 	if (tctx->is_compositor)
 		flags |= SCX_GAMER_FLAG_COMPOSITOR;
@@ -626,10 +785,10 @@ static __always_inline void update_task_flags_cache(struct task_struct *p, struc
 	if (tctx->is_periodic)
 		flags |= SCX_GAMER_FLAG_PERIODIC;
 	
-	/* Cache boost_shift (8 bits: 0-7) */
+	/* TIER 0: Cache boost_shift (8 bits: 0-7) - bitwise operations (~1-2ns) */
 	flags |= ((u64)tctx->boost_shift & 0xFF) << SCX_GAMER_BOOST_SHIFT_SHIFT;
 	
-	/* Update flags atomically (preserve kernel flags, add our flags) */
+	/* TIER 0: Update flags atomically (preserve kernel flags, add our flags, ~1-2ns) */
 	p->scx.flags |= flags;
 }
 
@@ -696,6 +855,17 @@ static inline void submit_distributed_ringbuf(struct gamer_input_event *event, u
 	}
 }
 
+/**
+ * try_lookup_cpu_ctx - Lookup CPU context from per-CPU array
+ * @cpu: CPU ID
+ *
+ * TIER 1: Per-CPU array lookup
+ * - Map lookup: Tier 1 (~20-50ns, per-CPU array)
+ * - Total: ~20-50ns
+ *
+ * Frequency: Called in hot paths when context not already loaded
+ * Net overhead: Minimal (results cached in hot_path_cache)
+ */
 static inline struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
 	const u32 idx = 0;
@@ -708,6 +878,12 @@ extern volatile u64 input_lane_last_trigger_ns[INPUT_LANE_MAX];
 extern volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
 extern volatile u8 continuous_input_mode;
 extern volatile u8 continuous_input_lane_mode[INPUT_LANE_MAX];
+extern volatile u64 input_window_dynamic_ns;
+extern volatile u64 input_lane_dynamic_ns[INPUT_LANE_MAX];
+extern volatile u64 nr_input_force_dispatch;
+extern volatile u64 nr_input_force_dispatch_late;
+extern volatile u64 input_force_dispatch_latency_ns;
+extern volatile u64 input_force_dispatch_latency_max_ns;
 
 /*
  * Hot Path Cache Structure
@@ -742,22 +918,32 @@ static __always_inline bool is_input_active_now(u64 now);
 static __always_inline bool is_foreground_task_cached(const struct task_struct *p, u32 fg_tgid_cached);
 static __always_inline bool is_system_busy(void);
 
-/*
- * Enhanced Hot Path Data Preloading for High-FPS Optimization
- * 
- * This function batches multiple map lookups and calculations into a single operation
+/**
+ * preload_hot_path_data - Enhanced Hot Path Data Preloading for High-FPS Optimization
+ * @p: Task struct pointer
+ * @cpu: CPU ID
+ * @now: Current timestamp (reused from caller to avoid redundant call)
+ * @tctx_opt: Optional pre-loaded task context (NULL = lookup)
+ * @cctx_opt: Optional pre-loaded CPU context (NULL = lookup)
+ * @cache: Hot path cache structure to populate
+ *
+ * Batches multiple map lookups and calculations into a single operation
  * to minimize BPF map access overhead in the critical scheduling path.
- * 
- * PERFORMANCE HIERARCHY OPTIMIZATIONS:
- * - Reuse timestamp from caller (avoids redundant scx_bpf_now() call)
- * - Reuse context pointers if already loaded (avoids redundant map lookups)
- * - Batched map lookups only when needed
- * - Conditional system busy check (only when needed)
- * 
+ *
+ * TIER 1: Optimized for select_cpu hot path
+ * - Context lookups: Tier 1 (~20-50ns each, only if not provided)
+ * - Timestamp reuse: Tier 0 (no cost, reused from caller)
+ * - Foreground check: Tier 1 (~10-20ns, get_fg_tgid)
+ * - Input check: Tier 1 (~10-20ns, is_input_active_now)
+ * - System busy check: Tier 1 (~10-20ns, conditional)
+ * - Total: ~50-160ns (depending on what's already loaded)
+ *
  * Expected savings: 25-60ns per hot path call
  * - 5-10ns: Eliminated redundant timestamp
  * - 20-50ns: Eliminated redundant map lookups (when fast paths succeed)
- * Risk: Very low - only optimizes existing functionality
+ *
+ * Frequency: Called in every select_cpu() call (millions/sec)
+ * Net overhead: Critical - optimized for minimal latency
  */
 static __always_inline void preload_hot_path_data(
 	struct task_struct *p,
@@ -767,19 +953,25 @@ static __always_inline void preload_hot_path_data(
 	struct cpu_ctx *cctx_opt,   /* PERFORMANCE HIERARCHY: Optional - NULL = lookup (Tier 2) */
 	struct hot_path_cache *cache)
 {
-	/* PERFORMANCE HIERARCHY: Reuse context if already loaded (fast paths), otherwise lookup
+	/* TIER 1: Reuse context if already loaded (fast paths), otherwise lookup
 	 * This saves 20-50ns when fast paths already loaded context (60% of wakeups) */
-	cache->tctx = tctx_opt ? tctx_opt : try_lookup_task_ctx(p);
-	cache->cctx = cctx_opt ? cctx_opt : try_lookup_cpu_ctx(cpu);
+	cache->tctx = likely(tctx_opt) ? tctx_opt : try_lookup_task_ctx(p);
+	cache->cctx = likely(cctx_opt) ? cctx_opt : try_lookup_cpu_ctx(cpu);
 	
-	/* PERFORMANCE HIERARCHY: Reuse timestamp from caller (Tier 1 operation, no cost)
+	/* TIER 0: Reuse timestamp from caller (no cost, ~0ns)
 	 * This saves 5-10ns per call by avoiding redundant scx_bpf_now() call */
 	cache->now = now;
+	
+	/* TIER 1: Get foreground TGID (~10-20ns, BSS read) */
 	cache->fg_tgid = get_fg_tgid();
+	
+	/* TIER 1: Check input activity (~10-20ns, map lookup) */
 	cache->input_active = is_input_active_now(cache->now);
+	
+	/* TIER 0: Check if foreground task (~1-2ns, cached TGID comparison) */
 	cache->is_fg = is_foreground_task_cached(p, cache->fg_tgid);
 	
-	/* OPTIMIZATION: Skip system busy check for ultra-high priority threads
+	/* TIER 1: Skip system busy check for ultra-high priority threads
 	 * This saves 10-20ns for GPU/input threads that don't need migration logic */
 	if (likely(cache->tctx && cache->tctx->boost_shift >= 6)) {
 		cache->is_busy = false;  /* Assume not busy for ultra-high priority threads */

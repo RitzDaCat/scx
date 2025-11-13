@@ -70,6 +70,11 @@ scx-manager
 - **Priority Inheritance:** Prevents priority inversion delays
 - **Deadline Miss Detection:** Auto-tuning scheduler
 - **NUMA Awareness:** Optimized CPU selection for multi-node systems
+- **Frame Feedback Loop:** Adaptive deadline boosts driven by detected frame slips
+- **Topology-Aware TaskGraph Corralling:** Uses per-core capacity ranking to isolate worker noise
+- **Engine Micro-Profiles:** Per-thread-name heuristics to fast-path recurring engines (UE, Unity, Source)
+- **GPU Queue Borrowing:** Grants P-cores to TaskGraph when GPU command queue drains
+- **Dynamic Audio Deadlines:** ALSA buffer-aware boosting windows to protect low-latency audio
 
 ## Profiles
 
@@ -177,5 +182,5 @@ Contributions welcome! Please see:
 
 ---
 
-**Last Updated:** 2025-01-28
+**Last Updated:** 2025-11-12
 

@@ -1122,6 +1122,11 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
             Span::raw("   Network:   "),
             Span::styled(format!("{:>2}", sanitize(metrics.network_threads)), Style::default().fg(Color::Yellow)),
         ]),
+        Line::from(vec![
+            Span::raw("TaskGraph:"),
+            Span::styled(format!("{:>2}", sanitize(metrics.taskgraph_threads)), Style::default().fg(Color::Cyan)),
+            Span::raw("  (UE5.6 DX12)"),
+        ]),
     ];
 
     let thread_block = Paragraph::new(thread_info)
@@ -1141,6 +1146,36 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
         (0.0, 0.0)
     };
 
+    let _phase_events = metrics.frame_phase_events.max(1);
+    let phase_cpu_avg = if metrics.frame_phase_events > 0 {
+        metrics.frame_phase_cpu_ns as f64 / metrics.frame_phase_events as f64 / 1_000_000.0
+    } else {
+        0.0
+    };
+    let phase_gpu_avg = if metrics.frame_phase_events > 0 {
+        metrics.frame_phase_gpu_ns as f64 / metrics.frame_phase_events as f64 / 1_000_000.0
+    } else {
+        0.0
+    };
+    let power_line = if metrics.power_hint_level > 0 {
+        vec![
+            Span::raw("Power: "),
+            Span::styled(
+                format!("lvl {}", metrics.power_hint_level),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::raw(" rem "),
+            Span::styled(
+                format!("{:>4.1}ms", metrics.power_hint_remaining_ns as f64 / 1_000_000.0),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" upd "),
+            Span::styled(format_number(metrics.power_hint_updates), Style::default().fg(Color::Green)),
+        ]
+    } else {
+        vec![Span::raw("Power: none")]
+    };
+
     let window_info = vec![
         Line::from(vec![
             Span::raw("Input:  "),
@@ -1156,6 +1191,67 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
                 Style::default().fg(Color::Magenta),
             ),
         ]),
+        Line::from(vec![
+            Span::raw("Window: "),
+            Span::styled(
+                format!("{:>5.1}ms", metrics.input_window_dynamic_ns as f64 / 1_000_000.0),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("  kb "),
+            Span::styled(
+                format!("{:>4.1}ms", metrics.keyboard_lane_dynamic_ns as f64 / 1_000_000.0),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw("  ms "),
+            Span::styled(
+                format!("{:>4.1}ms", metrics.mouse_lane_dynamic_ns as f64 / 1_000_000.0),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Disp:   "),
+            Span::styled(format_number(metrics.input_force_dispatch), Style::default().fg(Color::Cyan)),
+            Span::raw(" late "),
+            Span::styled(format_number(metrics.input_force_dispatch_late), Style::default().fg(Color::Yellow)),
+            Span::raw(" avg "),
+            Span::styled(
+                format!("{:>4.1}µs", metrics.input_dispatch_latency_ns as f64 / 1_000.0),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(" max "),
+            Span::styled(
+                format!("{:>4.1}µs", metrics.input_dispatch_latency_max_ns as f64 / 1_000.0),
+                Style::default().fg(Color::Red),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Frame FB: esc "),
+            Span::styled(format_number(metrics.frame_feedback_escalations), Style::default().fg(Color::Magenta)),
+            Span::raw("  rec "),
+            Span::styled(format_number(metrics.frame_feedback_recoveries), Style::default().fg(Color::Green)),
+            Span::raw("  miss "),
+            Span::styled(format_number(metrics.frame_feedback_miss_events), Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::raw("Borrow: "),
+            Span::styled(format_number(metrics.taskgraph_borrow_grants), Style::default().fg(Color::Green)),
+            Span::raw("  idle grants"),
+        ]),
+        Line::from(vec![
+            Span::raw("Phase: cpu "),
+            Span::styled(format!("{:>4.1}ms", phase_cpu_avg), Style::default().fg(Color::Green)),
+            Span::raw("  gpu "),
+            Span::styled(format!("{:>4.1}ms", phase_gpu_avg), Style::default().fg(Color::Magenta)),
+            Span::raw("  events "),
+            Span::styled(format_number(metrics.frame_phase_events), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::raw("Dominance: cpu "),
+            Span::styled(format_number(metrics.frame_phase_cpu_dominant), Style::default().fg(Color::Green)),
+            Span::raw("  gpu "),
+            Span::styled(format_number(metrics.frame_phase_gpu_dominant), Style::default().fg(Color::Magenta)),
+        ]),
+        Line::from(power_line),
         Line::from(vec![
             Span::raw("Hints:  idle "),
             Span::raw(format_number(metrics.idle_pick)),

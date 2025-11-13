@@ -69,6 +69,44 @@ pub struct Metrics {
     pub input_trig: u64,
     #[stat(desc = "Frame triggers in interval")]
     pub frame_trig: u64,
+    #[stat(desc = "Input forced dispatches in interval")]
+    pub input_force_dispatch: u64,
+    #[stat(desc = "Input forced dispatches ≥1ms in interval")]
+    pub input_force_dispatch_late: u64,
+    #[stat(desc = "Input dispatch avg latency (ns)")]
+    pub input_dispatch_latency_ns: u64,
+    #[stat(desc = "Input dispatch max latency (ns)")]
+    pub input_dispatch_latency_max_ns: u64,
+    #[stat(desc = "Dynamic input window (ns)")]
+    pub input_window_dynamic_ns: u64,
+    #[stat(desc = "Keyboard lane dynamic window (ns)")]
+    pub keyboard_lane_dynamic_ns: u64,
+    #[stat(desc = "Mouse lane dynamic window (ns)")]
+    pub mouse_lane_dynamic_ns: u64,
+    #[stat(desc = "Frame phase CPU time (ns) in interval")]
+    pub frame_phase_cpu_ns: u64,
+    #[stat(desc = "Frame phase GPU time (ns) in interval")]
+    pub frame_phase_gpu_ns: u64,
+    #[stat(desc = "Frame phase samples in interval")]
+    pub frame_phase_events: u64,
+    #[stat(desc = "Frame phase GPU-dominant frames")]
+    pub frame_phase_gpu_dominant: u64,
+    #[stat(desc = "Frame phase CPU-dominant frames")]
+    pub frame_phase_cpu_dominant: u64,
+    #[stat(desc = "Power hint level (live)")]
+    pub power_hint_level: u64,
+    #[stat(desc = "Power hint remaining (ns)")]
+    pub power_hint_remaining_ns: u64,
+    #[stat(desc = "Power hint updates in interval")]
+    pub power_hint_updates: u64,
+    #[stat(desc = "Frame feedback boosts granted in interval")]
+    pub frame_feedback_escalations: u64,
+    #[stat(desc = "Frame feedback boost decay events in interval")]
+    pub frame_feedback_recoveries: u64,
+    #[stat(desc = "Frame deadline miss events recorded in interval")]
+    pub frame_feedback_miss_events: u64,
+    #[stat(desc = "TaskGraph P-core borrow grants in interval")]
+    pub taskgraph_borrow_grants: u64,
     #[stat(desc = "SYNC wake fast path hits in interval")]
     pub sync_wake_fast: u64,
     #[stat(desc = "GPU submission threads detected (live count)")]
@@ -85,6 +123,8 @@ pub struct Metrics {
     pub game_audio_threads: u64,
     #[stat(desc = "Input handler threads detected (live count)")]
     pub input_handler_threads: u64,
+    #[stat(desc = "TaskGraph worker threads detected (UE5.6 DX12, live count)")]
+    pub taskgraph_threads: u64,
     #[stat(desc = "Input trigger rate (events/sec, EMA)")]
     pub input_trigger_rate: u64,
     
@@ -513,6 +553,49 @@ impl Metrics {
             fg_cpu_pct: self.fg_cpu_pct,
             input_trig: self.input_trig.saturating_sub(prev.input_trig),
             frame_trig: self.frame_trig.saturating_sub(prev.frame_trig),
+            input_force_dispatch: self
+                .input_force_dispatch
+                .saturating_sub(prev.input_force_dispatch),
+            input_force_dispatch_late: self
+                .input_force_dispatch_late
+                .saturating_sub(prev.input_force_dispatch_late),
+            input_dispatch_latency_ns: self.input_dispatch_latency_ns,
+            input_dispatch_latency_max_ns: self.input_dispatch_latency_max_ns,
+            input_window_dynamic_ns: self.input_window_dynamic_ns,
+            keyboard_lane_dynamic_ns: self.keyboard_lane_dynamic_ns,
+            mouse_lane_dynamic_ns: self.mouse_lane_dynamic_ns,
+            frame_phase_cpu_ns: self
+                .frame_phase_cpu_ns
+                .saturating_sub(prev.frame_phase_cpu_ns),
+            frame_phase_gpu_ns: self
+                .frame_phase_gpu_ns
+                .saturating_sub(prev.frame_phase_gpu_ns),
+            frame_phase_events: self
+                .frame_phase_events
+                .saturating_sub(prev.frame_phase_events),
+            frame_phase_gpu_dominant: self
+                .frame_phase_gpu_dominant
+                .saturating_sub(prev.frame_phase_gpu_dominant),
+            frame_phase_cpu_dominant: self
+                .frame_phase_cpu_dominant
+                .saturating_sub(prev.frame_phase_cpu_dominant),
+            power_hint_level: self.power_hint_level,
+            power_hint_remaining_ns: self.power_hint_remaining_ns,
+            power_hint_updates: self
+                .power_hint_updates
+                .saturating_sub(prev.power_hint_updates),
+            frame_feedback_escalations: self
+                .frame_feedback_escalations
+                .saturating_sub(prev.frame_feedback_escalations),
+            frame_feedback_recoveries: self
+                .frame_feedback_recoveries
+                .saturating_sub(prev.frame_feedback_recoveries),
+            frame_feedback_miss_events: self
+                .frame_feedback_miss_events
+                .saturating_sub(prev.frame_feedback_miss_events),
+            taskgraph_borrow_grants: self
+                .taskgraph_borrow_grants
+                .saturating_sub(prev.taskgraph_borrow_grants),
             sync_wake_fast: self.sync_wake_fast.saturating_sub(prev.sync_wake_fast),
             gpu_submit_threads: self.gpu_submit_threads,  // live count, not delta
             background_threads: self.background_threads,  // live count, not delta
@@ -521,6 +604,7 @@ impl Metrics {
             system_audio_threads: self.system_audio_threads,  // live count, not delta
             game_audio_threads: self.game_audio_threads,  // live count, not delta
             input_handler_threads: self.input_handler_threads,  // live count, not delta
+            taskgraph_threads: self.taskgraph_threads,  // live count, not delta
             input_trigger_rate: self.input_trigger_rate,  // live rate (EMA), not delta
             continuous_input_mode: self.continuous_input_mode,  // live flag, not delta
             continuous_input_lane_keyboard: self.continuous_input_lane_keyboard,
