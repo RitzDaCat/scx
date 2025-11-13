@@ -22,6 +22,7 @@ const POWER_RELEASE1: f64 = 110.0;
 const POWER_RELEASE2: f64 = 125.0;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(1_000);
 
 pub struct PowerHint {
     pub level: u32,
@@ -132,6 +133,7 @@ impl PowerMonitor {
             .and_then(|sensor| sensor.read_value().ok());
 
         let mut desired = self.determine_level(temp, power);
+        let duration_ms = hint_duration(desired);
 
         if desired < self.last_level {
             let should_hold = match self.last_level {
@@ -156,35 +158,43 @@ impl PowerMonitor {
             self.last_level = desired;
             self.last_change = now;
 
-            let temp_unit = self
-                .temp_sensor
-                .as_ref()
-                .map(|s| s.kind.unit())
-                .unwrap_or("°C");
-            let power_unit = self
-                .power_sensor
-                .as_ref()
-                .map(|s| s.kind.unit())
-                .unwrap_or("W");
+            if desired > 0 {
+                let temp_unit = self
+                    .temp_sensor
+                    .as_ref()
+                    .map(|s| s.kind.unit())
+                    .unwrap_or("°C");
+                let power_unit = self
+                    .power_sensor
+                    .as_ref()
+                    .map(|s| s.kind.unit())
+                    .unwrap_or("W");
 
-            let duration_ms = match desired {
-                0 => 0,
-                1 => 3_000,
-                2 => 6_000,
-                _ => 0,
-            };
-
-            info!(
-                "Power monitor: hint level {} (temp: {}, power: {})",
-                desired,
-                format_sensor(temp, temp_unit),
-                format_sensor(power, power_unit)
-            );
+                info!(
+                    "Power monitor: hint level {} (temp: {}, power: {})",
+                    desired,
+                    format_sensor(temp, temp_unit),
+                    format_sensor(power, power_unit)
+                );
+            } else {
+                info!("Power monitor: cleared power hint (returning to baseline)");
+            }
 
             return Some(PowerHint {
                 level: desired,
                 duration_ms,
             });
+        }
+
+        if desired > 0 {
+            let refresh = Duration::from_millis((duration_ms.max(1) as u64) / 2).max(MIN_REFRESH_INTERVAL);
+            if now.duration_since(self.last_change) >= refresh {
+                self.last_change = now;
+                return Some(PowerHint {
+                    level: desired,
+                    duration_ms,
+                });
+            }
         }
 
         None
@@ -229,6 +239,14 @@ fn format_sensor(value: Option<f64>, suffix: &str) -> String {
     match value {
         Some(v) => format!("{:.1}{}", v, suffix),
         None => "n/a".to_string(),
+    }
+}
+
+fn hint_duration(level: u32) -> u32 {
+    match level {
+        1 => 3_000,
+        2 => 6_000,
+        _ => 0,
     }
 }
 

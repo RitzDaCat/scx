@@ -3069,26 +3069,24 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 		if (buffer_ns > 20000000ULL)
 			buffer_ns = 20000000ULL;
 
-		u64 lead_ns = buffer_ns >> 2;  /* Trigger boost when 25% of buffer remaining */
-		if (lead_ns < 250000ULL)
-			lead_ns = 250000ULL;  /* Minimum 0.25ms guard */
+		u64 guard_ns = buffer_ns >> 2;  /* Trigger boost when 25% of buffer remaining */
+		if (guard_ns < 250000ULL)
+			guard_ns = 250000ULL;  /* Minimum 0.25ms guard */
 
 		u64 base_completion = tctx->last_completion_time ? tctx->last_completion_time : now;
 		u64 next_deadline = base_completion + buffer_ns;
 
-		u64 latency_ema = input_force_dispatch_latency_ns;
-		if (latency_ema > 0) {
-			u64 guard = latency_ema << 1;
-			if (guard > lead_ns)
-				lead_ns = guard;
+		if (tctx->audio_latency_ema_ns > 0) {
+			u64 ema_guard = tctx->audio_latency_ema_ns << 1; /* 2× EMA guard */
+			if (ema_guard > guard_ns)
+				guard_ns = ema_guard;
 		}
-		u64 latency_peak = input_force_dispatch_latency_max_ns;
-		if (latency_peak > 0 && latency_peak > lead_ns)
-			lead_ns = latency_peak;
-		if (lead_ns > buffer_ns)
-			lead_ns = buffer_ns;
+		if (tctx->audio_latency_peak_ns > guard_ns)
+			guard_ns = tctx->audio_latency_peak_ns;
+		if (guard_ns > buffer_ns)
+			guard_ns = buffer_ns;
 
-		if (now + lead_ns >= next_deadline) {
+		if (now + guard_ns >= next_deadline) {
 			/* Smaller buffers demand higher temporary boost. */
 			u8 desired_boost = buffer_ns <= 2000000ULL ? 9 : 8;
 			if (desired_boost > 10)
@@ -3100,7 +3098,7 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 			if (tctx->boost_shift < desired_boost)
 				tctx->boost_shift = desired_boost;
 
-			u64 expiry_guard = next_deadline + (lead_ns >> 1);
+			u64 expiry_guard = next_deadline + (guard_ns >> 1);
 			if (expiry_guard <= next_deadline)
 				expiry_guard = next_deadline + 250000ULL;
 			tctx->inheritance_expiry = expiry_guard;
@@ -5440,6 +5438,16 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
 	}
 	
 	/* Update last completion time for deadline tracking */
+	if (tctx->is_game_audio) {
+		u64 overshoot = 0;
+		if (tctx->expected_deadline > 0 && now > tctx->expected_deadline)
+			overshoot = now - tctx->expected_deadline;
+		tctx->audio_latency_ema_ns = calc_avg(tctx->audio_latency_ema_ns, overshoot);
+		if (overshoot > tctx->audio_latency_peak_ns)
+			tctx->audio_latency_peak_ns = overshoot;
+		else if (tctx->audio_latency_peak_ns > 0)
+			tctx->audio_latency_peak_ns -= tctx->audio_latency_peak_ns >> 3; /* Decay peak (~12.5%) */
+	}
 	tctx->last_completion_time = now;
 
 	if (tctx->is_gpu_submit) {
