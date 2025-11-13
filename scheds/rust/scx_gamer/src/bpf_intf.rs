@@ -13,6 +13,13 @@
 include!(concat!(env!("OUT_DIR"), "/bpf_intf.rs"));
 use crate::InputLane;
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PowerHintArg {
+    level: u32,
+    duration_ms: u32,
+}
+
 #[inline(always)]
 pub fn trigger_input_window(skel: &mut crate::BpfSkel) -> Result<(), u32> {
     // ZERO-LATENCY: Direct BPF syscall for immediate input window activation
@@ -111,6 +118,35 @@ pub fn trigger_input_with_napi_lane(skel: &mut crate::BpfSkel, lane: InputLane) 
         }
     }
     Ok(())
+}
+
+#[inline(always)]
+pub fn set_power_hint(
+    skel: &mut crate::BpfSkel,
+    level: u32,
+    duration_ms: u32,
+) -> Result<(), u32> {
+    let prog = &mut skel.progs.set_power_hint;
+    let mut args = PowerHintArg { level, duration_ms };
+    let prog_input = libbpf_rs::ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut args as *mut _ as *mut u8,
+                std::mem::size_of_val(&args),
+            )
+        }),
+        ..Default::default()
+    };
+    match prog.test_run(prog_input) {
+        Ok(out) => {
+            if out.return_value == 0 {
+                Ok(())
+            } else {
+                Err(out.return_value)
+            }
+        }
+        Err(_) => Err(1),
+    }
 }
 
 #[repr(C)]

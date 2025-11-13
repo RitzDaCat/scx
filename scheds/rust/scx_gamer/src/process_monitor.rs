@@ -7,10 +7,9 @@
 // NOTE: Process monitoring functionality is currently disabled (see TUI line 1630).
 // CPU/GPU stats collection kept for future use when process monitoring is re-enabled.
 
-use std::fs;
-
 /// Find OBS process PID by name
 pub fn find_obs_pid() -> Option<u32> {
+    use std::fs;
     // Read /proc to find obs process
     let proc_dir = fs::read_dir("/proc").ok()?;
 
@@ -28,9 +27,10 @@ pub fn find_obs_pid() -> Option<u32> {
     None
 }
 
-// Process monitoring code disabled but kept for future use
-#[allow(dead_code)]
-mod process_monitoring {
+// Platform-specific process monitoring is optional and compiled only when explicitly requested.
+// This avoids pulling in heavyweight `nvidia-smi` polling on builds that do not display GPU stats.
+#[cfg(feature = "monitor-nvidia")]
+pub mod nvidia {
     use anyhow::Result;
     use std::collections::HashMap;
     use std::fs;
@@ -53,6 +53,7 @@ mod process_monitoring {
         timestamp: Instant,
     }
 
+    /// NVIDIA-specific process monitor. Requires `nvidia-smi` to be present.
     pub struct ProcessMonitor {
         last_snapshots: HashMap<u32, ProcStatSnapshot>,
         system_hz: u64,  // System clock ticks per second
@@ -244,3 +245,6 @@ mod process_monitoring {
         }
     }
 }
+
+#[cfg(feature = "monitor-nvidia")]
+pub use nvidia::{ProcessMonitor, ProcessStats};

@@ -15,7 +15,7 @@ use inotify::{Inotify, WatchMask, EventMask};
 use log::{info, warn};
 use nix::fcntl;
 
-/// Audio server process name patterns (matching register_audio_servers)
+/// Audio server process name patterns used for both initial scan and incremental detection
 const AUDIO_SERVER_NAMES: &[&str] = &[
     "pipewire",
     "pipewire-pulse",
