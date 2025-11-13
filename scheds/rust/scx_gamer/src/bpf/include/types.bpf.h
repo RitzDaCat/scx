@@ -105,6 +105,8 @@ struct CACHE_ALIGNED task_ctx {
 	/* Audio optimization metrics */
 	u32 audio_buffer_size;		/* Detected audio buffer size (samples) */
 	u32 audio_sample_rate;		/* Detected audio sample rate (Hz) */
+	u64 audio_latency_ema_ns;	/* EMA of deadline overshoot (nanoseconds) */
+	u64 audio_latency_peak_ns;	/* Decaying peak of recent overshoot (nanoseconds) */
 
 	/* Deadline miss detection and auto-recovery */
 	u64 expected_deadline;		/* Deadline calculated at enqueue time */
