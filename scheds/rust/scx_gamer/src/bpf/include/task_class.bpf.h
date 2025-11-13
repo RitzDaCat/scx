@@ -786,7 +786,7 @@ static __always_inline void classify_audio(struct task_struct *p, struct task_ct
 		 * Each CPU maintains its own bucket, eliminating shared map contention
 		 * Read from current CPU's bucket (same data across all CPUs since TGID is global) */
 		s32 cpu = bpf_get_smp_processor_id();
-		u8 *is_audio_server = bpf_map_lookup_percpu_elem(&system_audio_tgids_map, &tgid, cpu);
+		u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
 		if (is_audio_server && *is_audio_server) {
 			tctx->is_system_audio = 1;
 			apply_class_boost(tctx, 1);

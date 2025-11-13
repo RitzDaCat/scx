@@ -250,13 +250,13 @@ struct {
 
 /* System audio TGID map (for TGID-based audio server detection)
  * Maps TGID to whether it's an audio server (PipeWire, ALSA, PulseAudio, etc.)
- * 
- * PERFORMANCE HIERARCHY: Converted from shared hash (Tier 3, 100-300ns) to per-CPU hash (Tier 1, 20-50ns)
- * Each CPU maintains its own bucket, eliminating shared map contention
+ *
+ * Must remain a shared hash because detection and scheduling can happen on
+ * different CPUs and need to see consistent state.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, 256);  /* Support up to 256 audio servers per CPU */
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);  /* Support up to 256 audio servers */
 	__type(key, u32);          /* TGID */
 	__type(value, u8);         /* 1 = audio server, 0 = not */
 } system_audio_tgids_map SEC(".maps");
@@ -301,38 +301,37 @@ struct {
  * Value: Timestamp (u64) when input arrived, or 0 if no recent input
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CPUS);
 	__type(key, u32);
 	__type(value, u64);        /* Timestamp when input arrived for game */
-	__uint(max_entries, 1);
 } input_arrived_for_game SEC(".maps");
 
-// This map is used to signal from the compositor to the game thread.
-// When the compositor wakes due to input, it writes the current time to this
-// per-CPU map. When the game thread subsequently wakes, it checks this flag
-// to determine if it should be force-dispatched. This avoids a slow shared
-// map lookup and eliminates lock contention.
+/* Compositor wake signal shared across CPUs.
+ * The compositor records the latest wake timestamp and the game thread
+ * clears it once consumed to avoid duplicate dispatches. */
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, u32);
 	__type(value, u64);
 } compositor_woke_for_game SEC(".maps");
 
-/* WAKEUP CHAIN FRONT-RUN: Per-CPU input handler thread PID storage
- * Stores the PID of the input handler thread for force dispatch.
- * Updated when input handler thread is classified in gamer_runnable().
- * 
- * PERFORMANCE HIERARCHY: Per-CPU array (Tier 1, 20-50ns) - fastest map type
- * Key: 0 (single entry per CPU)
- * Value: PID (u32) of input handler thread, or 0 if none
- */
+/* Input handler CPU tracking (PID -> last known CPU) */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, u32);          /* PID */
+	__type(value, s32);         /* CPU ID */
+} input_handler_cpu_map SEC(".maps");
+
+/* Per-CPU input sampling counters (reduce shared atomics) */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, u32);         /* PID of input handler thread */
 	__uint(max_entries, 1);
-} input_handler_pid_map SEC(".maps");
+	__type(key, u32);
+	__type(value, u32);
+} input_sample_seq_map SEC(".maps");
 
 /* GRAPHICS API DETECTION: Per-process DirectX version tracking
  * Detects DX11 (dxvk-*) vs DX12 (vkd3d-*, RHIThread) to adapt scheduler behavior.

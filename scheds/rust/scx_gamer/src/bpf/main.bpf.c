@@ -250,6 +250,8 @@ volatile u64 frame_phase_cpu_ns;
 volatile u64 frame_phase_events;
 volatile u64 frame_phase_gpu_dominant;
 volatile u64 frame_phase_cpu_dominant;
+volatile u32 fg_input_handler_pid;
+const volatile u32 input_rb_sample_stride;
 volatile u8 power_hint_level;
 volatile u64 power_hint_expiry_ns;
 volatile u64 power_hint_remaining_ns;
@@ -1788,6 +1790,8 @@ struct {
     __type(value, struct raw_input_stats);
 } raw_input_stats_map SEC(".maps");
 
+#define DEVICE_CACHE_SLOTS 32
+
 struct device_cache_entry {
     u64 dev_ptr;
     u8 whitelisted;
@@ -1800,7 +1804,7 @@ struct device_cache_entry {
  * Each CPU maintains its own cache of recently seen devices */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 32);  /* 32 devices per CPU */
+    __uint(max_entries, DEVICE_CACHE_SLOTS);
     __type(key, u32);
     __type(value, struct device_cache_entry);
 } device_cache_percpu SEC(".maps");
@@ -1812,6 +1816,80 @@ struct {
     __type(key, u64);
     __type(value, struct device_cache_entry);
 } device_whitelist_cache SEC(".maps");
+
+static __always_inline void record_input_boost(u8 lane, u64 now,
+					       struct raw_input_stats *stats)
+{
+	int target_cpu = bpf_get_smp_processor_id();
+	u32 handler_pid = fg_input_handler_pid;
+
+	if (handler_pid) {
+		s32 *cpu_ptr = bpf_map_lookup_elem(&input_handler_cpu_map, &handler_pid);
+		if (cpu_ptr && *cpu_ptr >= 0 && *cpu_ptr < MAX_CPUS)
+			target_cpu = *cpu_ptr;
+	}
+
+	fanout_set_input_window(now);
+	__atomic_fetch_add(&nr_input_trig, 1, __ATOMIC_RELAXED);
+
+	if (lane != INPUT_LANE_OTHER) {
+		if (lane == INPUT_LANE_KEYBOARD && stats)
+			__atomic_fetch_add(&stats->keyboard_lane_triggers, 1, __ATOMIC_RELAXED);
+		fanout_set_input_lane(lane, now);
+	}
+
+	u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
+	if (fg_tgid != 0) {
+		if (target_cpu >= 0 && target_cpu < MAX_CPUS) {
+			u32 idx_cpu = (u32)target_cpu;
+			u64 *slot = bpf_map_lookup_elem(&input_arrived_for_game, &idx_cpu);
+			if (slot)
+				*slot = now;
+		}
+	}
+
+	u64 delta_ns = now - last_input_trigger_ns;
+
+	if (delta_ns > 1000000ULL) {
+		input_trigger_rate = 0;
+		continuous_input_mode = 0;
+	} else if (delta_ns > 0) {
+		u32 instant_rate = delta_ns < 10000000ULL ? (u32)(1000000000ULL / delta_ns) : 0;
+		input_trigger_rate = (input_trigger_rate * 7 + instant_rate) >> 3;
+
+		if (input_trigger_rate > 150)
+			continuous_input_mode = 1;
+		else if (input_trigger_rate < 75)
+			continuous_input_mode = 0;
+	}
+
+	last_input_trigger_ns = now;
+
+	if (stats)
+		__atomic_fetch_add(&stats->fentry_boost_triggers, 1, __ATOMIC_RELAXED);
+
+	if (kbd_pressed_count > 0 && lane != INPUT_LANE_KEYBOARD) {
+		u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
+		if (!time_before(now + guard, input_lane_until[INPUT_LANE_KEYBOARD]))
+			fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
+	}
+}
+
+static __always_inline void update_input_handler_cpu(struct task_struct *p)
+{
+	if (unlikely(!p))
+		return;
+
+	if (!is_input_handler_cached(p))
+		return;
+
+	u32 pid = (u32)p->pid;
+	s32 cpu = scx_bpf_task_cpu(p);
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return;
+
+	bpf_map_update_elem(&input_handler_cpu_map, &pid, &cpu, BPF_ANY);
+}
 
 /*
  * fentry hook on input_event() - CRITICAL PATH for raw input!
@@ -1827,6 +1905,18 @@ SEC("fentry/input_event")
 int BPF_PROG(input_event_raw, struct input_dev *dev,
              unsigned int type, unsigned int code, int value)
 {
+    u64 dev_key = (u64)(unsigned long)dev;
+    u32 cache_slot = (u32)dev_key & (DEVICE_CACHE_SLOTS - 1);
+    u64 now_shared = scx_bpf_now();
+
+    u32 stats_key = 0;
+    struct raw_input_stats *stats = NULL;
+    if (likely(!no_stats)) {
+        stats = bpf_map_lookup_elem(&raw_input_stats_map, &stats_key);
+        if (stats)
+            __atomic_fetch_add(&stats->total_events, 1, __ATOMIC_RELAXED);
+    }
+
     /* HIGH-FPS OPTIMIZATION: Fast path for high-frequency input events
      * At 1000+ FPS, input event processing overhead becomes significant.
      * Skip expensive device lookup for sustained high-frequency scenarios.
@@ -1839,42 +1929,13 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
      * Risk: Medium - may miss device changes during high-frequency periods
      * Mitigation: Fallback to full processing if device cache miss occurs */
     if (likely(continuous_input_mode && input_trigger_rate > 500)) {
-        /* High-FPS mode: use cached device info, skip vendor/product lookup
-         * This provides maximum performance for aim trainers and high-FPS games */
-        u32 cpu_idx = bpf_get_smp_processor_id() % 32;
-        struct device_cache_entry *cached = bpf_map_lookup_elem(&device_cache_percpu, &cpu_idx);
+        struct device_cache_entry *cached = bpf_map_lookup_elem(&device_cache_percpu, &cache_slot);
         
-        if (likely(cached && cached->whitelisted)) {
-            /* Fast path: use cached device info, skip all lookups */
-            u64 dev_key = (u64)(unsigned long)dev;
-            if (likely(cached->dev_ptr == dev_key)) {
-                /* OPTIMIZATION: Fast path with minimal overhead
-                 * - Single timestamp call (reused if function continues)
-                 * - Per-lane boost duration lookup
-                 * - Direct window update without device lookup */
-                u64 now = scx_bpf_now();
-                u8 lane_hint = cached->lane_hint;
-                /* BPF VERIFIER: Use the same safe pattern as fanout_set_input_lane().
-                 * This ensures consistent bounds checking that the verifier can track. */
-                fanout_set_input_lane(lane_hint, now);
-                return 0;  /* Fast path exit - no further processing needed */
-            }
+        if (likely(cached && cached->whitelisted && cached->dev_ptr == dev_key)) {
+            record_input_boost(cached->lane_hint, now_shared, stats);
+            return 0;  /* Fast path exit - no further processing needed */
         }
         /* Cache miss: fall through to full processing */
-    }
-
-    /* OPTIMIZATION: Get timestamp once at start, reuse throughout function
-     * Eliminates 2-3 redundant scx_bpf_now() calls, saving ~20-40ns per event */
-    u64 now_shared = scx_bpf_now();
-
-    /* OPTIMIZATION: Skip stats lookup when stats disabled (no_stats=true)
-     * BPF map lookup is ~5-10ns, skipping saves latency on hot path */
-    u32 stats_key = 0;
-    struct raw_input_stats *stats = NULL;
-    if (likely(!no_stats)) {
-        stats = bpf_map_lookup_elem(&raw_input_stats_map, &stats_key);
-    if (stats)
-            __atomic_fetch_add(&stats->total_events, 1, __ATOMIC_RELAXED);
     }
 
     /* RING BUFFER INTEGRATION: Capture input events for ultra-low latency processing
@@ -1889,98 +1950,116 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
      * When none of these are enabled, ring buffer write is pure overhead.
      */
     if (likely(!no_stats)) {
+        u32 sample_stride = input_rb_sample_stride;
+        bool emit_event = true;
+        u32 sample_idx = 0;
+        u32 *seq_ptr = bpf_map_lookup_elem(&input_sample_seq_map, &sample_idx);
+        u32 seq = 0;
+        if (seq_ptr) {
+            seq = *seq_ptr;
+            *seq_ptr = seq + 1;
+        }
+        if (sample_stride > 1 && seq_ptr)
+            emit_event = ((seq % sample_stride) == 0);
+
         /* LMAX DISRUPTOR: Use distributed ring buffers to reduce contention.
          * CPUs are distributed across NUM_RING_BUFFERS (16) buffers via modulo.
          * This reduces contention by ~16x while remaining BPF verifier-compliant.
          * Fallback to legacy shared buffer if distributed buffers not available.
          */
-        struct gamer_input_event *event = NULL;
-        s32 cpu = bpf_get_smp_processor_id();
-        u32 buf_idx = (u32)cpu % NUM_RING_BUFFERS;
-        
-        /* Track which buffer type we're using */
-        bool using_distributed = false;
-        
-        /* Try distributed ring buffer first (reduced contention) */
-        event = get_distributed_ringbuf_reserve();
-    if (event) {
-            using_distributed = true;
-        } else {
-            /* Fallback to legacy shared ring buffer if distributed not available */
-            event = bpf_ringbuf_reserve(&input_events_ringbuf, sizeof(*event), 0);
-        }
-        
+        if (emit_event) {
+            struct gamer_input_event *event = NULL;
+            s32 cpu = bpf_get_smp_processor_id();
+            u32 buf_idx = (u32)cpu % NUM_RING_BUFFERS;
+            
+            /* Track which buffer type we're using */
+            bool using_distributed = false;
+            
+            /* Try distributed ring buffer first (reduced contention) */
+            event = get_distributed_ringbuf_reserve();
         if (event) {
-            /* MECHANICAL SYMPATHY: Prefetch next potential ring buffer entry
-             * while processing current event to hide cache miss latency.
-             * Prefetch hint with high temporal locality (3) - data will be used soon.
-             * Benefit: ~10-20ns savings if next reserve causes cache miss. */
-            __builtin_prefetch(event + 1, 0, 3);  /* Read, high temporal locality */
-            
-            event->timestamp = now_shared;  /* Reuse timestamp */
-        event->event_type = (u16)type;
-        event->event_code = (u16)code;
-        event->event_value = value;
-        event->device_id = (u32)(unsigned long)dev;  /* Use device pointer as ID */
-            
-            /* Submit to the ring buffer we reserved from */
-            if (using_distributed) {
-                /* Event is from distributed buffer - submit to correct buffer */
-                submit_distributed_ringbuf(event, buf_idx);
+                using_distributed = true;
             } else {
-                /* Event is from legacy buffer */
-        bpf_ringbuf_submit(event, 0);
+                /* Fallback to legacy shared ring buffer if distributed not available */
+                event = bpf_ringbuf_reserve(&input_events_ringbuf, sizeof(*event), 0);
             }
-            /* Ring buffer submission automatically triggers epoll notification
-             * when userspace is waiting via epoll_wait on the ring buffer FD.
-             * This provides interrupt-driven waking without busy polling.
-             * Latency: ~1-5µs (kernel wakeup + context switch)
-             * CPU savings: 95-98% vs busy polling
-             */
-        } else {
-            /* Ring buffer full - track overflow for monitoring
-             * This indicates userspace can't keep up with input rate (extremely rare)
-             * Overflow events are silently dropped to maintain low latency path */
-            if (stats)
-                __atomic_fetch_add(&stats->ringbuf_overflow_events, 1, __ATOMIC_RELAXED);
+            
+            if (event) {
+                /* MECHANICAL SYMPATHY: Prefetch next potential ring buffer entry
+                 * while processing current event to hide cache miss latency.
+                 * Prefetch hint with high temporal locality (3) - data will be used soon.
+                 * Benefit: ~10-20ns savings if next reserve causes cache miss. */
+                __builtin_prefetch(event + 1, 0, 3);  /* Read, high temporal locality */
+                
+                event->timestamp = now_shared;  /* Reuse timestamp */
+            event->event_type = (u16)type;
+            event->event_code = (u16)code;
+            event->event_value = value;
+            event->device_id = (u32)(unsigned long)dev;  /* Use device pointer as ID */
+                
+                /* Submit to the ring buffer we reserved from */
+                if (using_distributed) {
+                    /* Event is from distributed buffer - submit to correct buffer */
+                    submit_distributed_ringbuf(event, buf_idx);
+                } else {
+                    /* Event is from legacy buffer */
+            bpf_ringbuf_submit(event, 0);
+                }
+                /* Ring buffer submission automatically triggers epoll notification
+                 * when userspace is waiting via epoll_wait on the ring buffer FD.
+                 * This provides interrupt-driven waking without busy polling.
+                 * Latency: ~1-5µs (kernel wakeup + context switch)
+                 * CPU savings: 95-98% vs busy polling
+                 */
+            } else {
+                /* Ring buffer full - track overflow for monitoring
+                 * This indicates userspace can't keep up with input rate (extremely rare)
+                 * Overflow events are silently dropped to maintain low latency path */
+                if (stats)
+                    __atomic_fetch_add(&stats->ringbuf_overflow_events, 1, __ATOMIC_RELAXED);
+            }
         }
     }
 
     /* OPTIMIZATION: Per-CPU device cache lookup for better performance
      * Reduces hash map contention and improves cache locality */
-    u64 dev_key = (u64)(unsigned long)dev;
     u8 whitelisted = 0;
     u8 lane_hint = INPUT_LANE_OTHER;
+    struct device_cache_entry *cached = bpf_map_lookup_elem(&device_cache_percpu, &cache_slot);
     
-    /* Try per-CPU cache first (faster) */
-    u32 cpu_idx = bpf_get_smp_processor_id() % 32;
-    struct device_cache_entry *cached = bpf_map_lookup_elem(&device_cache_percpu, &cpu_idx);
-    
-    if (cached && cached->dev_ptr == dev_key) {
+    if (cached && cached->dev_ptr == dev_key && cached->whitelisted) {
         whitelisted = cached->whitelisted;
         lane_hint = cached->lane_hint;
-        /* OPTIMIZATION: Reuse timestamp from function start instead of calling bpf_ktime_get_ns()
-         * Saves ~10-15ns per cache hit (cache hits are common in hot path) */
         cached->last_access = now_shared >> 20; /* Coarse timestamp */
     } else {
-        /* Fallback to global cache */
-        cached = bpf_map_lookup_elem(&device_whitelist_cache, &dev_key);
-        if (cached) {
-            whitelisted = cached->whitelisted;
-            lane_hint = cached->lane_hint;
+        struct device_cache_entry entry = {};
+        struct device_cache_entry *global_entry = bpf_map_lookup_elem(&device_whitelist_cache, &dev_key);
+
+        if (global_entry) {
+            entry = *global_entry;
         } else {
-            /* Device not cached - perform lookup and cache result */
             u16 vendor = BPF_CORE_READ(dev, id.vendor);
             u16 product = BPF_CORE_READ(dev, id.product);
-            whitelisted = device_profile_lookup(vendor, product, &lane_hint) ? 1 : 0;
-            struct device_cache_entry entry = {
-                .dev_ptr = dev_key,
-                .whitelisted = whitelisted,
-                .lane_hint = lane_hint,
-                /* OPTIMIZATION: Reuse timestamp from function start */
-                .last_access = now_shared >> 20,
-            };
-            bpf_map_update_elem(&device_whitelist_cache, &dev_key, &entry, BPF_ANY);
+            entry.dev_ptr = dev_key;
+            entry.lane_hint = lane_hint;
+            entry.whitelisted = device_profile_lookup(vendor, product, &entry.lane_hint) ? 1 : 0;
+        }
+
+        entry.last_access = now_shared >> 20;
+        bpf_map_update_elem(&device_whitelist_cache, &dev_key, &entry, BPF_ANY);
+
+        if (entry.whitelisted) {
+            whitelisted = entry.whitelisted;
+            lane_hint = entry.lane_hint;
+        }
+
+        /* Update per-CPU cache so subsequent events on this CPU take the fast path */
+        struct device_cache_entry *percpu_slot = bpf_map_lookup_elem(&device_cache_percpu, &cache_slot);
+        if (percpu_slot) {
+            percpu_slot->dev_ptr = dev_key;
+            percpu_slot->whitelisted = entry.whitelisted;
+            percpu_slot->lane_hint = entry.lane_hint;
+            percpu_slot->last_access = now_shared >> 20;
         }
     }
 
@@ -2049,61 +2128,8 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
     }
 
     /* Trigger scheduler boost if needed */
-    if (should_boost) {
-        /* OPTIMIZATION: Reuse timestamp obtained at function start
-         * Eliminates redundant scx_bpf_now() call, saving ~10-15ns per event */
-        u64 now = now_shared;
-
-        /* Set boost window (same as userspace trigger) */
-        fanout_set_input_window(now);
-        __atomic_fetch_add(&nr_input_trig, 1, __ATOMIC_RELAXED);
-
-        if (lane != INPUT_LANE_OTHER) {
-            if (lane == INPUT_LANE_KEYBOARD && stats)
-                __atomic_fetch_add(&stats->keyboard_lane_triggers, 1, __ATOMIC_RELAXED);
-            fanout_set_input_lane(lane, now);
-        }
-
-        /* WAKEUP CHAIN FRONT-RUN: Set input arrival flag for compositor wake detection
-         * When compositor wakes (enqueue_task), it will check this flag and trigger
-         * game thread force dispatch, breaking the wakeup chain.
-         * 
-         * This achieves Approach 1: Compositor Wake Detection
-         * - Input arrives → Flag set (~10µs)
-         * - Compositor wakes → Checks flag (~1-5µs after input)
-         * - Game thread wakes → Checks flag → Force dispatches immediately
-         * - Game runs in parallel with compositor processing
-         * 
-         * PERFORMANCE: Per-CPU array write (Tier 1, 20-50ns) - very fast
-         */
-        u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
-        if (fg_tgid != 0) {
-            u32 key = 0;
-            bpf_map_update_elem(&input_arrived_for_game, &key, &now, BPF_ANY);
-        }
-
-        /* Update input rate tracking */
-        u64 delta_ns = now - last_input_trigger_ns;
-
-        if (delta_ns > 1000000) {
-            /* 1ms idle = mouse stopped */
-            input_trigger_rate = 0;
-            continuous_input_mode = 0;
-        } else if (delta_ns > 0) {
-            u32 instant_rate = delta_ns < 10000000 ? (u32)(1000000000ULL / delta_ns) : 0;
-            input_trigger_rate = (input_trigger_rate * 7 + instant_rate) >> 3;
-
-            if (input_trigger_rate > 150)
-                continuous_input_mode = 1;
-            else if (input_trigger_rate < 75)
-                continuous_input_mode = 0;
-        }
-
-        last_input_trigger_ns = now;
-
-        if (stats)
-            __atomic_fetch_add(&stats->fentry_boost_triggers, 1, __ATOMIC_RELAXED);
-    }
+    if (should_boost)
+        record_input_boost(lane, now_shared, stats);
 
     return 0;  /* Don't interfere with normal event delivery */
 }
@@ -3046,6 +3072,7 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 	if (unlikely(tctx && tctx->wake_chain_boost > 0 && now >= tctx->wake_chain_expiry)) {
 		/* Boost expired - clear it (recompute_boost_shift() will restore base boost) */
 		tctx->wake_chain_boost = 0;
+		recompute_boost_shift(tctx);
 	}
 	
 	/* AUDIOTHREAD DEADLINE SCHEDULING: Boost AudioThread when deadline approaches
@@ -3652,10 +3679,15 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	 * possible path from hardware interrupt to game code execution.
 	 */
 	if (unlikely(is_input_handler_cached(p))) {
-		u32 key = 0;
-		u64 *input_time = bpf_map_lookup_percpu_elem(&input_arrived_for_game, &key, bpf_get_smp_processor_id());
+		int target_cpu = prev_cpu;
+		if (target_cpu < 0 || target_cpu >= MAX_CPUS)
+			target_cpu = scx_bpf_task_cpu(p);
 
-		if (input_time && *input_time != 0 && (now - *input_time) < 1000000) { /* <1ms */
+		if (target_cpu >= 0 && target_cpu < MAX_CPUS) {
+			u32 idx = (u32)target_cpu;
+			u64 *input_time = bpf_map_lookup_elem(&input_arrived_for_game, &idx);
+
+			if (input_time && *input_time != 0 && (now - *input_time) < 1000000) { /* <1ms */
 			/*
 			 * ROBUSTNESS FIX: Always force-dispatch the handler onto its CURRENT CPU.
 			 * This is an unconditionally safe operation that still achieves the primary
@@ -3675,6 +3707,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 			*input_time = 0; /* Consume the event to prevent re-triggering */
 			PROF_END_HIST(enqueue);
 			return;
+			}
 		}
 	}
 
@@ -3691,7 +3724,8 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	 */
 	if (unlikely(is_compositor_cached(p) && input_active)) {
 		u32 key = 0;
-		bpf_map_update_elem(&compositor_woke_for_game, &key, &now, BPF_ANY);
+		u64 timestamp = now;
+		bpf_map_update_elem(&compositor_woke_for_game, &key, &timestamp, BPF_ANY);
 	}
 
 	/* WAKEUP CHAIN FRONT-RUN: Audio Thread Force Dispatch
@@ -3723,11 +3757,12 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	 */
 	if (unlikely(is_fg && input_active)) {
 		u32 key = 0;
-		u64 *compositor_time = bpf_map_lookup_percpu_elem(&compositor_woke_for_game, &key, prev_cpu);
+		u64 *compositor_time = bpf_map_lookup_elem(&compositor_woke_for_game, &key);
 		if (compositor_time && *compositor_time != 0 && (now - *compositor_time) < 2000000) { /* <2ms window */
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 			wakeup_cpu(prev_cpu);
-			*compositor_time = 0; /* Consume the event */
+			u64 zero = 0;
+			bpf_map_update_elem(&compositor_woke_for_game, &key, &zero, BPF_ANY);
 			PROF_END_HIST(enqueue);
 			return;
 		}
@@ -3860,45 +3895,38 @@ skip_wake_chain:
 	 * TIER 1: Reuse fg_tgid from function start (line 3244) - saves ~10-20ns per enqueue */
 	bool is_game_thread = fg_tgid && ((u32)p->tgid == fg_tgid);
 	if (is_game_thread && tctx && tctx->is_input_handler) {
-		/* WAKEUP CHAIN FRONT-RUN: Check per-CPU flag (Tier 1: 20-50ns, no contention)
-		 * Input sets flag on IRQ CPU. Game thread checks flag on its CPU.
-		 * If flag set within last 1ms, force dispatch immediately.
-		 */
-		u32 key = 0;
-		u64 *input_time = bpf_map_lookup_percpu_elem(&input_arrived_for_game, &key,
-		                                              bpf_get_smp_processor_id());
-		
-		if (input_time && *input_time != 0 && (now - *input_time) < 1000000) {
-			/* Input arrived recently - force dispatch this game thread NOW */
-			/*
-			 * ROBUSTNESS FIX: Always force-dispatch the game thread onto its CURRENT CPU.
-			 * This is an unconditionally safe operation that still achieves the primary
-			 * latency-saving goal by bypassing the userspace wakeup chain. It respects
-			 * any static pinning decisions made by launch scripts (e.g., esports mode).
-			 */
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+		int target_cpu = prev_cpu;
+		if (target_cpu < 0 || target_cpu >= MAX_CPUS)
+			target_cpu = scx_bpf_task_cpu(p);
+
+		if (target_cpu >= 0 && target_cpu < MAX_CPUS) {
+			u32 idx = (u32)target_cpu;
+			u64 *input_time = bpf_map_lookup_elem(&input_arrived_for_game, &idx);
 			
-			struct cpu_ctx *target_cctx = try_lookup_cpu_ctx(prev_cpu);
-			if (target_cctx)
-				target_cctx->local_nr_direct_dispatches++;
-			else
-				__atomic_fetch_add(&nr_direct_dispatches, 1, __ATOMIC_RELAXED);
-			
-			/* Store deadline for tracking */
-			if (tctx) {
-				u64 deadline = task_dl_with_ctx_cached(p, tctx, prev_cctx, fg_tgid);  /* TIER 1: Reuse fg_tgid */
-				tctx->expected_deadline = deadline;
-			}
-			
-			wakeup_cpu(prev_cpu);
-			
-			/* Clear input flag (per-CPU, Tier 1: 20-50ns) */
-			u64 zero = 0;
-			bpf_map_update_elem(&input_arrived_for_game, &key, &zero, BPF_ANY);
-			
-			PROF_END_HIST(enqueue);
-			return;  /* INSTANT RETURN - bypass normal enqueue path */
-        }
+			if (input_time && *input_time != 0 && (now - *input_time) < 1000000) {
+				/* Input arrived recently - force dispatch this game thread NOW */
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+				
+				struct cpu_ctx *target_cctx = try_lookup_cpu_ctx(prev_cpu);
+				if (target_cctx)
+					target_cctx->local_nr_direct_dispatches++;
+				else
+					__atomic_fetch_add(&nr_direct_dispatches, 1, __ATOMIC_RELAXED);
+				
+				/* Store deadline for tracking */
+				if (tctx) {
+					u64 deadline = task_dl_with_ctx_cached(p, tctx, prev_cctx, fg_tgid);  /* TIER 1: Reuse fg_tgid */
+					tctx->expected_deadline = deadline;
+				}
+				
+				wakeup_cpu(prev_cpu);
+				
+				*input_time = 0;
+				
+				PROF_END_HIST(enqueue);
+				return;  /* INSTANT RETURN - bypass normal enqueue path */
+	        }
+	    }
     }
 
 	/*
@@ -4308,6 +4336,21 @@ static __always_inline void recompute_boost_shift(struct task_ctx *tctx)
         }
     }
 }
+
+static __always_inline bool update_background_state(struct task_struct *p,
+						    struct task_ctx *tctx,
+						    bool new_state)
+{
+	bool old = tctx->is_background;
+
+	if (old == new_state)
+		return false;
+
+	tctx->is_background = new_state;
+	recompute_boost_shift(tctx);
+	update_task_flags_cache(p, tctx);
+	return true;
+}
 void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = scx_bpf_now(), delta_t;
@@ -4549,7 +4592,7 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 		 * Each CPU maintains its own bucket, eliminating shared map contention
 		 * Read from current CPU's bucket (same data across all CPUs since TGID is global) */
 		s32 cpu = bpf_get_smp_processor_id();
-		u8 *is_audio_server = bpf_map_lookup_percpu_elem(&system_audio_tgids_map, &tgid, cpu);
+		u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
 		if (is_audio_server && *is_audio_server) {
 			tctx->is_system_audio = 1;
 			apply_class_boost(tctx, 1);
@@ -4800,9 +4843,10 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 				 * When compositor wakes and input flag is set, we use this PID to identify game thread.
 				 * Store in per-CPU array for fast lookup (Tier 1, 20-50ns).
 				 */
-				u32 key = 0;
-				u32 pid = (u32)p->pid;
-				bpf_map_update_elem(&input_handler_pid_map, &key, &pid, BPF_ANY);
+				if (fg_tgid && (u32)p->tgid == fg_tgid) {
+					fg_input_handler_pid = (u32)p->pid;
+				}
+				update_input_handler_cpu(p);
 			}
 		}
 	}
@@ -4826,9 +4870,9 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 		update_task_flags_cache(p, tctx);
 		
 		/* WAKEUP CHAIN FRONT-RUN: Store input handler PID for compositor wake detection */
-		u32 key = 0;
-		u32 pid = (u32)p->pid;
-		bpf_map_update_elem(&input_handler_pid_map, &key, &pid, BPF_ANY);
+		if (fg_tgid && (u32)p->tgid == fg_tgid)
+			fg_input_handler_pid = (u32)p->pid;
+		update_input_handler_cpu(p);
 	}
 
 	/*
@@ -4879,6 +4923,10 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 				recompute_boost_shift(tctx);  /* Ensure input handler priority (7) */
 				/* HYBRID FLAG CACHING: Update cached flags after classification change */
 				update_task_flags_cache(p, tctx);
+
+				if (fg_tgid && (u32)p->tgid == fg_tgid)
+					fg_input_handler_pid = (u32)p->pid;
+				update_input_handler_cpu(p);
 				
 				/* Reset counters after classification to prevent re-classification noise */
 				tctx->input_window_wakeups = 0;
@@ -5309,6 +5357,9 @@ void BPF_STRUCT_OPS(gamer_running, struct task_struct *p)
 		return;
 
 	cpu = scx_bpf_task_cpu(p);
+
+	if (tctx->is_input_handler)
+		update_input_handler_cpu(p);
 
 	/*
 	 * Save a timestamp when the task begins to run (used to evaluate
@@ -5774,7 +5825,7 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
                          * Each CPU maintains its own bucket, eliminating shared map contention
                          * Read from current CPU's bucket (same data across all CPUs since TGID is global) */
                         s32 cpu = bpf_get_smp_processor_id();
-                        u8 *is_audio_server = bpf_map_lookup_percpu_elem(&system_audio_tgids_map, &tgid, cpu);
+                        u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
                         /* Only classify as system audio if NOT in a known audio server (handled by TGID check)
                          * This prevents double-classification */
                         if (!is_audio_server || !*is_audio_server) {
@@ -5834,22 +5885,18 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
         if (tctx->exec_avg > BACKGROUND_EXEC_THRESH_NS) {
             tctx->high_cpu_samples = MIN(tctx->high_cpu_samples + 1, BACKGROUND_STABLE_SAMPLES);
             __atomic_fetch_add(&nr_background_pattern_samples, 1, __ATOMIC_RELAXED);
-            if (tctx->high_cpu_samples >= BACKGROUND_STABLE_SAMPLES && !tctx->is_background) {
-                tctx->is_background = 1;
-                if (is_first_classification)
+            if (tctx->high_cpu_samples >= BACKGROUND_STABLE_SAMPLES) {
+                if (update_background_state(p, tctx, true) && is_first_classification)
                     __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
             }
         } else {
             /* FIXED: Declassify if background pattern no longer matches
              * BUT: Protect name-based background threads (Chromium, Discord, etc.) */
-            if (tctx->is_background && !is_name_based_background) {
-                tctx->is_background = 0;
-                /* Use atomic fetch-and-subtract, then check for underflow */
+            if (!is_name_based_background &&
+                update_background_state(p, tctx, false)) {
                 u64 old_val = __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
-                /* If we decremented from 0, we caused underflow - fix it */
-                if (old_val == 0) {
+                if (old_val == 0)
                     __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
-                }
             }
             tctx->high_cpu_samples = 0;
         }
@@ -5858,14 +5905,11 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
          * BUT: Protect name-based background threads (Chromium, Discord, etc.)
          * These should remain classified as background regardless of runtime patterns */
         tctx->high_cpu_samples = 0;
-        if (tctx->is_background && !is_name_based_background) {
-            tctx->is_background = 0;
-            /* Use atomic fetch-and-subtract, then check for underflow */
+        if (!is_name_based_background &&
+            update_background_state(p, tctx, false)) {
             u64 old_val = __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
-            /* If we decremented from 0, we caused underflow - fix it */
-            if (old_val == 0) {
+            if (old_val == 0)
                 __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
-            }
         }
     }
 
@@ -5961,6 +6005,10 @@ void BPF_STRUCT_OPS(gamer_disable, struct task_struct *p)
 	if (tctx->is_input_handler && nr_input_handler_threads > 0) {
 		__atomic_fetch_sub(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
 		__atomic_fetch_add(&nr_disable_input_dec, 1, __ATOMIC_RELAXED);
+		u32 pid = (u32)p->pid;
+		bpf_map_delete_elem(&input_handler_cpu_map, &pid);
+		if (fg_input_handler_pid == pid)
+			fg_input_handler_pid = 0;
 	}
 	if (tctx->is_gpu_submit && nr_gpu_submit_threads > 0)
 		__atomic_fetch_sub(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
