@@ -123,6 +123,8 @@ static __always_inline void register_storage_thread(u32 tid, u8 type)
 		/* TIER 0: Update counters (struct field writes, ~1-2ns each) */
 		info->total_ios++;
 		info->last_io_ts = now;
+		if (type != STORAGE_TYPE_UNKNOWN)
+			info->storage_type = type;
 
 		/* TIER 0: Estimate I/O frequency (Hz) - EMA smoothing
 		 * Only calculate if delta is reasonable (< 1 second) */

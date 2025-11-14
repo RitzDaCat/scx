@@ -108,8 +108,8 @@ static __always_inline void register_network_thread(u32 tid, u8 type)
 		new_info.last_net_ts = now;
 		new_info.total_ops = 1;
 		new_info.network_type = type;
-		new_info.is_gaming_traffic = 0;  /* Assume regular traffic until proven otherwise */
-		new_info.is_low_latency = 0;     /* Assume standard latency until proven otherwise */
+		new_info.is_gaming_traffic = (type == NETWORK_TYPE_GAMING);
+		new_info.is_low_latency = (type == NETWORK_TYPE_GAMING);
 
 		/* TIER 1: Insert new thread (map update, ~100-200ns) */
 		if (unlikely(bpf_map_update_elem(&network_threads_map, &tid, &new_info, BPF_ANY) < 0)) {
@@ -126,6 +126,13 @@ static __always_inline void register_network_thread(u32 tid, u8 type)
 		/* TIER 0: Update counters (struct field writes, ~1-2ns each) */
 		info->total_ops++;
 		info->last_net_ts = now;
+		if (type == NETWORK_TYPE_GAMING) {
+			info->is_gaming_traffic = 1;
+			info->is_low_latency = 1;
+			info->network_type = NETWORK_TYPE_GAMING;
+		} else if (type != NETWORK_TYPE_UNKNOWN && info->network_type == NETWORK_TYPE_UNKNOWN) {
+			info->network_type = type;
+		}
 
 		/* TIER 0: Estimate network I/O frequency (Hz) - EMA smoothing
 		 * Only calculate if delta is reasonable (< 1 second) */
@@ -213,7 +220,7 @@ int BPF_PROG(detect_network_udp_send, void *sock, void *msg, size_t size)
 {
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&network_detect_udp_calls, 1, __ATOMIC_RELAXED);
-	register_network_thread(tid, NETWORK_TYPE_UDP);
+	register_network_thread(tid, NETWORK_TYPE_GAMING);
 	return 0;
 }
 

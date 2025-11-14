@@ -36,6 +36,31 @@ extern volatile u64 nr_input_force_dispatch_late;
 extern volatile u64 input_force_dispatch_latency_ns;
 extern volatile u64 input_force_dispatch_latency_max_ns;
 
+#define NAPI_SCAN_MAX 32
+
+static __always_inline s32 find_recent_napi_cpu(u64 now)
+{
+	if (unlikely(!time_before(now, napi_until_global)))
+		return -1;
+
+	s32 best_cpu = -1;
+	u64 best_ts = 0;
+
+	for (int i = 0; i < NAPI_SCAN_MAX && i < MAX_CPUS; i++) {
+		u64 ts = napi_last_softirq_ns[i];
+		if (ts == 0)
+			continue;
+		if (!time_before(now, ts + NAPI_PREFER_TIMEOUT_NS))
+			continue;
+		if (ts > best_ts) {
+			best_ts = ts;
+			best_cpu = i;
+		}
+	}
+
+	return best_cpu;
+}
+
 /**
  * is_input_active_cpu_now - Check if CPU is in active input window
  * @cpu: CPU ID to check
