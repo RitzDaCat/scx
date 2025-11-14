@@ -106,8 +106,9 @@ int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned i
     /* TIER 1: Map update - only executed for audio ioctls (~0.1% of ioctls)
      * Cache task pointer for front-running in scheduler hot path */
     u32 tgid = (u32)p->tgid;
+    u32 tid = (u32)p->pid;
     u64 val = (u64)(unsigned long)p;
-    bpf_map_update_elem(&audio_thread_ptr_map, &tgid, &val, BPF_ANY);
+    bpf_map_update_elem(&audio_thread_ptr_map, &tid, &val, BPF_ANY);
 
     /* Ensure task context exists so we can stamp classification immediately */
     struct task_ctx *tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -133,14 +134,12 @@ int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned i
         }
     }
 
-    u32 tid = (u32)p->pid;
-    u8 one = 1;
-
     /* Foreground process → game audio, otherwise system audio */
     u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
     bool is_foreground = (fg_tgid != 0) && (tgid == fg_tgid);
 
     if (is_foreground) {
+        u8 one = 1;
         bpf_map_update_elem(&game_audio_threads_map, &tid, &one, BPF_ANY);
         bpf_map_delete_elem(&system_audio_threads_map, &tid);
         if (!tctx->is_game_audio && !tctx->is_background) {
@@ -151,9 +150,19 @@ int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned i
             recompute_boost_shift(tctx);
         }
     } else {
+        u8 one = 1;
         bpf_map_update_elem(&system_audio_threads_map, &tid, &one, BPF_ANY);
         bpf_map_delete_elem(&game_audio_threads_map, &tid);
-        bpf_map_update_elem(&system_audio_tgids_map, &tgid, &one, BPF_ANY);
+        struct system_audio_entry *entry = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
+        if (entry) {
+            __atomic_fetch_add(&entry->refcount, 1, __ATOMIC_RELAXED);
+        } else {
+            struct system_audio_entry init = {
+                .refcount = 1,
+                ._pad = 0,
+            };
+            bpf_map_update_elem(&system_audio_tgids_map, &tgid, &init, BPF_ANY);
+        }
         if (!tctx->is_system_audio && !tctx->is_background) {
             tctx->is_system_audio = 1;
             apply_class_boost(tctx, 1);

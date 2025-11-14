@@ -221,6 +221,11 @@ struct engine_profile_entry {
 	u64 last_updated_ns;		/* Timestamp for aging */
 };
 
+struct system_audio_entry {
+	u32 refcount;
+	u32 _pad;
+};
+
 /* Task storage */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -255,10 +260,10 @@ struct {
  * different CPUs and need to see consistent state.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 256);  /* Support up to 256 audio servers */
 	__type(key, u32);          /* TGID */
-	__type(value, u8);         /* 1 = audio server, 0 = not */
+	__type(value, struct system_audio_entry);
 } system_audio_tgids_map SEC(".maps");
 
 /* GPU vendor tracking per game process (TGID → vendor) */
@@ -350,18 +355,11 @@ struct {
 	__uint(max_entries, 64);  /* Support up to 64 concurrent game processes */
 } graphics_api_map SEC(".maps");
 
-/* WAKEUP CHAIN FRONT-RUN: Audio thread task_struct pointer storage
- * Stores a pointer to the main audio server thread (PipeWire/PulseAudio)
- * for instant force dispatch on hardware IRQ wakeup.
- *
- * PERFORMANCE HIERARCHY: Hash map (Tier 3, 30-60ns) - necessary for global access
- * Key: TGID (thread group ID) of the audio server process
- * Value: Pointer (u64) to the audio thread's task_struct
- */
+/* Audio thread task_struct pointers keyed by TID for fast force dispatch. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16);   /* Support up to 16 concurrent audio servers */
-	__type(key, u32);           /* TGID */
+	__uint(max_entries, 1024);
+	__type(key, u32);           /* TID */
 	__type(value, u64);         /* task_struct pointer of audio thread */
 } audio_thread_ptr_map SEC(".maps");
 
