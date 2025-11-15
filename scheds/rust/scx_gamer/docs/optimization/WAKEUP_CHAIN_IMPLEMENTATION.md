@@ -8,7 +8,7 @@
 
 ## Implementation Summary
 
-Successfully implemented **Approach 1: Compositor Wake Detection** to break the wakeup chain by force-dispatching game threads immediately when compositor wakes, achieving Approach 1's timing goal.
+Successfully implemented **Approach 1: Compositor Wake Detection** to break the wakeup chain by force-dispatching game threads immediately when compositor wakes, achieving Approach 1's timing goal. The scheduler now routes this cold logic through a dedicated BPF tail program, keeping the hot enqueue path minimal while retaining full functionality.
 
 ---
 
@@ -16,11 +16,11 @@ Successfully implemented **Approach 1: Compositor Wake Detection** to break the 
 
 ### Components Added
 
-1. **`input_arrived_for_game` Map** (Shared Array)
-   - Type: `BPF_MAP_TYPE_ARRAY` (shared, Tier 3: 100-300ns)
-   - Key: 0 (single global entry)
-   - Value: Timestamp (u64) when input arrived, or 0
-   - **Why Shared:** Input arrives on different CPU than compositor/game, so per-CPU won't work
+1. **`hotpath_signals` Shared BSS**
+   - Layout: `struct hotpath_signals { volatile u64 input_ns[MAX_CPUS]; volatile u64 compositor_ns; }`
+   - Access: Direct loads/stores (Tier 0), no helper overhead
+   - Per-CPU perspective preserved by indexing `input_ns` with target CPU ID
+   - **Why BSS:** Removes shared map contention and helper latency while still allowing cross-CPU signaling
 
 2. **`input_handler_pid_map` Map** (Per-CPU Array)
    - Type: `BPF_MAP_TYPE_PERCPU_ARRAY` (Tier 1: 20-50ns)
@@ -37,12 +37,10 @@ Successfully implemented **Approach 1: Compositor Wake Detection** to break the 
 **Location:** `main.bpf.c:1682` (`input_event_raw`)
 
 ```c
-/* When input arrives for game, set flag */
+/* When input arrives for game, stamp target CPU directly */
 u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
-if (fg_tgid != 0) {
-    u32 key = 0;
-    bpf_map_update_elem(&input_arrived_for_game, &key, &now, BPF_ANY);
-}
+if (fg_tgid != 0 && target_cpu >= 0 && target_cpu < MAX_CPUS)
+    hotpath_signals.input_ns[target_cpu] = now;
 ```
 
 **Timing:** ~10µs from hardware input
@@ -56,16 +54,14 @@ if (fg_tgid != 0) {
 ```c
 bool is_compositor = (tctx && tctx->is_compositor) || is_compositor_name(p->comm);
 if (is_compositor) {
-    u32 key = 0;
-    u64 *input_time = bpf_map_lookup_elem(&input_arrived_for_game, &key);
+    u64 input_time = hotpath_signals.input_ns[prev_cpu];
     
-    if (input_time && *input_time != 0 && (now - *input_time) < 1000000) {
+    if (input_time != 0 && (now - input_time) < 1000000) {
         /* Input arrived within last 1ms - kick CPUs to encourage faster dispatch */
         s32 current_cpu = bpf_get_smp_processor_id();
         scx_bpf_kick_cpu(current_cpu, SCX_KICK_IDLE);
-        if (prev_cpu >= 0 && prev_cpu != current_cpu) {
+        if (prev_cpu >= 0 && prev_cpu != current_cpu)
             scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
-        }
     }
 }
 ```
@@ -84,10 +80,9 @@ if (is_compositor) {
 u32 fg_tgid_check = get_fg_tgid();
 bool is_game_thread = fg_tgid_check && ((u32)p->tgid == fg_tgid_check);
 if (is_game_thread && tctx && tctx->is_input_handler) {
-    u32 key = 0;
-    u64 *input_time = bpf_map_lookup_elem(&input_arrived_for_game, &key);
+    u64 input_time = hotpath_signals.input_ns[prev_cpu];
     
-    if (input_time && *input_time != 0 && (now - *input_time) < 1000000) {
+    if (input_time != 0 && (now - input_time) < 1000000) {
         /* Input arrived recently - force dispatch NOW */
         cpu = pick_idle_cpu_cached(p, prev_cpu, enq_flags, true, &cache);
         if (cpu >= 0) {
@@ -95,8 +90,7 @@ if (is_game_thread && tctx && tctx->is_input_handler) {
             wakeup_cpu(cpu);
             
             /* Clear flag */
-            u64 zero = 0;
-            bpf_map_update_elem(&input_arrived_for_game, &key, &zero, BPF_ANY);
+            hotpath_signals.input_ns[prev_cpu] = 0;
             
             return;  /* INSTANT RETURN - bypass normal enqueue path */
         }
@@ -158,7 +152,7 @@ bpf_map_update_elem(&input_handler_pid_map, &key, &pid, BPF_ANY);
 
 ### 1. Shared Map vs Per-CPU Map
 
-**Decision:** Use shared `BPF_MAP_TYPE_ARRAY` for `input_arrived_for_game`
+**Decision:** Promote wake flags into the shared `hotpath_signals` BSS (no helper overhead)
 
 **Reasoning:**
 - Input arrives on CPU X (USB interrupt)

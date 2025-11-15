@@ -4,8 +4,8 @@
 // Detects CPU package temperature and socket power via hwmon sensors (zenpower/k10temp).
 // Applies hysteresis to avoid oscillation and emits coarse power-hint levels for BPF.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -37,12 +37,25 @@ pub struct PowerMonitor {
     last_change: Instant,
 }
 
-#[derive(Clone)]
 struct Sensor {
     path: PathBuf,
     label: Option<String>,
     scale: f64,
     kind: SensorKind,
+    file: File,
+}
+
+impl Clone for Sensor {
+    fn clone(&self) -> Self {
+        let file = File::open(&self.path).expect("failed to reopen hwmon sensor");
+        Self {
+            path: self.path.clone(),
+            label: self.label.clone(),
+            scale: self.scale,
+            kind: self.kind,
+            file,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -125,34 +138,14 @@ impl PowerMonitor {
 
         let temp = self
             .temp_sensor
-            .as_ref()
+            .as_mut()
             .and_then(|sensor| sensor.read_value().ok());
         let power = self
             .power_sensor
-            .as_ref()
+            .as_mut()
             .and_then(|sensor| sensor.read_value().ok());
 
-        let mut desired = self.determine_level(temp, power);
-        let duration_ms = hint_duration(desired);
-
-        if desired < self.last_level {
-            let should_hold = match self.last_level {
-                2 => {
-                    let temp_hold = temp.map_or(false, |t| t >= TEMP_RELEASE2);
-                    let power_hold = power.map_or(false, |p| p >= POWER_RELEASE2);
-                    temp_hold || power_hold
-                }
-                1 => {
-                    let temp_hold = temp.map_or(false, |t| t >= TEMP_RELEASE1);
-                    let power_hold = power.map_or(false, |p| p >= POWER_RELEASE1);
-                    temp_hold || power_hold
-                }
-                _ => false,
-            };
-            if should_hold {
-                desired = self.last_level;
-            }
-        }
+        let desired = self.apply_hysteresis(self.determine_level(temp, power), temp, power);
 
         if desired != self.last_level {
             self.last_level = desired;
@@ -182,11 +175,12 @@ impl PowerMonitor {
 
             return Some(PowerHint {
                 level: desired,
-                duration_ms,
+                duration_ms: hint_duration(desired),
             });
         }
 
         if desired > 0 {
+            let duration_ms = hint_duration(desired);
             let refresh = Duration::from_millis((duration_ms.max(1) as u64) / 2).max(MIN_REFRESH_INTERVAL);
             if now.duration_since(self.last_change) >= refresh {
                 self.last_change = now;
@@ -220,12 +214,36 @@ impl PowerMonitor {
 
         level
     }
+
+    fn apply_hysteresis(&self, desired: u32, temp: Option<f64>, power: Option<f64>) -> u32 {
+        if desired < self.last_level {
+            let should_hold = match self.last_level {
+                2 => {
+                    let temp_hold = temp.map_or(false, |t| t >= TEMP_RELEASE2);
+                    let power_hold = power.map_or(false, |p| p >= POWER_RELEASE2);
+                    temp_hold || power_hold
+                }
+                1 => {
+                    let temp_hold = temp.map_or(false, |t| t >= TEMP_RELEASE1);
+                    let power_hold = power.map_or(false, |p| p >= POWER_RELEASE1);
+                    temp_hold || power_hold
+                }
+                _ => false,
+            };
+            if should_hold {
+                return self.last_level;
+            }
+        }
+        desired
+    }
 }
 
 impl Sensor {
-    fn read_value(&self) -> io::Result<f64> {
-        let raw = fs::read_to_string(&self.path)?;
-        let value: f64 = raw.trim().parse::<f64>().map_err(|e| {
+    fn read_value(&mut self) -> io::Result<f64> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut buf = String::with_capacity(16);
+        self.file.read_to_string(&mut buf)?;
+        let value: f64 = buf.trim().parse::<f64>().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Failed to parse {}: {}", self.path.display(), e),
@@ -247,6 +265,78 @@ fn hint_duration(level: u32) -> u32 {
         1 => 3_000,
         2 => 6_000,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant, SystemTime};
+
+    fn unique_path(prefix: &str) -> PathBuf {
+        let mut path = env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("{}_{}_{}", prefix, std::process::id(), nanos));
+        path
+    }
+
+    #[test]
+    fn stats_refresh_recompute_duration() {
+        let power_path = unique_path("pm_power");
+        let temp_path = unique_path("pm_temp");
+
+        fs::write(&power_path, b"130\n").unwrap();
+        fs::write(&temp_path, b"25\n").unwrap();
+
+        let power_sensor = Sensor {
+            path: power_path.clone(),
+            label: None,
+            scale: 1.0,
+            kind: SensorKind::Power,
+            file: File::open(&power_path).unwrap(),
+        };
+        let temp_sensor = Sensor {
+            path: temp_path.clone(),
+            label: None,
+            scale: 1.0,
+            kind: SensorKind::Temperature,
+            file: File::open(&temp_path).unwrap(),
+        };
+
+        let mut monitor = PowerMonitor {
+            temp_sensor: Some(temp_sensor),
+            power_sensor: Some(power_sensor),
+            last_level: 2,
+            last_sample: Instant::now() - SAMPLE_INTERVAL,
+            last_change: Instant::now() - Duration::from_secs(10),
+        };
+
+        let hint = monitor.poll().expect("expected power hint");
+        assert_eq!(hint.level, 2);
+        assert_eq!(hint.duration_ms, hint_duration(2));
+
+        let _ = fs::remove_file(power_path);
+        let _ = fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn hysteresis_returns_last_level_when_hold_triggers() {
+        let monitor = PowerMonitor {
+            temp_sensor: None,
+            power_sensor: None,
+            last_level: 2,
+            last_sample: Instant::now(),
+            last_change: Instant::now(),
+        };
+
+        let desired = monitor.apply_hysteresis(1, None, Some(POWER_RELEASE2));
+        assert_eq!(desired, 2);
     }
 }
 
@@ -329,12 +419,15 @@ fn gather_hwmon_sensors(
         let suffix = &name[prefix.len()..name.len() - "_input".len()];
         let label_path = base.join(format!("{prefix}{suffix}_label"));
         let label = fs::read_to_string(&label_path).ok().map(|s| s.trim().to_string());
-        sensors.push(Sensor {
-            path,
-            label,
-            scale,
-            kind,
-        });
+        if let Ok(file) = File::open(&path) {
+            sensors.push(Sensor {
+                path,
+                label,
+                scale,
+                kind,
+                file,
+            });
+        }
     }
 
     sensors

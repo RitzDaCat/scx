@@ -107,13 +107,15 @@ int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned i
      * Cache task pointer for front-running in scheduler hot path */
     u32 tgid = (u32)p->tgid;
     u32 tid = (u32)p->pid;
-    u64 val = (u64)(unsigned long)p;
-    bpf_map_update_elem(&audio_thread_ptr_map, &tid, &val, BPF_ANY);
 
     /* Ensure task context exists so we can stamp classification immediately */
     struct task_ctx *tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
     if (!tctx)
         return 0;
+
+    u64 start_time = BPF_CORE_READ(p, start_time);
+    if (start_time)
+        tctx->task_cookie = start_time;
 
     /* Harvest runtime parameters (sample rate / buffer size) when available */
     struct snd_pcm_file *pcm_file = BPF_CORE_READ(filp, private_data);

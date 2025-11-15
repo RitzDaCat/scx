@@ -4,7 +4,8 @@
 // Provides coarse queue busy signal so TaskGraph borrowing can react instantly
 // when the GPU pipeline drains.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,16 +14,17 @@ use log::info;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(30);
 
 pub struct GpuQueueMonitor {
-    busy_path: PathBuf,
+    busy_file: File,
     last_sample: Instant,
 }
 
 impl GpuQueueMonitor {
     pub fn new() -> Option<Self> {
         let busy_path = discover_busy_path()?;
+        let busy_file = File::open(&busy_path).ok()?;
         info!("GPU queue monitor: using {}", busy_path.display());
         Some(Self {
-            busy_path,
+            busy_file,
             last_sample: Instant::now() - SAMPLE_INTERVAL,
         })
     }
@@ -35,8 +37,14 @@ impl GpuQueueMonitor {
         }
         self.last_sample = now;
 
-        let value = fs::read_to_string(&self.busy_path).ok()?;
-        let busy = value.trim().parse::<u32>().ok()?;
+        self.busy_file.seek(SeekFrom::Start(0)).ok()?;
+        let mut buf = [0u8; 32];
+        let read_len = self.busy_file.read(&mut buf).ok()?;
+        if read_len == 0 {
+            return None;
+        }
+        let value_str = std::str::from_utf8(&buf[..read_len]).ok()?.trim();
+        let busy = value_str.parse::<u32>().ok()?;
         Some(busy.min(100))
     }
 

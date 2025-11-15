@@ -57,6 +57,8 @@ build_release() {
     clean_build
     
     echo "Step 3: Building scx_gamer (release)..."
+    export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native -C codegen-units=1 -C embed-bitcode=yes"
+    export CARGO_PROFILE_RELEASE_PACKAGE_SCX_GAMER_LTO=fat
     cargo build -p scx_gamer --release
     
     echo
