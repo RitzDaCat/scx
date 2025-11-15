@@ -1,5 +1,7 @@
 # Wakeup Chain Front-Run: Approach Comparison
 
+> **Update (2025-11-15):** The production implementation now stores wake flags in the `hotpath_signals` shared BSS (no helper calls) instead of the `input_arrived_for_game` map described below. This document keeps the original evaluation for reference; see `WAKEUP_CHAIN_IMPLEMENTATION.md` for the shipping layout.
+
 **Date:** 2025-11-05  
 **Question:** Which approach is faster - Compositor Wake Detection vs Direct Game Thread Dispatch?
 

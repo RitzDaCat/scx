@@ -53,6 +53,12 @@ enum consts {
     NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),       /* 1,000,000,000 ns */
 };
 
+enum tailcall_slot {
+	TAILCALL_SLOT_SELECT_CPU = 0,
+	TAILCALL_SLOT_ENQUEUE_SIGNAL = 1,
+	TAILCALL_SLOT__MAX,
+};
+
 /*
  * Preferred core cache age threshold
  * TIER 0: Compile-time constant (25ms = 25,000,000 ns)

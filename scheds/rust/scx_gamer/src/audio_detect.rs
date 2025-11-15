@@ -8,12 +8,15 @@
 
 use std::fs;
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use inotify::{Inotify, WatchMask, EventMask};
 use log::{info, warn};
 use nix::fcntl;
+use rustc_hash::FxHashSet;
 
 /// Audio server process name patterns used for both initial scan and incremental detection
 const AUDIO_SERVER_NAMES: &[&str] = &[
@@ -26,6 +29,8 @@ const AUDIO_SERVER_NAMES: &[&str] = &[
     "jackdbus",
 ];
 
+const FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Event-driven audio server detector using inotify
 /// Watches /proc for CREATE/DELETE events to instantly detect audio server processes
 /// Eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
@@ -33,6 +38,9 @@ pub struct AudioServerDetector {
     inotify: Option<Inotify>,
     inotify_fd: Option<i32>,
     pub shutdown: Arc<AtomicBool>,  // Made public so run() can update it
+    last_scan: Instant,
+    active_audio_pids: FxHashSet<u32>,
+    proc_root: PathBuf,
 }
 
 impl AudioServerDetector {
@@ -90,6 +98,9 @@ impl AudioServerDetector {
             inotify: inotify_instance,
             inotify_fd,
             shutdown,
+            last_scan: Instant::now(),
+            active_audio_pids: FxHashSet::default(),
+            proc_root: PathBuf::from("/proc"),
         }
     }
 
@@ -100,7 +111,10 @@ impl AudioServerDetector {
 
     /// Process inotify events and update BPF map
     /// Returns true if audio server map was updated
-    pub fn process_events(&mut self, update_map_fn: impl Fn(u32, bool) -> bool) -> bool {
+    pub fn process_events<F>(&mut self, mut update_map_fn: F) -> bool
+    where
+        F: FnMut(u32, bool) -> bool,
+    {
         let mut updated = false;
 
         if let Some(ref mut inotify_instance) = self.inotify {
@@ -113,16 +127,16 @@ impl AudioServerDetector {
                                 if let Some(name_str) = name.to_str() {
                                     if let Ok(pid) = name_str.parse::<u32>() {
                                         if event.mask.contains(EventMask::CREATE) {
-                                            // New process created - check if it's an audio server
                                             if self.is_audio_server(pid) {
                                                 if update_map_fn(pid, true) {
+                                                    self.active_audio_pids.insert(pid);
                                                     updated = true;
                                                     info!("Audio detection: Registered audio server PID {} (event-driven)", pid);
                                                 }
                                             }
                                         } else if event.mask.contains(EventMask::DELETE) {
-                                            // Process deleted - remove from map
                                             if update_map_fn(pid, false) {
+                                                self.active_audio_pids.remove(&pid);
                                                 updated = true;
                                                 info!("Audio detection: Unregistered audio server PID {} (event-driven)", pid);
                                             }
@@ -144,6 +158,16 @@ impl AudioServerDetector {
             }
         }
 
+        if self.inotify.is_none()
+            && self.last_scan.elapsed() >= FALLBACK_SCAN_INTERVAL
+            && !self.shutdown.load(Ordering::Relaxed)
+        {
+            if self.fallback_scan(&mut update_map_fn) {
+                updated = true;
+            }
+            self.last_scan = Instant::now();
+        }
+
         updated
     }
 
@@ -152,11 +176,8 @@ impl AudioServerDetector {
     /// PERF: Uses stack-allocated path buffer to avoid heap allocation
     /// Byte slice comparison is faster than String comparison (~80-150ns savings per check)
     fn is_audio_server(&self, pid: u32) -> bool {
-        // PERF: Stack-allocated path buffer (max PID: 10 digits + "/proc//comm\0" = 32 bytes)
-        // Eliminates heap allocation from format!() (~50-100ns savings)
-        // Use format! with small string (acceptable for event-driven calls)
-        let comm_path = format!("/proc/{}/comm", pid);
-        
+        let comm_path = self.proc_root.join(pid.to_string()).join("comm");
+
         match fs::read(&comm_path) {
             Ok(mut bytes) => {
                 // Trim null bytes and newlines from end (proc files often have trailing nulls)
@@ -178,10 +199,13 @@ impl AudioServerDetector {
 
     /// Initial scan for already-running audio servers
     /// Called once at startup to populate map with existing processes
-    pub fn initial_scan(&self, update_map_fn: impl Fn(u32, bool) -> bool) -> usize {
+    pub fn initial_scan<F>(&mut self, mut update_map_fn: F) -> usize
+    where
+        F: FnMut(u32, bool) -> bool,
+    {
         let mut registered_count = 0;
 
-        if let Ok(entries) = fs::read_dir("/proc") {
+        if let Ok(entries) = fs::read_dir(&self.proc_root) {
             for entry in entries.flatten() {
                 if self.shutdown.load(Ordering::Relaxed) {
                     break;
@@ -196,6 +220,7 @@ impl AudioServerDetector {
                 if self.is_audio_server(pid) {
                     if update_map_fn(pid, true) {
                         registered_count += 1;
+                        self.active_audio_pids.insert(pid);
                         info!("Audio detection: Registered audio server PID {} (initial scan)", pid);
                     }
                 }
@@ -207,6 +232,93 @@ impl AudioServerDetector {
         }
 
         registered_count
+    }
+
+    fn fallback_scan<F>(&mut self, update_map_fn: &mut F) -> bool
+    where
+        F: FnMut(u32, bool) -> bool,
+    {
+        let mut changed = false;
+        let mut new_active = FxHashSet::default();
+        if let Ok(entries) = fs::read_dir(&self.proc_root) {
+            for entry in entries.flatten() {
+                if self.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let pid_str = entry.file_name();
+                let pid = match pid_str.to_string_lossy().parse::<u32>() {
+                    Ok(pid) => pid,
+                    Err(_) => continue,
+                };
+
+                if self.is_audio_server(pid) {
+                    let was_active = self.active_audio_pids.contains(&pid);
+                    new_active.insert(pid);
+                    if !was_active {
+                        if update_map_fn(pid, true) {
+                            changed = true;
+                            info!("Audio detection (fallback): Registered PID {}", pid);
+                        }
+                    }
+                }
+            }
+        }
+
+        for pid in self.active_audio_pids.difference(&new_active) {
+            if update_map_fn(*pid, false) {
+                changed = true;
+                info!("Audio detection (fallback): Unregistered PID {}", pid);
+            }
+        }
+
+        self.active_audio_pids = new_active;
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    #[test]
+    fn fallback_registers_and_unregisters_audio_servers() {
+        let tmp = tempdir().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut detector = AudioServerDetector::new(shutdown);
+        detector.inotify = None;
+        detector.proc_root = tmp.path().to_path_buf();
+
+        let pid_dir = tmp.path().join("4242");
+        fs::create_dir(&pid_dir).unwrap();
+        fs::write(pid_dir.join("comm"), b"pipewire\n").unwrap();
+
+        detector.last_scan = Instant::now() - FALLBACK_SCAN_INTERVAL;
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let updated = detector.process_events(|pid, register| {
+            events_clone.lock().unwrap().push((pid, register));
+            true
+        });
+        assert!(updated);
+        assert_eq!(events.lock().unwrap().as_slice(), &[(4242, true)]);
+
+        fs::remove_dir_all(&pid_dir).unwrap();
+        detector.last_scan = Instant::now() - FALLBACK_SCAN_INTERVAL;
+
+        let events_clone = Arc::clone(&events);
+        let updated = detector.process_events(|pid, register| {
+            events_clone.lock().unwrap().push((pid, register));
+            true
+        });
+        assert!(updated);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[(4242, true), (4242, false)]
+        );
     }
 }
 

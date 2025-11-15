@@ -54,7 +54,7 @@ use rustc_hash::FxHashSet;
 use std::ffi::c_int;
 // removed: userspace /proc/stat util sampling
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -100,6 +100,14 @@ const SCHEDULER_NAME: &str = "scx_gamer";
 const CCD_CLASS_UNKNOWN: u8 = 0;
 const CCD_CLASS_CACHE: u8 = 1;
 const CCD_CLASS_FREQ: u8 = 2;
+
+fn stats_interval_from_secs(value: f64) -> Option<Duration> {
+    if !value.is_finite() || value <= 0.0 {
+        None
+    } else {
+        Some(Duration::from_secs_f64(value))
+    }
+}
 
 // Cache CPU detection to avoid repeated /proc/cpuinfo reads
 // Gracefully handle detection failures with default fallback
@@ -481,6 +489,7 @@ struct Scheduler<'a> {
     dispatch_event_ringbuf: Option<libbpf_rs::RingBuffer<'a>>,  // Event-driven dispatch events for watchdog (eliminates polling)
     debug_api_state: Option<Arc<debug_api::DebugApiState>>,  // Debug API state for external metric access
     audio_detector: Option<audio_detect::AudioServerDetector>,  // Event-driven audio server detection (inotify)
+    audio_update_buffer: Vec<(u32, bool)>,
     #[allow(dead_code)]  // Held for Drop behavior - keeps affinity override thread running
     affinity_override: Option<affinity_override::AffinityOverride>,  // CPU affinity override system (proactive)
     #[allow(dead_code)]  // Used by macros (uei_exited!, uei_report!) which use identifier name, not direct access
@@ -494,6 +503,7 @@ struct Scheduler<'a> {
     cpu_util_history: std::collections::VecDeque<(Instant, u64)>,  // (timestamp, cpu_util)
     frame_rate_history: std::collections::VecDeque<(Instant, f64)>,  // (timestamp, frame_hz_est)
     last_migration_count: u64,  // Last migration count for delta calculation
+    tracked_game_threads: FxHashSet<u32>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -741,8 +751,8 @@ impl<'a> Scheduler<'a> {
     /// Register all threads of the detected game in game_threads_map
     /// This enables BPF thread runtime tracking for accurate role detection
     /// PERF: Uses stack-allocated path buffer to avoid heap allocation
-    fn register_game_threads(skel: &BpfSkel, tgid: u32) {
-        let game_threads_map = &skel.maps.game_threads_map;
+    fn register_game_threads(&mut self, tgid: u32) {
+        let game_threads_map = &self.skel.maps.game_threads_map;
         
         // PERF: Stack-allocated path buffer (max PID: 10 digits + "/proc//task\0" = 32 bytes)
         // Eliminates heap allocation from format!() (~100-200ns savings)
@@ -783,22 +793,59 @@ impl<'a> Scheduler<'a> {
         };
 
         let mut thread_count = 0;
+        let mut new_threads = FxHashSet::default();
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
                 if let Ok(tid_str) = entry.file_name().into_string() {
                     if let Ok(tid) = tid_str.parse::<u32>() {
                         let marker: u8 = 1;
                         // Register thread in BPF map for tracking
-                        if game_threads_map.update(&tid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY).is_ok() {
+                        if game_threads_map
+                            .update(&tid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY)
+                            .is_ok()
+                        {
                             thread_count += 1;
+                            new_threads.insert(tid);
                         }
                     }
                 }
             }
         }
 
+        // Remove stale entries
+        let mut stale_tids = Vec::new();
+        for tid in &self.tracked_game_threads {
+            if !new_threads.contains(tid) {
+                stale_tids.push(*tid);
+            }
+        }
+        for tid in stale_tids {
+            let _ = game_threads_map.delete(&tid.to_ne_bytes());
+        }
+
+        self.tracked_game_threads = new_threads;
+
         if thread_count > 0 {
             info!("Thread tracking: Registered {} game threads for TGID {}", thread_count, tgid);
+        }
+    }
+
+    fn clear_tracked_game_threads(&mut self) {
+        let game_threads_map = &self.skel.maps.game_threads_map;
+        for tid in self.tracked_game_threads.drain() {
+            let _ = game_threads_map.delete(&tid.to_ne_bytes());
+        }
+    }
+
+    #[inline]
+    fn apply_system_audio_update(&mut self, pid: u32, register: bool) -> bool {
+        let map = &self.skel.maps.system_audio_tgids_map;
+        let marker: u8 = if register { 1 } else { 0 };
+        if register {
+            map.update(&pid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY)
+                .is_ok()
+        } else {
+            map.delete(&pid.to_ne_bytes()).is_ok()
         }
     }
 
@@ -1209,6 +1256,22 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, gamer_ops, uei)?;
 
+        {
+            let tail_map = &skel.maps.tailcall_map;
+
+            let select_idx =
+                (bpf_intf::tailcall_slot_TAILCALL_SLOT_SELECT_CPU as u32).to_ne_bytes();
+            let select_fd = skel.progs.gamer_select_cpu_tail.as_fd().as_raw_fd() as u32;
+            tail_map
+                .update(&select_idx, &select_fd.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .context("failed to populate select_cpu tailcall slot")?;
+
+            // NOTE: gamer_enqueue no longer uses a tail call; it directly invokes
+            // gamer_enqueue_slowpath. We intentionally do NOT populate the
+            // ENQUEUE_SIGNAL tailcall slot here to avoid kernel EINVAL errors
+            // when attempting to tailcall between incompatible program types.
+        }
+
         // Enable primary scheduling domain, if defined.
         if primary_cpus.len() < *NR_CPU_IDS {
             for cpu in primary_cpus {
@@ -1224,7 +1287,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize event-driven audio server detector (inotify-based)
         // This eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
-        let audio_detector = audio_detect::AudioServerDetector::new(Arc::new(AtomicBool::new(false))); // shutdown set in run()
+        let mut audio_detector = audio_detect::AudioServerDetector::new(Arc::new(AtomicBool::new(false))); // shutdown set in run()
         
         // Initialize CPU affinity override system (proactive)
         // Detects and resets custom affinities for optimal task placement
@@ -1473,6 +1536,7 @@ impl<'a> Scheduler<'a> {
             dispatch_event_ringbuf: None,  // Initialized after epoll setup
             debug_api_state: None,  // Injected from main() if enabled
             audio_detector: Some(audio_detector),
+            audio_update_buffer: Vec::with_capacity(32),
             affinity_override,  // CPU affinity override system (proactive)
             uei: UserExitInfo::default(),
             power_monitor,
@@ -1484,6 +1548,7 @@ impl<'a> Scheduler<'a> {
             cpu_util_history: std::collections::VecDeque::with_capacity(100),
             frame_rate_history: std::collections::VecDeque::with_capacity(100),
             last_migration_count: 0,
+            tracked_game_threads: FxHashSet::default(),
         };
 
         Ok(scheduler)
@@ -1681,8 +1746,8 @@ impl<'a> Scheduler<'a> {
             // Note: These may be 0 if hooks aren't attached or functions don't exist
             network_detect_send_calls: 0,  // TODO: Expose from BPF if accessible
             network_detect_recv_calls: 0,  // TODO: Expose from BPF if accessible
-            audio_detect_alsa_calls: 0,    // TODO: Expose from BPF if accessible
-            audio_detect_usb_calls: 0,     // TODO: Expose from BPF if accessible
+            audio_detect_alsa_calls: 0,
+            audio_detect_usb_calls: 0,
 
             // Fentry hook stats (cumulative totals from kernel hooks)
             fentry_total_events: fentry_total,
@@ -2474,6 +2539,26 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
+            if let Some(mut audio_det) = self.audio_detector.take() {
+                if audio_det.fd().is_none() {
+                    self.audio_update_buffer.clear();
+                    {
+                        let buffer = &mut self.audio_update_buffer;
+                        audio_det.process_events(|pid, register| {
+                            buffer.push((pid, register));
+                            true
+                        });
+                    }
+                    let mut updates = Vec::new();
+                    std::mem::swap(&mut updates, &mut self.audio_update_buffer);
+                    for (pid, register) in updates.drain(..) {
+                        let _ = self.apply_system_audio_update(pid, register);
+                    }
+                    self.audio_update_buffer = updates;
+                }
+                self.audio_detector = Some(audio_det);
+            }
+
             // Watchdog: auto-demote RT/DEADLINE if no scheduler progress
             if watchdog_enabled && !rt_demoted && last_watchdog_check.elapsed().as_secs() >= 1 {
                 if let Some(bss) = self.skel.maps.bss_data.as_ref() {
@@ -2586,7 +2671,9 @@ impl<'a> Scheduler<'a> {
 
                     // Populate game_threads_map for BPF thread tracking
                     if detected_tgid > 0 {
-                        Self::register_game_threads(&self.skel, detected_tgid);
+                        self.register_game_threads(detected_tgid);
+                    } else {
+                        self.clear_tracked_game_threads();
                     }
 
                     // Update ML collector with new game
@@ -2657,15 +2744,21 @@ impl<'a> Scheduler<'a> {
                     // PERF: Edge-triggered mode requires draining ALL events before returning
                     // More efficient while-let pattern: poll until buffer is empty
                     if let Some(ref mut rb) = self.input_ring_buffer {
-                        while let Ok(()) = rb.poll_once() {
-                            // Process events from the callback-incremented counter
-                            let (events_processed, _) = rb.process_events();
-                            if events_processed > 0 {
-                                ring_buffer_processing_count += events_processed as u64;
-                                ring_buffer_handled_input_this_cycle = true;
+                        loop {
+                            match rb.poll_once() {
+                                Ok(()) => {
+                                    // Process events from the callback-incremented counter
+                                    let (events_processed, _) = rb.process_events();
+                                    if events_processed > 0 {
+                                        ring_buffer_processing_count += events_processed as u64;
+                                        ring_buffer_handled_input_this_cycle = true;
+                                    }
+                                }
+                                Err(_) => {
+                                    // poll_once returns Err when the buffer is empty; exit the loop.
+                                    break;
+                                }
                             }
-                            // Loop continues while poll_once() succeeds (more events available)
-                            // Automatically terminates when buffer is empty (poll_once returns Err)
                         }
                     }
                     continue;  // Move to next epoll event
@@ -2673,21 +2766,22 @@ impl<'a> Scheduler<'a> {
 
                 // Handle audio detector events (event-driven audio server detection)
                 if tag == AUDIO_DETECTOR_TAG {
-                    // Audio detector has process events (CREATE/DELETE)
-                    if let Some(ref mut audio_det) = self.audio_detector {
-                        audio_det.process_events(|pid, register| {
-                            let system_audio_tgids_map = &self.skel.maps.system_audio_tgids_map;
-                            let marker: u8 = if register { 1 } else { 0 };
-                            if register {
-                                system_audio_tgids_map.update(
-                                    &pid.to_ne_bytes(),
-                                    &[marker],
-                                    libbpf_rs::MapFlags::ANY
-                                ).is_ok()
-                            } else {
-                                system_audio_tgids_map.delete(&pid.to_ne_bytes()).is_ok()
-                            }
-                        });
+                    if let Some(mut audio_det) = self.audio_detector.take() {
+                        self.audio_update_buffer.clear();
+                        {
+                            let buffer = &mut self.audio_update_buffer;
+                            audio_det.process_events(|pid, register| {
+                                buffer.push((pid, register));
+                                true
+                            });
+                        }
+                    let mut updates = Vec::new();
+                    std::mem::swap(&mut updates, &mut self.audio_update_buffer);
+                    for (pid, register) in updates.drain(..) {
+                            let _ = self.apply_system_audio_update(pid, register);
+                        }
+                    self.audio_update_buffer = updates;
+                        self.audio_detector = Some(audio_det);
                     }
                     continue;  // Move to next epoll event
                 }
@@ -3291,30 +3385,43 @@ fn main() -> Result<()> {
         None
     };
 
-    let stats_thread = if let Some(intv) = opts.monitor.or(opts.stats) {
-        let shutdown_copy = shutdown.clone();
-        Some(std::thread::spawn(move || {
-            let stats_interval = Duration::from_secs_f64(intv);
-            match stats::monitor(stats_interval, shutdown_copy) {
-                Ok(_) => {}
-                Err(e) => {
-                    log::warn!("stats monitor thread finished because of an error {}", e)
+    let stats_thread = match opts.monitor.or(opts.stats) {
+        Some(raw_intv) => {
+            match stats_interval_from_secs(raw_intv) {
+                Some(stats_interval) => {
+                    let shutdown_copy = shutdown.clone();
+                    Some(std::thread::spawn(move || {
+                        match stats::monitor(stats_interval, shutdown_copy) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                log::warn!("stats monitor thread finished because of an error {}", e)
+                            }
+                        }
+                    }))
+                }
+                None => {
+                    log::info!("Stats monitoring disabled (interval {}s)", raw_intv);
+                    None
                 }
             }
-        }))
-    } else {
-        None
+        }
+        None => None,
     };
 
     // Input watch mode: spawn watcher alongside scheduler so stats server is available
-    let watch_thread = if let Some(intv) = opts.watch_input {
-        let shutdown_copy = shutdown.clone();
-        Some(std::thread::spawn(move || {
-            let stats_interval = Duration::from_secs_f64(intv);
-            let _ = stats::monitor_watch_input(stats_interval, shutdown_copy);
-        }))
-    } else {
-        None
+    let watch_thread = match opts.watch_input.and_then(stats_interval_from_secs) {
+        Some(stats_interval) => {
+            let shutdown_copy = shutdown.clone();
+            Some(std::thread::spawn(move || {
+                let _ = stats::monitor_watch_input(stats_interval, shutdown_copy);
+            }))
+        }
+        None => {
+            if opts.watch_input.is_some() {
+                log::info!("Input watch disabled (interval {:?}s)", opts.watch_input);
+            }
+            None
+        }
     };
 
     // Monitor-only mode: just run the stats thread
@@ -3435,3 +3542,26 @@ struct RawInputStats {
     keyboard_lane_triggers: u64,
     ringbuf_overflow_events: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_interval_from_secs_enables_positive_values() {
+        let duration = stats_interval_from_secs(1.5).expect("interval should be enabled");
+        assert_eq!(duration.as_millis(), 1500);
+    }
+
+    #[test]
+    fn stats_interval_from_secs_disables_zero() {
+        assert!(stats_interval_from_secs(0.0).is_none());
+    }
+
+    #[test]
+    fn stats_interval_from_secs_disables_negative_or_nan() {
+        assert!(stats_interval_from_secs(-5.0).is_none());
+        assert!(stats_interval_from_secs(f64::NAN).is_none());
+    }
+}
+

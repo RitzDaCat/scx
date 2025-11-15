@@ -48,6 +48,7 @@
 
 use crossbeam::queue::SegQueue;
 use log::warn;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Input event structure for ring buffer
@@ -131,7 +132,9 @@ pub struct InputRingBufferStats {
     /// Minimum latency observed in nanoseconds
     pub min_latency_ns: u64,
     /// Latency samples for percentile calculation (userspace Instant-based)
-    pub latency_samples: Vec<u64>,
+    pub latency_samples: VecDeque<u64>,
+    /// Running sum of latency samples (ns) for constant-time average
+    pub latency_sum_ns: u128,
     /// Total events dropped due to backpressure
     pub queue_dropped_total: u64,
     /// High-watermark of queue depth observed
@@ -406,8 +409,8 @@ impl InputRingBufferManager {
             // For end-to-end latency, see BPF timestamp in GamerInputEvent struct.
             // Use checked_duration_since to handle clock adjustments gracefully
             // Clock adjustments (NTP, time travel, etc.) can cause capture_time > processing_start
-            let latency_ns = event_with_latency.capture_time
-                .checked_duration_since(processing_start)
+            let latency_ns = processing_start
+                .checked_duration_since(event_with_latency.capture_time)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);  // If clock went backwards, report 0 latency
             
@@ -419,9 +422,15 @@ impl InputRingBufferManager {
             if latency_ns > self.stats.max_latency_ns {
                 self.stats.max_latency_ns = latency_ns;
             }
-            self.stats.latency_samples.push(latency_ns);
-            if self.stats.latency_samples.len() > 1000 {
-                self.stats.latency_samples.drain(0..self.stats.latency_samples.len() - 1000);
+            self.stats.latency_sum_ns += latency_ns as u128;
+            self.stats.latency_samples.push_back(latency_ns);
+            if self.stats.latency_samples.len() > 1024 {
+                if let Some(removed) = self.stats.latency_samples.pop_front() {
+                    self.stats.latency_sum_ns = self
+                        .stats
+                        .latency_sum_ns
+                        .saturating_sub(removed as u128);
+                }
             }
             
             // Prevent unbounded work per batch
@@ -450,8 +459,8 @@ impl InputRingBufferManager {
         
         // Calculate average latency
         if !self.stats.latency_samples.is_empty() {
-            let sum: u64 = self.stats.latency_samples.iter().sum();
-            self.stats.avg_latency_ns = sum as f64 / self.stats.latency_samples.len() as f64;
+            self.stats.avg_latency_ns =
+                (self.stats.latency_sum_ns as f64) / self.stats.latency_samples.len() as f64;
         }
         
         (events_processed, has_input_activity)
@@ -464,7 +473,7 @@ impl InputRingBufferManager {
     /// # Returns
     /// * `(p50, p95, p99)` - 50th, 95th, and 99th percentiles in nanoseconds
     pub fn get_latency_percentiles(&self) -> (f64, f64, f64) {
-        self.calculate_percentiles(&self.stats.latency_samples)
+        self.calculate_percentiles()
     }
     
     /// Check if events are available in the ring buffer
@@ -492,13 +501,13 @@ impl InputRingBufferManager {
     /// 
     /// # Returns
     /// * `(p50, p95, p99)` - 50th, 95th, and 99th percentiles in nanoseconds
-    fn calculate_percentiles(&self, samples: &[u64]) -> (f64, f64, f64) {
-        if samples.is_empty() {
+    fn calculate_percentiles(&self) -> (f64, f64, f64) {
+        if self.stats.latency_samples.is_empty() {
             return (0.0, 0.0, 0.0);
         }
         
-        let mut sorted_samples = samples.to_vec();
-        sorted_samples.sort();
+        let mut sorted_samples: Vec<u64> = self.stats.latency_samples.iter().copied().collect();
+        sorted_samples.sort_unstable();
         
         let len = sorted_samples.len();
         let p50 = sorted_samples[len * 50 / 100] as f64;
@@ -534,6 +543,8 @@ impl Default for InputRingBufferManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
     
     #[test]
     fn test_gamer_input_event_classification() {
@@ -595,5 +606,21 @@ mod tests {
         assert_eq!(p50, 0.0);
         assert_eq!(p95, 0.0);
         assert_eq!(p99, 0.0);
+    }
+
+    #[test]
+    fn ring_buffer_latency_reports_positive_values() {
+        let mut manager = InputRingBufferManager::default();
+        manager.events_processed.store(1, Ordering::Relaxed);
+
+        let past = Instant::now() - Duration::from_millis(1);
+        manager.recent_events.push(EventWithLatency { capture_time: past });
+
+        let (_events, has_activity) = manager.process_events();
+        assert!(has_activity);
+
+        let stats = manager.stats();
+        assert!(stats.avg_latency_ns > 0.0);
+        assert!(stats.max_latency_ns > 0);
     }
 }

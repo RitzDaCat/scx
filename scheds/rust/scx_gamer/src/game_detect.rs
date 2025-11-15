@@ -38,6 +38,7 @@ const BITMASK_SIZE: usize = CACHE_SIZE / 64; // 64 bits per u64
 struct ProcessCache {
 	last_game: Option<GameInfo>,
 	pid_ring: [u32; CACHE_SIZE],  // Ring buffer of PIDs
+	pid_slots: [u32; CACHE_SIZE], // Exact PID stored per modulo slot
 	bitmask: [u64; BITMASK_SIZE], // Bitmask for fast PID lookup
 	head: usize,                   // Ring buffer head pointer
 	count: usize,                  // Number of valid entries
@@ -48,6 +49,7 @@ impl ProcessCache {
 		Self {
 			last_game: None,
 			pid_ring: [0; CACHE_SIZE],
+			pid_slots: [0; CACHE_SIZE],
 			bitmask: [0; BITMASK_SIZE],
 			head: 0,
 			count: 0,
@@ -59,8 +61,8 @@ impl ProcessCache {
 		let idx = (pid % CACHE_SIZE as u32) as usize;
 		let bit_idx = idx / 64;
 		let bit_pos = idx % 64;
-		if bit_idx < BITMASK_SIZE {
-			self.bitmask[bit_idx] & (1u64 << bit_pos) != 0
+		if bit_idx < BITMASK_SIZE && (self.bitmask[bit_idx] & (1u64 << bit_pos)) != 0 {
+			self.pid_slots[idx] == pid
 		} else {
 			false
 		}
@@ -82,12 +84,16 @@ impl ProcessCache {
 				if old_bit_idx < BITMASK_SIZE {
 					self.bitmask[old_bit_idx] &= !(1u64 << old_bit_pos);
 				}
+				if old_idx < self.pid_slots.len() && self.pid_slots[old_idx] == old_pid {
+					self.pid_slots[old_idx] = 0;
+				}
 			} else {
 				self.count += 1;
 			}
 			
 			// Insert new PID
 			self.pid_ring[self.head] = pid;
+			self.pid_slots[idx] = pid;
 			self.bitmask[bit_idx] |= 1u64 << bit_pos;
 			self.head = (self.head + 1) % CACHE_SIZE;
 		}
@@ -96,6 +102,7 @@ impl ProcessCache {
 	/* OPTIMIZATION: O(1) cleanup - just reset counters */
 	fn clear(&mut self) {
 		self.bitmask = [0; BITMASK_SIZE];
+		self.pid_slots = [0; CACHE_SIZE];
 		self.head = 0;
 		self.count = 0;
 	}
@@ -167,6 +174,16 @@ impl Drop for GameDetector {
 	}
 }
 
+#[inline]
+fn fallback_scan_due(last_run: &mut std::time::Instant, now: std::time::Instant, interval: Duration) -> bool {
+	if now.duration_since(*last_run) >= interval {
+		*last_run = now;
+		true
+	} else {
+		false
+	}
+}
+
 fn detection_loop(current_game: Arc<AtomicU32>, current_game_info: Arc<ArcSwap<Option<GameInfo>>>, shutdown: Arc<AtomicBool>) {
 	info!("game detector: starting");
 	let mut cache = ProcessCache::new();
@@ -226,7 +243,7 @@ fn detection_loop(current_game: Arc<AtomicU32>, current_game_info: Arc<ArcSwap<O
 	handle_detection_result(initial_scan, &current_game, &current_game_info, &mut cache);
 	info!("game detector: initial scan complete");
 
-	let last_liveness_check = std::time::Instant::now();
+	let mut last_liveness_check = std::time::Instant::now();
 
 	while !shutdown.load(Ordering::Relaxed) {
 		// PERF: Game liveness check removed - BPF LSM task_free hook handles game exit detection
@@ -268,7 +285,7 @@ fn detection_loop(current_game: Arc<AtomicU32>, current_game_info: Arc<ArcSwap<O
 			}
 		} else {
 			// Fallback: inotify disabled/unavailable, do lightweight scan every 5s
-			if last_liveness_check.elapsed() >= Duration::from_secs(5) {
+			if fallback_scan_due(&mut last_liveness_check, std::time::Instant::now(), Duration::from_secs(5)) {
 				let detection_result = panic::catch_unwind(AssertUnwindSafe(|| {
 					detect_game_cached(&mut cache, &shutdown_check)
 				}));
@@ -650,5 +667,42 @@ fn check_steam_cgroup(pid: u32) -> bool {
 		content.contains("steam") || content.contains("app.slice")
 	} else {
 		false
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::time::Duration;
+
+	#[test]
+	fn process_cache_allows_colliding_pids() {
+		let mut cache = ProcessCache::new();
+		let pid_a = 1234u32;
+		let pid_b = pid_a + CACHE_SIZE as u32; // Collides modulo CACHE_SIZE
+
+		assert!(!cache.contains(pid_a));
+		cache.insert(pid_a);
+		assert!(cache.contains(pid_a));
+
+		// Previously would have returned true because the bitmask was set
+		assert!(!cache.contains(pid_b));
+		cache.insert(pid_b);
+		assert!(cache.contains(pid_b));
+	}
+
+	#[test]
+	fn fallback_scan_due_resets_interval() {
+		let interval = Duration::from_secs(5);
+		let now = std::time::Instant::now();
+		let mut last = now - Duration::from_secs(10);
+
+		assert!(fallback_scan_due(&mut last, now, interval));
+
+		let soon = now.checked_add(Duration::from_secs(1)).unwrap();
+		assert!(!fallback_scan_due(&mut last, soon, interval));
+
+		let later = now.checked_add(Duration::from_secs(6)).unwrap();
+		assert!(fallback_scan_due(&mut last, later, interval));
 	}
 }

@@ -244,7 +244,6 @@ PROFILE
                 echo "  --mig-max 4                    (Migration rate limiting)"
                 echo "  --preferred-idle-scan          (Smart CPU placement)"
                 echo "  --avoid-smt                    (Prevents SMT contention)"
-                echo "  --prefer-napi-on-input         (Network interrupt awareness)"
                 echo
                 launch_scx "Esports" \
                     --env "RUST_LOG=warn" \
@@ -261,8 +260,7 @@ PROFILE
                     --arg "--mig-max" \
                     --arg "4" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--avoid-smt" \
-                    --arg "--prefer-napi-on-input"
+                    --arg "--avoid-smt"
                 return
                 ;;
             4)

@@ -107,6 +107,7 @@ struct CACHE_ALIGNED task_ctx {
 	u32 audio_sample_rate;		/* Detected audio sample rate (Hz) */
 	u64 audio_latency_ema_ns;	/* EMA of deadline overshoot (nanoseconds) */
 	u64 audio_latency_peak_ns;	/* Decaying peak of recent overshoot (nanoseconds) */
+	u64 task_cookie;		/* Unique lifetime cookie (task_struct start_time) */
 
 	/* Deadline miss detection and auto-recovery */
 	u64 expected_deadline;		/* Deadline calculated at enqueue time */
@@ -305,22 +306,19 @@ struct {
  * Key: 0 (single entry per CPU)
  * Value: Timestamp (u64) when input arrived, or 0 if no recent input
  */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, u32);
-	__type(value, u64);        /* Timestamp when input arrived for game */
-} input_arrived_for_game SEC(".maps");
+/* Hot-path wakeup signals: shared BSS to avoid helper overhead. */
+struct hotpath_signals {
+	volatile u64 input_ns[MAX_CPUS];	/* Per-target CPU timestamp for latest input wake */
+	volatile u64 compositor_ns;		/* Last compositor wake timestamp */
+};
+extern struct hotpath_signals hotpath_signals;
 
-/* Compositor wake signal shared across CPUs.
- * The compositor records the latest wake timestamp and the game thread
- * clears it once consumed to avoid duplicate dispatches. */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__uint(max_entries, TAILCALL_SLOT__MAX);
 	__type(key, u32);
-	__type(value, u64);
-} compositor_woke_for_game SEC(".maps");
+	__type(value, u32);
+} tailcall_map SEC(".maps");
 
 /* Input handler CPU tracking (PID -> last known CPU) */
 struct {
@@ -354,14 +352,6 @@ struct {
 	__type(value, u8);        /* Graphics API: 0=unknown, 1=DX11, 2=DX12 */
 	__uint(max_entries, 64);  /* Support up to 64 concurrent game processes */
 } graphics_api_map SEC(".maps");
-
-/* Audio thread task_struct pointers keyed by TID for fast force dispatch. */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 1024);
-	__type(key, u32);           /* TID */
-	__type(value, u64);         /* task_struct pointer of audio thread */
-} audio_thread_ptr_map SEC(".maps");
 
 /* Deadline miss event structure
  * 
@@ -669,7 +659,7 @@ static inline struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
  * Frequency: Called in select_cpu hot path (millions/sec)
  * Net overhead: Minimal (register access vs ~20-50ns map lookup)
  */
-static __always_inline bool is_gpu_submit_cached(const struct task_struct *p)
+static inline bool is_gpu_submit_cached(const struct task_struct *p)
 {
 	return likely((p->scx.flags & SCX_GAMER_FLAG_GPU_SUBMIT) != 0);
 }
@@ -680,7 +670,7 @@ static __always_inline bool is_gpu_submit_cached(const struct task_struct *p)
  *
  * TIER 0: Cached flag check (~1-2ns)
  */
-static __always_inline bool is_input_handler_cached(const struct task_struct *p)
+static inline bool is_input_handler_cached(const struct task_struct *p)
 {
 	return likely((p->scx.flags & SCX_GAMER_FLAG_INPUT_HANDLER) != 0);
 }
@@ -691,7 +681,7 @@ static __always_inline bool is_input_handler_cached(const struct task_struct *p)
  *
  * TIER 0: Cached flag check (~1-2ns)
  */
-static __always_inline bool is_compositor_cached(const struct task_struct *p)
+static inline bool is_compositor_cached(const struct task_struct *p)
 {
 	return likely((p->scx.flags & SCX_GAMER_FLAG_COMPOSITOR) != 0);
 }
@@ -702,7 +692,7 @@ static __always_inline bool is_compositor_cached(const struct task_struct *p)
  *
  * TIER 0: Cached flag check (~1-2ns)
  */
-static __always_inline bool is_background_cached(const struct task_struct *p)
+static inline bool is_background_cached(const struct task_struct *p)
 {
 	return likely((p->scx.flags & SCX_GAMER_FLAG_BACKGROUND) != 0);
 }
@@ -713,7 +703,7 @@ static __always_inline bool is_background_cached(const struct task_struct *p)
  *
  * TIER 0: Cached flag check (~1-2ns)
  */
-static __always_inline bool is_system_audio_cached(const struct task_struct *p)
+static inline bool is_system_audio_cached(const struct task_struct *p)
 {
 	return likely((p->scx.flags & SCX_GAMER_FLAG_SYSTEM_AUDIO) != 0);
 }
@@ -730,7 +720,7 @@ static __always_inline bool is_system_audio_cached(const struct task_struct *p)
  * Frequency: Called in deadline calculation hot path (millions/sec)
  * Net overhead: Minimal (register access vs ~20-50ns map lookup)
  */
-static __always_inline u8 get_boost_shift_cached(const struct task_struct *p)
+static inline u8 get_boost_shift_cached(const struct task_struct *p)
 {
 	return (u8)((p->scx.flags & SCX_GAMER_BOOST_SHIFT_MASK) >> SCX_GAMER_BOOST_SHIFT_SHIFT);
 }
@@ -753,7 +743,7 @@ static __always_inline u8 get_boost_shift_cached(const struct task_struct *p)
  *            then cached for subsequent checks)
  * Net overhead: Minimal (one-time cost per thread classification)
  */
-static __always_inline void update_task_flags_cache(struct task_struct *p, struct task_ctx *tctx)
+static inline void update_task_flags_cache(struct task_struct *p, struct task_ctx *tctx)
 {
 	/* TIER 0: Early exit if no context (~0.5-1ns) */
 	if (unlikely(!tctx))
@@ -912,10 +902,10 @@ struct hot_path_cache {
 };
 
 /* Forward declarations for functions used in preload_hot_path_data */
-static __always_inline u32 get_fg_tgid(void);
-static __always_inline bool is_input_active_now(u64 now);
-static __always_inline bool is_foreground_task_cached(const struct task_struct *p, u32 fg_tgid_cached);
-static __always_inline bool is_system_busy(void);
+static inline u32 get_fg_tgid(void);
+static inline bool is_input_active_now(u64 now);
+static inline bool is_foreground_task_cached(const struct task_struct *p, u32 fg_tgid_cached);
+static inline bool is_system_busy(void);
 
 /**
  * preload_hot_path_data - Enhanced Hot Path Data Preloading for High-FPS Optimization
@@ -943,8 +933,11 @@ static __always_inline bool is_system_busy(void);
  *
  * Frequency: Called in every select_cpu() call (millions/sec)
  * Net overhead: Critical - optimized for minimal latency
- */
-static __always_inline void preload_hot_path_data(
+ *
+ * NOTE: Use plain inline semantics instead of __always_inline; this function
+ * is non-trivial and forcing inlining adds verifier work without measurable
+ * benefit given modern bounded-loop support. */
+static inline void preload_hot_path_data(
 	struct task_struct *p,
 	s32 cpu,
 	u64 now,  /* PERFORMANCE HIERARCHY: Reuse timestamp from caller (Tier 1 → Tier 1) */

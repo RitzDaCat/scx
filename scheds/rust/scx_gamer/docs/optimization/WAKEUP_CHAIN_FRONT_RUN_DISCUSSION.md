@@ -1,5 +1,7 @@
 # Wakeup Chain Front-Run: Critical Architectural Discussion
 
+> **Update (2025-11-15):** This discussion references the original `input_arrived_for_game` map prototype. The live implementation now uses the `hotpath_signals` shared BSS for wake flags to avoid helper overhead. Refer to `WAKEUP_CHAIN_IMPLEMENTATION.md` for the finalized layout.
+
 **Date:** 2025-11-05  
 **Status:** Analysis & Implementation Discussion  
 **Impact:** **CRITICAL** - Could eliminate 10µs-3ms+ wakeup chain latency

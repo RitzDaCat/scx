@@ -37,8 +37,11 @@
 #include "game_detect_lsm.bpf.c"    /* BPF LSM game detection (kernel-level) */
 #include "include/affinity_detect.bpf.h"  /* CPU affinity override system */
 
-/* Forward declarations for helpers used across hot paths. */
-static __always_inline void recompute_boost_shift(struct task_ctx *tctx);
+/* Forward declarations for helpers used across hot paths.
+ * NOTE: Use plain inline semantics; avoiding __always_inline reduces
+ * verifier instruction pressure without materially impacting hot-path cost. */
+static inline void recompute_boost_shift(struct task_ctx *tctx);
+static __noinline bool load_preferred_cpu_safe(u32 idx, s32 *out);
 
 /*
  * Maximum amount of CPUs supported by the scheduler when flat or preferred
@@ -47,6 +50,7 @@ static __always_inline void recompute_boost_shift(struct task_ctx *tctx);
 #define MAX_CPUS	256
 #define TASKGRAPH_MAX_PREF_SCAN 24	/* TaskGraph corral: scan up to 24 low-capacity CPUs */
 #define TASKGRAPH_BORROW_MAX_SCAN 12	/* When borrowing, scan top high-capacity CPUs (vendor-tuned) */
+#define FRAME_PHYS_SCAN_MAX     64	/* Clamp frame-thread physical scan to avoid verifier blow-up */
 
 const volatile u32 preferred_high_perf_count;
 const volatile u32 preferred_cpu_rank[MAX_CPUS];
@@ -90,6 +94,8 @@ const volatile u32 freq_ccd_cpu_count;
  */
 #define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
 #define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
+
+struct hotpath_signals hotpath_signals SEC(".bss");
 
 /* MM_HINT_UPDATE_INTERVAL_NS is now defined in include/config.bpf.h */
 
@@ -261,7 +267,9 @@ volatile u64 nr_frame_feedback_escalations;	/* Times frame feedback boost increa
 volatile u64 nr_frame_feedback_recoveries;	/* Times frame feedback boost decayed */
 volatile u64 nr_frame_feedback_miss_events;	/* Unique frame deadline misses recorded */
 
-static __always_inline u8 current_power_hint(u64 now)
+/* Power hint helper is tiny; keep it inline but avoid forcing inlining to
+ * follow modern BPF verifier guidance. */
+static inline u8 current_power_hint(u64 now)
 {
 	u8 level = power_hint_level;
 	if (!level)
@@ -302,7 +310,8 @@ volatile u64 nr_nvme_io_threads;
 volatile u64 nr_input_handler_threads;
 volatile u64 nr_taskgraph_threads;	/* Unreal Engine TaskGraph workers (UE5.6 DX12) */
 
-static __always_inline void mark_nvme_thread(struct task_ctx *tctx)
+/* NVMe marking helper is small; inline hint is sufficient. */
+static inline void mark_nvme_thread(struct task_ctx *tctx)
 {
 	if (tctx && !tctx->is_nvme_io) {
 		tctx->is_nvme_io = 1;
@@ -978,8 +987,9 @@ static s32 pick_idle_cpu_cached(struct task_struct *p, s32 prev_cpu, u64 wake_fl
         
         /* ITERATION 0: Unrolled for zero overhead */
         {
-            s32 candidate = (s32)preferred_cpus[0];
-            if (candidate >= 0 && (u32)candidate < nr_cpu_ids &&
+            s32 candidate;
+            if (load_preferred_cpu_safe(0, &candidate) &&
+                candidate >= 0 && (u32)candidate < nr_cpu_ids &&
                 bpf_cpumask_test_cpu(candidate, p->cpus_ptr)) {
                 /* NUMA AWARENESS: Prefer same-node CPUs first */
                 if (!numa_enabled || prev_node < 0 || 
@@ -999,8 +1009,9 @@ static s32 pick_idle_cpu_cached(struct task_struct *p, s32 prev_cpu, u64 wake_fl
         
         /* ITERATION 1: Unrolled for zero overhead */
         {
-            s32 candidate = (s32)preferred_cpus[1];
-            if (candidate >= 0 && (u32)candidate < nr_cpu_ids &&
+            s32 candidate;
+            if (load_preferred_cpu_safe(1, &candidate) &&
+                candidate >= 0 && (u32)candidate < nr_cpu_ids &&
                 bpf_cpumask_test_cpu(candidate, p->cpus_ptr)) {
                 if (!numa_enabled || prev_node < 0 || 
                     __COMPAT_scx_bpf_cpu_node(candidate) == prev_node) {
@@ -1019,8 +1030,9 @@ static s32 pick_idle_cpu_cached(struct task_struct *p, s32 prev_cpu, u64 wake_fl
         
         /* ITERATION 2: Unrolled for zero overhead */
         {
-            s32 candidate = (s32)preferred_cpus[2];
-            if (candidate >= 0 && (u32)candidate < nr_cpu_ids &&
+            s32 candidate;
+            if (load_preferred_cpu_safe(2, &candidate) &&
+                candidate >= 0 && (u32)candidate < nr_cpu_ids &&
                 bpf_cpumask_test_cpu(candidate, p->cpus_ptr)) {
                 if (!numa_enabled || prev_node < 0 || 
                     __COMPAT_scx_bpf_cpu_node(candidate) == prev_node) {
@@ -1039,8 +1051,9 @@ static s32 pick_idle_cpu_cached(struct task_struct *p, s32 prev_cpu, u64 wake_fl
         
         /* ITERATION 3: Unrolled for zero overhead */
         {
-            s32 candidate = (s32)preferred_cpus[3];
-            if (candidate >= 0 && (u32)candidate < nr_cpu_ids &&
+            s32 candidate;
+            if (load_preferred_cpu_safe(3, &candidate) &&
+                candidate >= 0 && (u32)candidate < nr_cpu_ids &&
                 bpf_cpumask_test_cpu(candidate, p->cpus_ptr)) {
                 if (!numa_enabled || prev_node < 0 || 
                     __COMPAT_scx_bpf_cpu_node(candidate) == prev_node) {
@@ -1057,24 +1070,21 @@ static s32 pick_idle_cpu_cached(struct task_struct *p, s32 prev_cpu, u64 wake_fl
             }
         }
         
-        /* Fallback loop for CPUs 4+ (larger systems)
-         * BPF VERIFIER: Use constant literal for bounds check to help verifier track bounds.
-         * Replace bpf_for with while loop using constant literal comparisons. */
+		/* Fallback loop for CPUs 4+ (larger systems)
+		 * BPF VERIFIER: Cap scan length to keep instruction/state explosion bounded.
+		 * FRAME_PHYS_SCAN_MAX is tuned to cover modern HEDT systems without exhausting depth. */
         u32 i = 4;
-        while (i < 256) {  /* MAX_CPUS = 256, use literal constant */
-            /* BPF VERIFIER: Explicit bounds check using constant literal immediately before access.
-             * The verifier needs to see a constant comparison, not a macro. */
-            if (i >= 256)  /* MAX_CPUS */
-                break;
+		while (i < FRAME_PHYS_SCAN_MAX) {
             /* BPF VERIFIER: Array access only if definitely in bounds */
-            s32 candidate = (s32)preferred_cpus[i];
-            if (candidate < 0 || (u32)candidate >= nr_cpu_ids)
+            s32 candidate;
+            if (!load_preferred_cpu_safe(i, &candidate))
                 break;
-            
             /* BPF VERIFIER: Increment loop variable BEFORE any continue statements.
              * This ensures verifier sees progress on every iteration, preventing infinite loop detection. */
             i++;
-            
+            if (candidate < 0 || (u32)candidate >= nr_cpu_ids)
+                break;
+
             if (!bpf_cpumask_test_cpu(candidate, p->cpus_ptr))
                 continue;
             
@@ -1857,12 +1867,8 @@ static __always_inline void record_input_boost(u8 lane, u64 now,
 
 	u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
 	if (fg_tgid != 0) {
-		if (target_cpu >= 0 && target_cpu < MAX_CPUS) {
-			u32 idx_cpu = (u32)target_cpu;
-			u64 *slot = bpf_map_lookup_elem(&input_arrived_for_game, &idx_cpu);
-			if (slot)
-				*slot = now;
-		}
+		if (target_cpu >= 0 && target_cpu < MAX_CPUS)
+			hotpath_signals.input_ns[(u32)target_cpu] = now;
 	}
 
 	u64 delta_ns = now - last_input_trigger_ns;
@@ -3024,7 +3030,20 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 		!(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
 }
 
-s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+/* KEEP NOINLINE: The verifier requires the bounds check to execute before the
+ * compiler emits pointer arithmetic on preferred_cpus[]. Keeping this helper
+ * out-of-line prevents clang from hoisting the addition ahead of the guard.
+ */
+static __noinline bool load_preferred_cpu_safe(u32 idx, s32 *out)
+{
+	if (idx >= MAX_CPUS)
+		return false;
+
+	*out = (s32)preferred_cpus[idx];
+	return true;
+}
+
+static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	PROF_START_HIST(select_cpu);
 	u64 now = scx_bpf_now();  /* Get timestamp once for migration tracking */
@@ -3183,26 +3202,40 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 		else if (power_level == 1 && tail_cap > 12)
 			tail_cap -= 4;
 
-		if (cpu_count > 0) {
-		for (u32 i = 0; i < TASKGRAPH_MAX_PREF_SCAN && i < cpu_count; i++) {
-			u32 idx = (cpu_count - 1 - i);
-			if (idx >= MAX_CPUS)
-				continue;
+		u32 bounded_cpu_count = cpu_count;
+		if (bounded_cpu_count > MAX_CPUS)
+			bounded_cpu_count = MAX_CPUS;
 
-			s32 candidate = (s32)preferred_cpus[idx];
-			if (candidate < 0 || (u32)candidate >= MAX_CPUS)
-				continue;
-			if (!bpf_cpumask_test_cpu(candidate, p->cpus_ptr))
-				continue;
-			if (cache_ccd_cpu_count && cpu_ccd_class[candidate] != CCD_CLASS_CACHE)
-				continue;
+		if (bounded_cpu_count > 0) {
+			u32 scan_cap = tail_cap < bounded_cpu_count ? tail_cap : bounded_cpu_count;
+			if (scan_cap > TASKGRAPH_MAX_PREF_SCAN)
+				scan_cap = TASKGRAPH_MAX_PREF_SCAN;
 
-			if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate, task_slice(p), 0);
-				PROF_END_HIST(select_cpu);
-				return candidate;
+			u32 base_idx = bounded_cpu_count - 1;
+			for (u32 scan_idx = 0; scan_idx < scan_cap; scan_idx++) {
+				/* BPF VERIFIER: Ensure subtraction does not underflow */
+				if (scan_idx > base_idx)
+					break;
+
+				u32 idx = base_idx - scan_idx;
+				s32 candidate;
+				if (!load_preferred_cpu_safe(idx, &candidate))
+					continue;
+				if (candidate < 0)
+					continue;
+				if (!bpf_cpumask_test_cpu(candidate, p->cpus_ptr))
+					continue;
+				if (cache_ccd_cpu_count &&
+				    cpu_ccd_class[candidate] != CCD_CLASS_CACHE)
+					continue;
+
+				if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
+					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate,
+							   task_slice(p), 0);
+					PROF_END_HIST(select_cpu);
+					return candidate;
+				}
 			}
-		}
 		}
 
 #if CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY
@@ -3630,6 +3663,23 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 	return prev_cpu;
 }
 
+s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+	__u32 slot = TAILCALL_SLOT_SELECT_CPU;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wuninitialized"
+	register void *ctx_reg __asm__("r1");
+#pragma clang diagnostic pop
+
+	bpf_tail_call(ctx_reg, &tailcall_map, slot);
+	return gamer_select_cpu_slowpath(p, prev_cpu, wake_flags);
+}
+
+s32 BPF_STRUCT_OPS(gamer_select_cpu_tail, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+	return gamer_select_cpu_slowpath(p, prev_cpu, wake_flags);
+}
+
 /*
  * Wake-up @cpu if it's idle.
  */
@@ -3644,7 +3694,7 @@ static inline void wakeup_cpu(s32 cpu)
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
-void BPF_STRUCT_OPS(gamer_enqueue, struct task_struct *p, u64 enq_flags)
+static __noinline void gamer_enqueue_slowpath(struct task_struct *p, u64 enq_flags)
 {
 	PROF_START_HIST(enqueue);
 s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -3691,9 +3741,9 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 
 		if (target_cpu >= 0 && target_cpu < MAX_CPUS) {
 			u32 idx = (u32)target_cpu;
-			u64 *input_time = bpf_map_lookup_elem(&input_arrived_for_game, &idx);
+			u64 input_time = hotpath_signals.input_ns[idx];
 
-			if (input_time && *input_time != 0 && (now - *input_time) < 1000000) { /* <1ms */
+			if (input_time != 0 && (now - input_time) < 1000000) { /* <1ms */
 			/*
 			 * ROBUSTNESS FIX: Always force-dispatch the handler onto its CURRENT CPU.
 			 * This is an unconditionally safe operation that still achieves the primary
@@ -3702,7 +3752,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 			 */
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 			wakeup_cpu(prev_cpu);
-			u64 dispatch_latency = now - *input_time;
+			u64 dispatch_latency = now - input_time;
 			__atomic_fetch_add(&nr_input_force_dispatch, 1, __ATOMIC_RELAXED);
 			if (dispatch_latency > 1000000ULL)
 				__atomic_fetch_add(&nr_input_force_dispatch_late, 1, __ATOMIC_RELAXED);
@@ -3710,7 +3760,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 			input_force_dispatch_latency_ns = (prev_latency * 7 + dispatch_latency) >> 3;
 			if (dispatch_latency > input_force_dispatch_latency_max_ns)
 				input_force_dispatch_latency_max_ns = dispatch_latency;
-			*input_time = 0; /* Consume the event to prevent re-triggering */
+			hotpath_signals.input_ns[idx] = 0; /* Consume event */
 			PROF_END_HIST(enqueue);
 			return;
 			}
@@ -3729,9 +3779,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	 * This eliminates a major source of latency jitter from the most critical path.
 	 */
 	if (unlikely(is_compositor_cached(p) && input_active)) {
-		u32 key = 0;
-		u64 timestamp = now;
-		bpf_map_update_elem(&compositor_woke_for_game, &key, &timestamp, BPF_ANY);
+		hotpath_signals.compositor_ns = now;
 	}
 
 	/* WAKEUP CHAIN FRONT-RUN: Audio Thread Force Dispatch
@@ -3739,9 +3787,9 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	 * force-dispatch it immediately to prevent buffer underruns (audio crackling).
 	 */
 	if (unlikely(is_system_audio_cached(p))) {
-		u32 tid = (u32)p->pid;
-		u64 *audio_thread_ptr = bpf_map_lookup_elem(&audio_thread_ptr_map, &tid);
-		if (audio_thread_ptr && *audio_thread_ptr == (u64)(unsigned long)p) {
+		if (tctx) {
+			u64 cookie = BPF_CORE_READ(p, start_time);
+			if (cookie && tctx->task_cookie == cookie) {
 			/*
 			 * ROBUSTNESS FIX: Always force-dispatch the audio thread onto its CURRENT CPU.
 			 * This prevents migrate_disable violations while still avoiding underruns. It also
@@ -3751,6 +3799,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 			wakeup_cpu(prev_cpu);
 			PROF_END_HIST(enqueue);
 			return;
+			}
 		}
 	}
 
@@ -3763,13 +3812,11 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	 * = ~40-90ns total, orders of magnitude faster than the old Tier 3 shared map approach.
 	 */
 	if (unlikely(is_fg && input_active)) {
-		u32 key = 0;
-		u64 *compositor_time = bpf_map_lookup_elem(&compositor_woke_for_game, &key);
-		if (compositor_time && *compositor_time != 0 && (now - *compositor_time) < 2000000) { /* <2ms window */
+		u64 compositor_time = hotpath_signals.compositor_ns;
+		if (compositor_time != 0 && (now - compositor_time) < 2000000) { /* <2ms window */
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 			wakeup_cpu(prev_cpu);
-			u64 zero = 0;
-			bpf_map_update_elem(&compositor_woke_for_game, &key, &zero, BPF_ANY);
+			hotpath_signals.compositor_ns = 0;
 			PROF_END_HIST(enqueue);
 			return;
 		}
@@ -3908,9 +3955,9 @@ skip_wake_chain:
 
 		if (target_cpu >= 0 && target_cpu < MAX_CPUS) {
 			u32 idx = (u32)target_cpu;
-			u64 *input_time = bpf_map_lookup_elem(&input_arrived_for_game, &idx);
+			u64 input_time = hotpath_signals.input_ns[idx];
 			
-			if (input_time && *input_time != 0 && (now - *input_time) < 1000000) {
+			if (input_time != 0 && (now - input_time) < 1000000) {
 				/* Input arrived recently - force dispatch this game thread NOW */
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 				
@@ -3928,7 +3975,7 @@ skip_wake_chain:
 				
 				wakeup_cpu(prev_cpu);
 				
-				*input_time = 0;
+				hotpath_signals.input_ns[idx] = 0;
 				
 				PROF_END_HIST(enqueue);
 				return;  /* INSTANT RETURN - bypass normal enqueue path */
@@ -4073,6 +4120,38 @@ skip_wake_chain:
 	PROF_END_HIST(enqueue);
 }
 
+void BPF_STRUCT_OPS(gamer_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	/* Struct_ops entrypoint: directly delegate to the shared slowpath.
+	 * 
+	 * NOTE: We intentionally avoid a tail call here because tail calls from
+	 * BPF_PROG_TYPE_STRUCT_OPS programs are not universally supported across
+	 * kernels and can cause -EINVAL verifier rejects. The slowpath is
+	 * already heavily structured into helpers to keep verifier state
+	 * manageable, so a direct call is acceptable on the enqueue path. */
+	gamer_enqueue_slowpath(p, enq_flags);
+}
+
+void BPF_STRUCT_OPS(gamer_enqueue_tail, struct task_struct *p, u64 enq_flags)
+{
+	gamer_enqueue_slowpath(p, enq_flags);
+}
+
+/* Preserve references so libbpf retains tail-call programs during linking. */
+static const struct {
+	typeof(&gamer_select_cpu_tail) select_cpu;
+	typeof(&gamer_enqueue_tail) enqueue;
+} gamer_tailcall_prog_refs __attribute__((used, section(".rodata.gamer_tailcall_refs"))) = {
+	.select_cpu = &gamer_select_cpu_tail,
+	.enqueue = &gamer_enqueue_tail,
+};
+
+/* Provide a struct_ops anchor so libbpf treats tail programs as referenced. */
+SCX_OPS_DEFINE(gamer_tailcall_anchor,
+	       .select_cpu = (void *)gamer_select_cpu_tail,
+	       .enqueue = (void *)gamer_enqueue_tail,
+	       .name = "gamer_tailcall_anchor");
+
 void BPF_STRUCT_OPS(gamer_dispatch, s32 cpu, struct task_struct *prev)
 {
 	PROF_START_HIST(dispatch);
@@ -4182,8 +4261,10 @@ void BPF_STRUCT_OPS(gamer_cpu_release, s32 cpu, struct scx_cpu_release_args *arg
  *   3 = generic network / gaming traffic (5x)
  *   2 = USB/input interrupts (4x)
  *   1 = all remaining latency-sensitive foreground workers
- */
-static __always_inline void recompute_boost_shift(struct task_ctx *tctx)
+ *
+ * NOTE: Use plain inline semantics instead of __always_inline; the function
+ * is non-trivial and forcing inlining unnecessarily inflates verifier work. */
+static inline void recompute_boost_shift(struct task_ctx *tctx)
 {
 	u8 base_boost = tctx->class_boost;
     
@@ -5605,8 +5686,8 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
             fg_input_handler_pid = (u32)p->pid;
         update_input_handler_cpu(p);
         
-        /* WAKEUP CHAIN FRONT-RUN: Input handler detected - per-CPU signaling
-         * (handled by compositor_woke_for_game per-CPU map) */
+		/* WAKEUP CHAIN FRONT-RUN: Input handler detected - per-CPU signaling
+		 * (handled via hotpath_signals.input_ns shared BSS) */
     }
 
     /* PERF: Fentry-based GPU detection - immediate classification on first GPU submit
@@ -5633,8 +5714,8 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
         /* HYBRID FLAG CACHING: Update cached flags after classification change */
         update_task_flags_cache(p, tctx);
         
-        /* WAKEUP CHAIN FRONT-RUN: GPU submitter detected - per-CPU signaling
-         * (handled by compositor_woke_for_game per-CPU map) */
+		/* WAKEUP CHAIN FRONT-RUN: GPU submitter detected - per-CPU signaling
+		 * (handled via hotpath_signals.compositor_ns shared BSS) */
         
 		/* PERF: Emit GPU detection event to ring buffer for real-time tracking
 		 * Event-driven notification enables immediate awareness of GPU threads
@@ -5686,7 +5767,7 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
         update_task_flags_cache(p, tctx);
         
         /* WAKEUP CHAIN FRONT-RUN: GPU submitter detected - per-CPU signaling
-         * (handled by compositor_woke_for_game per-CPU map) */
+         * (handled via hotpath_signals.compositor_ns shared BSS) */
         
 		/* PERF: Emit GPU detection event to ring buffer for real-time tracking
 		 * 
@@ -5745,7 +5826,7 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
                 tctx->preferred_physical_core = -1;
                     
                     /* WAKEUP CHAIN FRONT-RUN: GPU submitter detected - per-CPU signaling
-                     * (handled by compositor_woke_for_game per-CPU map) */
+                     * (handled via hotpath_signals.compositor_ns shared BSS) */
                     
                     /* CRITICAL FIX: Increment counter when !tctx->is_gpu_submit (first GPU classification)
                      * is_first_classification check was preventing counters from incrementing. */
@@ -6068,7 +6149,7 @@ void BPF_STRUCT_OPS(gamer_disable, struct task_struct *p)
 	bpf_map_delete_elem(&storage_threads_map, &pid);
 	bpf_map_delete_elem(&system_audio_threads_map, &pid);
 	bpf_map_delete_elem(&game_audio_threads_map, &pid);
-	bpf_map_delete_elem(&audio_thread_ptr_map, &pid);
+	tctx->task_cookie = 0;
 	if (tctx->is_background) {
 		/* Use atomic fetch-and-subtract, then check for underflow */
 		u64 old_val = __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
