@@ -15,6 +15,8 @@
 
 #include "config.bpf.h"
 
+extern volatile u32 detector_trace_enable;
+
 /*
  * Filesystem Thread Info
  * Tracks threads that perform filesystem operations
@@ -179,6 +181,9 @@ static __always_inline void register_filesystem_thread(u32 tid, u8 filesystem_ty
 SEC("tracepoint/syscalls/sys_enter_read")
 int BPF_PROG(detect_filesystem_read, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	/* TIER 0: Get current thread ID (fast, no syscall) */
 	u32 tid = bpf_get_current_pid_tgid();
 
@@ -208,6 +213,9 @@ int BPF_PROG(detect_filesystem_read, void *args)
 SEC("tracepoint/syscalls/sys_enter_write")
 int BPF_PROG(detect_filesystem_write, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&filesystem_detect_writes, 1, __ATOMIC_RELAXED);
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_WRITE);
@@ -228,6 +236,9 @@ int BPF_PROG(detect_filesystem_write, void *args)
 SEC("tracepoint/syscalls/sys_enter_openat")
 int BPF_PROG(detect_filesystem_open, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&filesystem_detect_opens, 1, __ATOMIC_RELAXED);
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_OPEN);
@@ -248,6 +259,9 @@ int BPF_PROG(detect_filesystem_open, void *args)
 SEC("tracepoint/syscalls/sys_enter_close")
 int BPF_PROG(detect_filesystem_close, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&filesystem_detect_closes, 1, __ATOMIC_RELAXED);
 	register_filesystem_thread(tid, FILESYSTEM_TYPE_CLOSE);

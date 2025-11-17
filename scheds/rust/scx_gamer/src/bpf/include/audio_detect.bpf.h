@@ -22,6 +22,7 @@ extern const volatile u32 foreground_tgid;
 extern volatile u64 nr_system_audio_threads;
 extern volatile u64 nr_game_audio_threads;
 extern volatile u64 nr_system_audio_fentry_matches;
+extern volatile u32 detector_trace_enable;
 
 /* Forward declarations for ALSA structures (CO-RE read targets) */
 struct snd_pcm_file;
@@ -90,6 +91,9 @@ typedef struct { long frames; } snd_xfern_t;
 SEC("fentry/do_vfs_ioctl")
 int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned int cmd, unsigned long arg)
 {
+	if (!detector_trace_enable)
+		return 0;
+
     /* TIER 0: Early filter - reject 99.9% of ioctls immediately
      * Most ioctls are not audio-related, so this check is critical for performance
      * Use unlikely() hint for better branch prediction */

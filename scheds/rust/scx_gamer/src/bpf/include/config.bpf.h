@@ -110,9 +110,21 @@
  *
  * TIER 0: Compile-time bit shift operations (evaluated at compile time)
  */
-#define CMD_INPUT	(1u << 0)	/* Input event trigger */
-#define CMD_FRAME	(1u << 1)	/* Frame event trigger */
-#define CMD_NAPI	(1u << 2)	/* NAPI preference trigger */
+#define CMD_INPUT		(1u << 0)	/* Input event trigger */
+#define CMD_FRAME		(1u << 1)	/* Frame event trigger */
+#define CMD_NAPI		(1u << 2)	/* NAPI preference trigger */
+#define CMD_TRACE_RU_ON		(1u << 3)	/* Enable runtime tracing */
+#define CMD_TRACE_RU_OFF	(1u << 4)	/* Disable runtime tracing */
+#define CMD_DETECT_ON		(1u << 5)	/* Enable detector tracepoints */
+#define CMD_DETECT_OFF		(1u << 6)	/* Disable detector tracepoints */
+#define CMD_DISPATCH_EVT_ON	(1u << 7)	/* Enable dispatch event ringbuf */
+#define CMD_DISPATCH_EVT_OFF	(1u << 8)	/* Disable dispatch event ringbuf */
+
+/*
+ * Classification refresh cadence
+ * Run slow-path classification at most every X nanoseconds per thread.
+ */
+#define CLASSIFICATION_REFRESH_NS	(2ULL * NSEC_PER_MSEC)
 
 /*
  * Kick Bitmap Configuration

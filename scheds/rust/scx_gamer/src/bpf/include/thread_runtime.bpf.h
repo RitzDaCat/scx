@@ -93,6 +93,8 @@ struct {
 	__type(value, u64); /* Last activity timestamp */
 } thread_activity_map SEC(".maps");
 
+extern volatile u32 runtime_trace_enable;
+
 /*
  * Statistics: Thread tracking performance
  *
@@ -311,6 +313,9 @@ SEC("tp_btf/sched_switch")
 int BPF_PROG(track_thread_runtime, bool preempt,
              struct task_struct *prev, struct task_struct *next)
 {
+	if (!runtime_trace_enable)
+		return 0;
+
 	u32 prev_tid, next_tid;
 	u64 now = bpf_ktime_get_ns();
 	struct thread_runtime_stats *prev_stats, *next_stats;
