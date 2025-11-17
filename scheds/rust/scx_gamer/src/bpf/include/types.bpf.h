@@ -97,6 +97,7 @@ struct CACHE_ALIGNED task_ctx {
 	u16 high_cpu_samples;		/* Consecutive wakes with >5ms exec */
 	u16 input_window_wakeups;	/* Wakes during input windows (for behavioral detection) */
 	u16 total_wakeups_sampled;	/* Total wakeups sampled (for ratio calculation) */
+	u64 last_classification_update;/* Timestamp of last slow-path classification */
 
 	/* Cache thrashing detection */
 	u64 last_pgfault_total;		/* Last sampled maj_flt + min_flt */
