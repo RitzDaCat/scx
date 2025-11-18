@@ -98,6 +98,12 @@ struct CACHE_ALIGNED task_ctx {
 	u16 input_window_wakeups;	/* Wakes during input windows (for behavioral detection) */
 	u16 total_wakeups_sampled;	/* Total wakeups sampled (for ratio calculation) */
 	u64 last_classification_update;/* Timestamp of last slow-path classification */
+	u8 classification_stable_runs;	/* Consecutive slow-path passes with no changes */
+	u8 classification_backoff_shift;/* Dynamic refresh backoff exponent */
+	u16 _classification_pad;
+	s32 last_idle_cpu_hint;		/* Cached idle CPU hint */
+	u32 _idle_hint_pad;
+	u64 last_idle_cpu_hint_ts;	/* Timestamp for cached idle hint */
 
 	/* Cache thrashing detection */
 	u64 last_pgfault_total;		/* Last sampled maj_flt + min_flt */
@@ -251,6 +257,25 @@ struct {
 	__type(value, struct cpu_ctx);
 	__uint(max_entries, 1);
 } cpu_ctx_stor SEC(".maps");
+
+struct gamer_class_stats {
+	u64 classification_attempts;
+	u64 first_classification;
+	u64 exact_game_thread;
+	u64 input_handler_name_checks;
+	u64 input_handler_name_patterns;
+	u64 input_handler_name_hits;
+	u64 input_handler_threads;
+	u64 main_thread_hits;
+	u64 taskgraph_threads;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct gamer_class_stats);
+	__uint(max_entries, 1);
+} gamer_class_stats_map SEC(".maps");
 
 /* MM hint map removed - gaming workloads have low cache locality benefit, high overhead
  * Removing saves ~100-300ns per CPU selection (Tier 3 → eliminated) */
@@ -862,10 +887,17 @@ static inline struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
 }
 
+static inline struct gamer_class_stats *local_class_stats(void)
+{
+	const u32 idx = 0;
+	return bpf_map_lookup_elem(&gamer_class_stats_map, &idx);
+}
+
 extern volatile u64 input_until_global;
 extern volatile u64 input_lane_until[INPUT_LANE_MAX];
 extern volatile u64 input_lane_last_trigger_ns[INPUT_LANE_MAX];
 extern volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
+extern volatile u32 kbd_pressed_count;
 extern volatile u8 continuous_input_mode;
 extern volatile u8 continuous_input_lane_mode[INPUT_LANE_MAX];
 extern volatile u64 input_window_dynamic_ns;

@@ -10,8 +10,8 @@
 use log::info;
 use std::time::Duration;
 
-use crate::ml_collect::SchedulerConfig;
 use crate::ml_autotune::{ConfigTrial, TrialResult};
+use crate::ml_collect::SchedulerConfig;
 
 /// Bayesian optimizer using Gaussian Process surrogate model
 pub struct BayesianOptimizer {
@@ -32,7 +32,6 @@ pub struct BayesianOptimizer {
 
     /// Trial duration
     trial_duration: Duration,
-
     // xi (exploration parameter) removed - using fixed exploration strategy
 }
 
@@ -46,15 +45,15 @@ pub struct ParameterBounds {
 impl BayesianOptimizer {
     /// Create new Bayesian optimizer
     pub fn new(
-        _baseline: SchedulerConfig,  // Reserved for future Bayesian prior initialization
+        _baseline: SchedulerConfig, // Reserved for future Bayesian prior initialization
         trial_duration: Duration,
         n_iterations: usize,
     ) -> Self {
         // Define parameter search space
         let bounds = ParameterBounds {
-            slice_us: (5, 20),          // Time slice: 5-20µs
+            slice_us: (5, 20),            // Time slice: 5-20µs
             input_window_us: (500, 5000), // Input window: 0.5-5ms
-            mig_max: (1, 8),            // Migration limit: 1-8
+            mig_max: (1, 8),              // Migration limit: 1-8
         };
 
         // Use 5 random trials for initial exploration
@@ -79,19 +78,24 @@ impl BayesianOptimizer {
     /// Get next configuration to try
     pub fn next_trial(&mut self, baseline: &SchedulerConfig) -> Option<ConfigTrial> {
         if self.current_iter >= self.n_iterations {
-            return None;  // Optimization complete
+            return None; // Optimization complete
         }
 
         let config = if self.current_iter < self.n_initial {
             // Phase 1: Random exploration
-            info!("ML Bayesian: Random exploration trial {}/{}",
-                  self.current_iter + 1, self.n_initial);
+            info!(
+                "ML Bayesian: Random exploration trial {}/{}",
+                self.current_iter + 1,
+                self.n_initial
+            );
             self.random_config(baseline)
         } else {
             // Phase 2: Bayesian optimization (maximize Expected Improvement)
-            info!("ML Bayesian: Optimization trial {}/{}",
-                  self.current_iter - self.n_initial + 1,
-                  self.n_iterations - self.n_initial);
+            info!(
+                "ML Bayesian: Optimization trial {}/{}",
+                self.current_iter - self.n_initial + 1,
+                self.n_iterations - self.n_initial
+            );
             self.optimize_config(baseline)
         };
 
@@ -102,10 +106,7 @@ impl BayesianOptimizer {
             duration: self.trial_duration,
             label: format!(
                 "Bayesian iter {}: slice={}µs, input_win={}µs, mig_max={}",
-                self.current_iter,
-                config.slice_us,
-                config.input_window_us,
-                config.mig_max
+                self.current_iter, config.slice_us, config.input_window_us, config.mig_max
             ),
         })
     }
@@ -130,7 +131,8 @@ impl BayesianOptimizer {
 
         let mut config = baseline.clone();
         config.slice_us = rng.gen_range(self.bounds.slice_us.0..=self.bounds.slice_us.1);
-        config.input_window_us = rng.gen_range(self.bounds.input_window_us.0..=self.bounds.input_window_us.1);
+        config.input_window_us =
+            rng.gen_range(self.bounds.input_window_us.0..=self.bounds.input_window_us.1);
         config.mig_max = rng.gen_range(self.bounds.mig_max.0..=self.bounds.mig_max.1);
 
         config
@@ -144,12 +146,14 @@ impl BayesianOptimizer {
     /// 3. Pick candidate with highest Expected Improvement
     fn optimize_config(&self, baseline: &SchedulerConfig) -> SchedulerConfig {
         // Find best trial so far
-        let best_trial = self.trials.iter()
+        let best_trial = self
+            .trials
+            .iter()
             .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
             .expect("No trials completed yet");
 
         let best_config = &best_trial.config;
-        let _best_score = best_trial.score;  // Reserved for future acquisition function
+        let _best_score = best_trial.score; // Reserved for future acquisition function
 
         // Generate candidate configurations around best
         let mut candidates = Vec::new();
@@ -166,11 +170,15 @@ impl BayesianOptimizer {
 
                     // Apply deltas with clamping
                     candidate.slice_us = (best_config.slice_us as i64 + sd)
-                        .clamp(self.bounds.slice_us.0 as i64, self.bounds.slice_us.1 as i64) as u64;
-                    candidate.input_window_us = (best_config.input_window_us as i64 + id)
-                        .clamp(self.bounds.input_window_us.0 as i64, self.bounds.input_window_us.1 as i64) as u64;
+                        .clamp(self.bounds.slice_us.0 as i64, self.bounds.slice_us.1 as i64)
+                        as u64;
+                    candidate.input_window_us = (best_config.input_window_us as i64 + id).clamp(
+                        self.bounds.input_window_us.0 as i64,
+                        self.bounds.input_window_us.1 as i64,
+                    ) as u64;
                     candidate.mig_max = (best_config.mig_max as i32 + md)
-                        .clamp(self.bounds.mig_max.0 as i32, self.bounds.mig_max.1 as i32) as u32;
+                        .clamp(self.bounds.mig_max.0 as i32, self.bounds.mig_max.1 as i32)
+                        as u32;
 
                     // Skip if already tried
                     if !self.has_tried(&candidate) {
@@ -196,9 +204,9 @@ impl BayesianOptimizer {
     /// Check if a configuration has been tried already
     fn has_tried(&self, config: &SchedulerConfig) -> bool {
         self.trials.iter().any(|t| {
-            t.config.slice_us == config.slice_us &&
-            t.config.input_window_us == config.input_window_us &&
-            t.config.mig_max == config.mig_max
+            t.config.slice_us == config.slice_us
+                && t.config.input_window_us == config.input_window_us
+                && t.config.mig_max == config.mig_max
         })
     }
 
@@ -232,11 +240,7 @@ mod tests {
             wakeup_timer_us: 500,
         };
 
-        let optimizer = BayesianOptimizer::new(
-            baseline,
-            Duration::from_secs(120),
-            10,
-        );
+        let optimizer = BayesianOptimizer::new(baseline, Duration::from_secs(120), 10);
 
         assert_eq!(optimizer.n_iterations, 10);
         assert_eq!(optimizer.n_initial, 5);

@@ -27,7 +27,11 @@ impl TriggerOps for BpfTrigger {
         // SAFETY: Error logging only in debug builds to avoid performance impact
         #[cfg(debug_assertions)]
         if let Err(err) = _result {
-            log::debug!("BPF trigger_input_with_napi_lane failed: {} (lane: {:?})", err, lane);
+            log::debug!(
+                "BPF trigger_input_with_napi_lane failed: {} (lane: {:?})",
+                err,
+                lane
+            );
         }
     }
 }
@@ -51,11 +55,11 @@ impl MockTrigger {
 #[cfg(test)]
 impl TriggerOps for MockTrigger {
     fn trigger_input_lane(&self, _skel: &mut BpfSkel<'_>, _lane: super::InputLane) {
-        self.input_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.input_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     fn trigger_input_with_napi_lane(&self, _skel: &mut BpfSkel<'_>, _lane: super::InputLane) {
-        self.input_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.input_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
-
-

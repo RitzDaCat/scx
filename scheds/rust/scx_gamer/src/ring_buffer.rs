@@ -4,26 +4,26 @@
 // GNU General Public License version 2.
 
 //! Lockless ring buffer implementation for ultra-low latency input processing
-//! 
+//!
 //! This module provides a high-performance, lockless ring buffer that enables
 //! direct memory access between kernel (BPF) and userspace, eliminating syscall
 //! overhead for event processing.
-//! 
+//!
 //! # Dual-Path Input Architecture
-//! 
+//!
 //! scx_gamer uses two parallel input capture mechanisms:
-//! 
+//!
 //! ## Primary Path: Ring Buffer (This Module)
 //! - **Method**: BPF fentry hook on kernel `input_event()` function
 //! - **Latency**: 1-5µs (kernel interrupt → userspace)
 //! - **CPU Usage**: <5% (interrupt-driven, 95-98% savings vs busy polling)
 //! - **Mechanism**: Zero-copy BPF ring buffer with epoll notification
-//! - **Advantages**: 
+//! - **Advantages**:
 //!   * Captures events at kernel level BEFORE /dev/input processing
 //!   * No /dev/input syscalls required
 //!   * Instant latency measurement (capture timestamp in callback)
 //! - **Failure Modes**: BPF hook attachment failure (rare), ring buffer overflow (tracked)
-//! 
+//!
 //! ## Fallback Path: evdev (/dev/input/*)
 //! - **Method**: Traditional epoll on /dev/input device file descriptors
 //! - **Latency**: 5-15µs (kernel → userspace via device node)
@@ -33,14 +33,14 @@
 //!   * Works on all kernels/configs
 //!   * No BPF requirements
 //! - **Disadvantages**: ~10µs higher latency, requires syscalls to read events
-//! 
+//!
 //! ## Cooperation Strategy
 //! When both paths are active:
 //! 1. Ring buffer processes events first (lower latency)
 //! 2. Main loop checks if ring buffer handled input this cycle
 //! 3. If yes: evdev path skipped (avoid redundant processing)
 //! 4. If no: evdev handles input (graceful fallback)
-//! 
+//!
 //! This design provides:
 //! - **Performance**: Ring buffer's ultra-low latency when available
 //! - **Reliability**: evdev fallback ensures input always works
@@ -52,7 +52,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Input event structure for ring buffer
-/// 
+///
 /// This structure represents a single input event that can be stored
 /// in the ring buffer for efficient processing without syscall overhead.
 /// Must match the BPF gamer_input_event struct exactly.
@@ -79,20 +79,25 @@ struct EventWithLatency {
     capture_time: std::time::Instant,
 }
 
-
 // Legacy InputEvent removed - using GamerInputEvent instead
 
 impl GamerInputEvent {
     #[cfg(test)]
-    pub fn is_keyboard(&self) -> bool { self.event_type == 1 }
+    pub fn is_keyboard(&self) -> bool {
+        self.event_type == 1
+    }
     #[cfg(test)]
-    pub fn is_mouse_movement(&self) -> bool { self.event_type == 2 && (self.event_code == 0 || self.event_code == 1) }
+    pub fn is_mouse_movement(&self) -> bool {
+        self.event_type == 2 && (self.event_code == 0 || self.event_code == 1)
+    }
     #[cfg(test)]
-    pub fn is_mouse_button(&self) -> bool { self.event_type == 1 && self.event_code >= 272 && self.event_code <= 274 }
+    pub fn is_mouse_button(&self) -> bool {
+        self.event_type == 1 && self.event_code >= 272 && self.event_code <= 274
+    }
 }
 
 /// Input ring buffer manager for high-performance input processing
-/// 
+///
 /// This structure manages input events using an epoll-compatible ring buffer,
 /// enabling ultra-low latency input processing with interrupt-driven waking.
 /// Uses the ring buffer's native epoll support for 1-5µs latency with
@@ -108,6 +113,8 @@ pub struct InputRingBufferManager {
     queue_high_watermark: std::sync::Arc<AtomicUsize>,
     /// Performance monitoring
     stats: InputRingBufferStats,
+    /// Enable detailed latency tracking; disabled reduces overhead
+    latency_tracking: bool,
     /// Ring buffer file descriptor for epoll integration
     ring_buffer_fd: std::os::fd::RawFd,
     /// Ring buffer instance (kept alive for FD validity)
@@ -143,13 +150,13 @@ pub struct InputRingBufferStats {
 
 impl InputRingBufferManager {
     /// Create a new input ring buffer manager with epoll support
-    /// 
+    ///
     /// # Arguments
     /// * `skel` - BPF skeleton containing the input events ring buffers
-    /// 
+    ///
     /// # Returns
     /// * `Result<Self, String>` - Input ring buffer manager or error
-    /// 
+    ///
     /// # Design
     /// LMAX DISRUPTOR: Reads from 16 distributed ring buffers for zero-contention single-writer guarantee.
     /// Each BPF CPU writes to a buffer selected by CPU ID modulo 16, eliminating contention.
@@ -158,40 +165,44 @@ impl InputRingBufferManager {
     pub fn new(skel: &mut crate::BpfSkel) -> Result<Self, String> {
         use libbpf_rs::RingBufferBuilder;
         use std::sync::Arc;
-        
+
         let stats = InputRingBufferStats::default();
+        let latency_tracking = std::env::var("SCX_GAMER_INPUT_LATENCY")
+            .map(|v| {
+                let value = v.trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "on" | "yes")
+            })
+            .unwrap_or(false);
         let events_processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let recent_events = Arc::new(SegQueue::new());
         let queue_depth = Arc::new(AtomicUsize::new(0));
         let queue_dropped = Arc::new(AtomicUsize::new(0));
         let queue_high_watermark = Arc::new(AtomicUsize::new(0));
-        
+
         // Clone for callback
-        let callback_events_processed: Arc<std::sync::atomic::AtomicUsize> = Arc::clone(&events_processed);
+        let callback_events_processed: Arc<std::sync::atomic::AtomicUsize> =
+            Arc::clone(&events_processed);
         let callback_recent_events: Arc<SegQueue<EventWithLatency>> = Arc::clone(&recent_events);
         let cb_queue_depth = Arc::clone(&queue_depth);
         let cb_queue_dropped = Arc::clone(&queue_dropped);
         let cb_queue_hwm = Arc::clone(&queue_high_watermark);
-        
+
         // Build ring buffer consumer with all distributed buffers
         // LMAX DISRUPTOR: Add all 16 buffers to builder - they share single epoll FD
         // Events from all buffers are naturally interleaved by arrival time
         let mut builder = RingBufferBuilder::new();
         let mut buffers_added = 0;
-        
+
         // Helper to create callback closure for each buffer
         // Each closure captures the shared Arc references
-        let make_callback = || {
+        let make_callback = |latency_enabled: bool| {
             let cb_events = Arc::clone(&callback_events_processed);
             let cb_recent = Arc::clone(&callback_recent_events);
             let cb_depth = Arc::clone(&cb_queue_depth);
             let cb_dropped = Arc::clone(&cb_queue_dropped);
             let cb_hwm = Arc::clone(&cb_queue_hwm);
-            
+
             move |data: &[u8]| -> i32 {
-                // Capture timestamp immediately for accurate latency measurement
-                let capture_time = std::time::Instant::now();
-                
                 // Strict size invariant: ringbuf must deliver exactly one GamerInputEvent
                 if data.len() != std::mem::size_of::<GamerInputEvent>() {
                     warn!(
@@ -202,19 +213,33 @@ impl InputRingBufferManager {
                     return 0;
                 }
 
+                if !latency_enabled {
+                    cb_events.fetch_add(1, Ordering::Relaxed);
+                    return 0;
+                }
+
+                // Capture timestamp immediately for accurate latency measurement
+                let capture_time = std::time::Instant::now();
+
                 // Safety: Use unaligned read to avoid alignment UB across targets
                 {
-                    let _event = unsafe { (data.as_ptr() as *const GamerInputEvent).read_unaligned() };
+                    let _event =
+                        unsafe { (data.as_ptr() as *const GamerInputEvent).read_unaligned() };
                     // We don't store the event content here (only latency tracking),
                     // classification already happens in BPF and userspace.
-                    
+
                     // Backpressure: bound queue depth
                     const MAX_QUEUE_DEPTH: usize = 2048;
                     let depth_after_inc = cb_depth.fetch_add(1, Ordering::Relaxed) + 1;
                     // Update high-watermark
                     let mut hwm = cb_hwm.load(Ordering::Relaxed);
                     while depth_after_inc > hwm {
-                        match cb_hwm.compare_exchange(hwm, depth_after_inc, Ordering::Relaxed, Ordering::Relaxed) {
+                        match cb_hwm.compare_exchange(
+                            hwm,
+                            depth_after_inc,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
                             Ok(_) => break,
                             Err(cur) => hwm = cur,
                         }
@@ -225,110 +250,176 @@ impl InputRingBufferManager {
                         cb_dropped.fetch_add(1, Ordering::Relaxed);
                         return 0;
                     }
-                    
+
                     // Store event timestamp for latency measurement
                     cb_recent.push(EventWithLatency { capture_time });
-                    
+
                     // Count processed events
                     cb_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                0  // Success
+                0 // Success
             }
         };
-        
+
         // Try to add distributed ring buffers (input_events_ringbuf_0 through _15)
         // Access maps directly - libbpf-rs auto-generates field names matching BPF map names
         // Note: These fields will only exist after BPF skeleton is regenerated with new maps
         // If compilation fails here, rebuild the BPF skeleton to include the new maps
         let maps = &skel.maps;
-        
+
         // Add all 16 distributed buffers directly
         // libbpf-rs generates these fields automatically from BPF map names
         // If fields don't exist, this code won't compile (BPF skeleton needs regeneration)
         // Direct field access - compiler will error if fields don't exist
         // This is intentional - forces BPF skeleton regeneration
         // Add each buffer with its own callback closure
-        builder.add(&maps.input_events_ringbuf_0, make_callback())
+        builder
+            .add(
+                &maps.input_events_ringbuf_0,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_0: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_1, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_1,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_1: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_2, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_2,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_2: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_3, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_3,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_3: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_4, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_4,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_4: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_5, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_5,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_5: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_6, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_6,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_6: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_7, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_7,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_7: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_8, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_8,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_8: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_9, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_9,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_9: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_10, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_10,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_10: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_11, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_11,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_11: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_12, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_12,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_12: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_13, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_13,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_13: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_14, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_14,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_14: {}", e))?;
         buffers_added += 1;
-        
-        builder.add(&maps.input_events_ringbuf_15, make_callback())
+
+        builder
+            .add(
+                &maps.input_events_ringbuf_15,
+                make_callback(latency_tracking),
+            )
             .map_err(|e| format!("Failed to add input_events_ringbuf_15: {}", e))?;
         buffers_added += 1;
-        
+
         // Note: If compilation fails above, it means BPF skeleton needs regeneration
         // Run `cargo build` to regenerate skeleton with new distributed buffer maps
-        
-        let ringbuf = builder.build().map_err(|e| format!("Failed to create ring buffer: {}", e))?;
-        
+
+        let ringbuf = builder
+            .build()
+            .map_err(|e| format!("Failed to create ring buffer: {}", e))?;
+
         if buffers_added > 1 {
             log::info!("Input ring buffer: Initialized with {} distributed buffers (LMAX Disruptor) - {}x contention reduction", buffers_added, buffers_added);
         } else {
             log::info!("Input ring buffer: Initialized with legacy single buffer");
         }
-        
+
         // Get ring buffer FD for epoll integration
         let ring_buffer_fd = ringbuf.epoll_fd();
         if ring_buffer_fd < 0 {
             return Err("Ring buffer FD is invalid".to_string());
         }
-        
+
         Ok(Self {
             events_processed,
             recent_events,
@@ -336,33 +427,34 @@ impl InputRingBufferManager {
             queue_dropped,
             queue_high_watermark,
             stats,
+            latency_tracking,
             ring_buffer_fd,
             _ring_buffer: Some(ringbuf),
         })
     }
-    
+
     /// Get the ring buffer file descriptor for epoll registration
-    /// 
+    ///
     /// # Returns
     /// * `std::os::fd::RawFd` - File descriptor for epoll
-    /// 
+    ///
     /// # Usage
     /// Add this FD to your epoll instance:
     /// ```ignore
     /// let rb_fd = ring_buffer_manager.ring_buffer_fd();
     /// epoll.add(rb_fd, EpollEvent::new(EpollFlags::EPOLLIN, RB_TAG))?;
     /// ```
-    /// 
+    ///
     /// When epoll wakes on this FD, call `poll_once()` to process events.
     pub fn ring_buffer_fd(&self) -> std::os::fd::RawFd {
         self.ring_buffer_fd
     }
-    
+
     /// Poll the ring buffer once (call when epoll indicates ready)
-    /// 
+    ///
     /// This should be called when epoll wakes on the ring buffer FD.
     /// It processes all available events from the ring buffer.
-    /// 
+    ///
     /// # Returns
     /// * `Result<(), String>` - Success or error
     pub fn poll_once(&mut self) -> Result<(), String> {
@@ -373,16 +465,16 @@ impl InputRingBufferManager {
         }
         Ok(())
     }
-    
+
     /// Process input events from the BPF ring buffer
-    /// 
+    ///
     /// This method processes all available input events from the BPF ring buffer
     /// and returns the number of events processed and whether there was
     /// input activity.
-    /// 
+    ///
     /// # Returns
     /// * `(usize, bool)` - (events processed, input activity detected)
-    /// 
+    ///
     /// # Performance
     /// * Latency: ~50ns per event (direct memory access)
     /// * CPU: Minimal, no syscalls
@@ -390,19 +482,25 @@ impl InputRingBufferManager {
     /// * Callback-based: Events processed automatically in kernel context
     pub fn process_events(&mut self) -> (usize, bool) {
         let processing_start = std::time::Instant::now();
-        
+
         // Get events processed since last call
-        let events_processed = self.events_processed.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let events_processed = self
+            .events_processed
+            .swap(0, std::sync::atomic::Ordering::Relaxed);
         let has_input_activity = events_processed > 0;
-        
+
+        if !self.latency_tracking {
+            return (events_processed, has_input_activity);
+        }
+
         // Process recent events with latency tracking (lock-free)
         let mut event_count = 0;
         while let Some(event_with_latency) = self.recent_events.pop() {
             event_count += 1;
-            
+
             // Adjust queue depth
             self.queue_depth.fetch_sub(1, Ordering::Relaxed);
-            
+
             // Calculate ring buffer processing latency
             // NOTE: This measures batch processing latency (time from ring buffer callback
             // to event processing in main loop), NOT end-to-end hardware→userspace latency.
@@ -412,8 +510,8 @@ impl InputRingBufferManager {
             let latency_ns = processing_start
                 .checked_duration_since(event_with_latency.capture_time)
                 .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);  // If clock went backwards, report 0 latency
-            
+                .unwrap_or(0); // If clock went backwards, report 0 latency
+
             // Update latency statistics
             self.stats.total_events += 1;
             if self.stats.min_latency_ns == 0 || latency_ns < self.stats.min_latency_ns {
@@ -426,58 +524,58 @@ impl InputRingBufferManager {
             self.stats.latency_samples.push_back(latency_ns);
             if self.stats.latency_samples.len() > 1024 {
                 if let Some(removed) = self.stats.latency_samples.pop_front() {
-                    self.stats.latency_sum_ns = self
-                        .stats
-                        .latency_sum_ns
-                        .saturating_sub(removed as u128);
+                    self.stats.latency_sum_ns =
+                        self.stats.latency_sum_ns.saturating_sub(removed as u128);
                 }
             }
-            
+
             // Prevent unbounded work per batch
             if event_count > 256 {
                 break;
             }
         }
-        
+
         // Merge dropped and hwm counters
         let dropped = self.queue_dropped.swap(0, Ordering::Relaxed) as u64;
-        if dropped > 0 { self.stats.queue_dropped_total += dropped; }
+        if dropped > 0 {
+            self.stats.queue_dropped_total += dropped;
+        }
         let hwm_now = self.queue_high_watermark.load(Ordering::Relaxed) as u64;
         if hwm_now > self.stats.queue_high_watermark {
             self.stats.queue_high_watermark = hwm_now;
         }
-        
+
         // Update batch statistics
         if event_count > 0 {
             self.stats.total_batches += 1;
-            self.stats.avg_events_per_batch = 
+            self.stats.avg_events_per_batch =
                 self.stats.total_events as f64 / self.stats.total_batches as f64;
         }
-        
+
         let processing_time = processing_start.elapsed();
         self.stats.total_processing_time_ns += processing_time.as_nanos() as u64;
-        
+
         // Calculate average latency
         if !self.stats.latency_samples.is_empty() {
             self.stats.avg_latency_ns =
                 (self.stats.latency_sum_ns as f64) / self.stats.latency_samples.len() as f64;
         }
-        
+
         (events_processed, has_input_activity)
     }
-    
+
     // get_recent_events method removed - not used in main loop
-    
+
     /// Get latency percentiles for userspace processing
-    /// 
+    ///
     /// # Returns
     /// * `(p50, p95, p99)` - 50th, 95th, and 99th percentiles in nanoseconds
     pub fn get_latency_percentiles(&self) -> (f64, f64, f64) {
         self.calculate_percentiles()
     }
-    
+
     /// Check if events are available in the ring buffer
-    /// 
+    ///
     /// # Returns
     /// * `bool` - true if events available
     pub fn has_events(&self) -> bool {
@@ -485,35 +583,35 @@ impl InputRingBufferManager {
         // In epoll-based version, events are processed on-demand
         !self.recent_events.is_empty()
     }
-    
+
     /// Get performance statistics
-    /// 
+    ///
     /// # Returns
     /// * `&InputRingBufferStats` - Performance statistics
     pub fn stats(&self) -> &InputRingBufferStats {
         &self.stats
     }
-    
+
     /// Calculate percentiles from a vector of latency samples
-    /// 
+    ///
     /// # Arguments
     /// * `samples` - Vector of latency samples in nanoseconds
-    /// 
+    ///
     /// # Returns
     /// * `(p50, p95, p99)` - 50th, 95th, and 99th percentiles in nanoseconds
     fn calculate_percentiles(&self) -> (f64, f64, f64) {
         if self.stats.latency_samples.is_empty() {
             return (0.0, 0.0, 0.0);
         }
-        
+
         let mut sorted_samples: Vec<u64> = self.stats.latency_samples.iter().copied().collect();
         sorted_samples.sort_unstable();
-        
+
         let len = sorted_samples.len();
         let p50 = sorted_samples[len * 50 / 100] as f64;
         let p95 = sorted_samples[len * 95 / 100] as f64;
         let p99 = sorted_samples[len * 99 / 100] as f64;
-        
+
         (p50, p95, p99)
     }
 }
@@ -534,7 +632,8 @@ impl Default for InputRingBufferManager {
             queue_dropped: std::sync::Arc::new(AtomicUsize::new(0)),
             queue_high_watermark: std::sync::Arc::new(AtomicUsize::new(0)),
             stats: InputRingBufferStats::default(),
-            ring_buffer_fd: -1,  // Invalid FD for default
+            latency_tracking: false,
+            ring_buffer_fd: -1, // Invalid FD for default
             _ring_buffer: None,
         }
     }
@@ -545,7 +644,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
-    
+
     #[test]
     fn test_gamer_input_event_classification() {
         // Test keyboard event
@@ -559,7 +658,7 @@ mod tests {
         assert!(keyboard_event.is_keyboard());
         assert!(!keyboard_event.is_mouse_movement());
         assert!(!keyboard_event.is_mouse_button());
-        
+
         // Test mouse movement event
         let mouse_move_event = GamerInputEvent {
             timestamp: 0,
@@ -571,7 +670,7 @@ mod tests {
         assert!(!mouse_move_event.is_keyboard());
         assert!(mouse_move_event.is_mouse_movement());
         assert!(!mouse_move_event.is_mouse_button());
-        
+
         // Test mouse button event
         let mouse_button_event = GamerInputEvent {
             timestamp: 0,
@@ -584,23 +683,23 @@ mod tests {
         assert!(!mouse_button_event.is_mouse_movement());
         assert!(mouse_button_event.is_mouse_button());
     }
-    
+
     #[test]
     fn test_input_ring_buffer_manager() {
         // Test default manager (no BPF skeleton available in tests)
         let mut manager = InputRingBufferManager::default();
         assert!(!manager.has_events());
-        
+
         let (events, activity) = manager.process_events();
         assert_eq!(events, 0);
         assert!(!activity);
-        
+
         let stats = manager.stats();
         assert_eq!(stats.total_events, 0);
         assert_eq!(stats.avg_latency_ns, 0.0);
         assert_eq!(stats.max_latency_ns, 0);
         assert_eq!(stats.min_latency_ns, 0);
-        
+
         // Test latency percentiles
         let (p50, p95, p99) = manager.get_latency_percentiles();
         assert_eq!(p50, 0.0);
@@ -614,7 +713,9 @@ mod tests {
         manager.events_processed.store(1, Ordering::Relaxed);
 
         let past = Instant::now() - Duration::from_millis(1);
-        manager.recent_events.push(EventWithLatency { capture_time: past });
+        manager
+            .recent_events
+            .push(EventWithLatency { capture_time: past });
 
         let (_events, has_activity) = manager.process_events();
         assert!(has_activity);

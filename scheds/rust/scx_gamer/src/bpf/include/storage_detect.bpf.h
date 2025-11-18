@@ -15,6 +15,8 @@
 
 #include "config.bpf.h"
 
+extern volatile u32 detector_trace_enable;
+
 /*
  * Storage Thread Info
  * Tracks threads that perform storage I/O operations
@@ -156,6 +158,9 @@ static __always_inline void register_storage_thread(u32 tid, u8 type)
 SEC("fentry/blk_mq_submit_bio")
 int BPF_PROG(detect_storage_block_io, void *q, void *bio)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&storage_detect_block_calls, 1, __ATOMIC_RELAXED);
 	register_storage_thread(tid, STORAGE_TYPE_UNKNOWN);
@@ -175,6 +180,9 @@ int BPF_PROG(detect_storage_block_io, void *q, void *bio)
 SEC("fentry/nvme_queue_rq")
 int BPF_PROG(detect_storage_nvme_io, void *nvmeq, void *req)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&storage_detect_nvme_calls, 1, __ATOMIC_RELAXED);
 	register_storage_thread(tid, STORAGE_TYPE_NVME);
@@ -194,6 +202,9 @@ int BPF_PROG(detect_storage_nvme_io, void *nvmeq, void *req)
 SEC("fentry/vfs_read")
 int BPF_PROG(detect_storage_fs_read, void *file, void *buf, size_t count, void *pos)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&storage_detect_fs_calls, 1, __ATOMIC_RELAXED);
 	register_storage_thread(tid, STORAGE_TYPE_FILESYSTEM);

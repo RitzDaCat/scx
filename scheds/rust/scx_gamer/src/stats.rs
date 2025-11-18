@@ -62,7 +62,7 @@ pub struct Metrics {
     #[stat(desc = "Idle CPU pick hits in interval")]
     pub idle_pick: u64,
     #[stat(desc = "Per-mm hint hits in interval")]
-    pub mm_hint_hit: u64,  // Always 0 - MM hint removed
+    pub mm_hint_hit: u64, // Always 0 - MM hint removed
     #[stat(desc = "Foreground runtime share % (0-100)")]
     pub fg_cpu_pct: u64,
     #[stat(desc = "Input triggers in interval")]
@@ -127,7 +127,7 @@ pub struct Metrics {
     pub taskgraph_threads: u64,
     #[stat(desc = "Input trigger rate (events/sec, EMA)")]
     pub input_trigger_rate: u64,
-    
+
     /* Diagnostic counters for classification debugging */
     #[stat(desc = "Total classification attempts (gamer_runnable calls)")]
     pub classification_attempts: u64,
@@ -151,7 +151,7 @@ pub struct Metrics {
     pub input_handler_name_check_attempts: u64,
     #[stat(desc = "Times input handler name pattern matched (before game thread check)")]
     pub input_handler_name_pattern_match: u64,
-    
+
     /* Diagnostic counters for network/audio/background detection */
     #[stat(desc = "Times is_network_thread() was called")]
     pub network_fentry_checks: u64,
@@ -177,7 +177,7 @@ pub struct Metrics {
     pub background_pattern_checks: u64,
     #[stat(desc = "Times background pattern samples collected")]
     pub background_pattern_samples: u64,
-    
+
     /* Fentry hook call counters (from network_detect.bpf.h and audio_detect.bpf.h) */
     #[stat(desc = "Network fentry send calls")]
     pub network_detect_send_calls: u64,
@@ -187,7 +187,7 @@ pub struct Metrics {
     pub audio_detect_alsa_calls: u64,
     #[stat(desc = "Audio fentry USB calls")]
     pub audio_detect_usb_calls: u64,
-    
+
     #[stat(desc = "Continuous input mode active (1=yes, 0=no)")]
     pub continuous_input_mode: u64,
     #[stat(desc = "Keyboard lane boost active (1=yes, 0=no)")]
@@ -208,7 +208,7 @@ pub struct Metrics {
     pub fentry_filtered_events: u64,
     #[stat(desc = "ring buffer overflow events dropped")]
     pub ringbuf_overflow_events: u64,
-    
+
     /* Ring Buffer Input Latency Tracking: Kernel→Userspace→Processing */
     #[stat(desc = "ring buffer avg latency (ns)")]
     pub ringbuf_latency_avg_ns: u64,
@@ -256,7 +256,7 @@ pub struct Metrics {
     pub prof_deadline_ns: u64,
     #[stat(desc = "deadline calls")]
     pub prof_deadline_calls: u64,
-    
+
     /* P0: CPU Placement Verification */
     #[stat(desc = "GPU threads kept on physical cores (cache affinity)")]
     pub gpu_phys_kept: u64,
@@ -264,19 +264,19 @@ pub struct Metrics {
     pub compositor_phys_kept: u64,
     #[stat(desc = "GPU preferred core fallback (when preferred core unavailable)")]
     pub gpu_pref_fallback: u64,
-    
+
     /* P0: Deadline Tracking */
     #[stat(desc = "Total deadline misses detected")]
     pub deadline_misses: u64,
     #[stat(desc = "Auto-boost actions taken (self-healing)")]
     pub auto_boosts: u64,
-    
+
     /* P0: Scheduler State */
     #[stat(desc = "Scheduler generation counter (incremented on restart/game change)")]
     pub scheduler_generation: u32,
     #[stat(desc = "Runtime-detected foreground TGID (vs foreground_tgid config)")]
     pub detected_fg_tgid: u32,
-    
+
     /* P0: Window Status */
     #[stat(desc = "Input window currently active (1=yes, 0=no)")]
     pub input_window_active: u64,
@@ -286,7 +286,7 @@ pub struct Metrics {
     pub input_window_until_ns: u64,
     #[stat(desc = "Timestamp when frame window expires (ns)")]
     pub frame_window_until_ns: u64,
-    
+
     /* P1: Boost Distribution */
     #[stat(desc = "Threads at boost level 0 (no boost)")]
     pub boost_distribution_0: u64,
@@ -304,11 +304,11 @@ pub struct Metrics {
     pub boost_distribution_6: u64,
     #[stat(desc = "Threads at boost level 7 (max boost - input handlers)")]
     pub boost_distribution_7: u64,
-    
+
     /* P1: Migration Cooldown */
     #[stat(desc = "Migrations blocked by cooldown (32ms post-migration)")]
     pub mig_blocked_cooldown: u64,
-    
+
     /* P1: Input Lane Status */
     #[stat(desc = "Keyboard lane trigger rate (events/sec)")]
     pub input_lane_keyboard_rate: u32,
@@ -316,7 +316,7 @@ pub struct Metrics {
     pub input_lane_mouse_rate: u32,
     #[stat(desc = "Other lane trigger rate (events/sec)")]
     pub input_lane_other_rate: u32,
-    
+
     /* P2: Game Detection Details */
     #[stat(desc = "Game detection method (bpf_lsm, inotify, manual, none)")]
     pub game_detection_method: String,
@@ -324,7 +324,7 @@ pub struct Metrics {
     pub game_detection_score: u8,
     #[stat(desc = "Game detection timestamp (unix seconds)")]
     pub game_detection_timestamp: u64,
-    
+
     /* P2: Frame Timing */
     #[stat(desc = "Estimated frame interval (ns, EMA of inter-frame time)")]
     pub frame_interval_ns: u64,
@@ -332,7 +332,7 @@ pub struct Metrics {
     pub frame_count: u64,
     #[stat(desc = "Timestamp of last page flip (ns)")]
     pub last_page_flip_ns: u64,
-    
+
     /* AI Analytics: Latency Percentiles (from histograms) */
     #[stat(desc = "select_cpu latency p10 (ns)")]
     pub select_cpu_latency_p10: u64,
@@ -350,7 +350,7 @@ pub struct Metrics {
     pub select_cpu_latency_p99: u64,
     #[stat(desc = "select_cpu latency p999 (ns)")]
     pub select_cpu_latency_p999: u64,
-    
+
     #[stat(desc = "enqueue latency p10 (ns)")]
     pub enqueue_latency_p10: u64,
     #[stat(desc = "enqueue latency p25 (ns)")]
@@ -367,7 +367,7 @@ pub struct Metrics {
     pub enqueue_latency_p99: u64,
     #[stat(desc = "enqueue latency p999 (ns)")]
     pub enqueue_latency_p999: u64,
-    
+
     #[stat(desc = "dispatch latency p10 (ns)")]
     pub dispatch_latency_p10: u64,
     #[stat(desc = "dispatch latency p25 (ns)")]
@@ -384,7 +384,7 @@ pub struct Metrics {
     pub dispatch_latency_p99: u64,
     #[stat(desc = "dispatch latency p999 (ns)")]
     pub dispatch_latency_p999: u64,
-    
+
     /* AI Analytics: Temporal Patterns */
     #[stat(desc = "Migrations in last 10 seconds")]
     pub migrations_last_10s: u64,
@@ -394,7 +394,7 @@ pub struct Metrics {
     pub cpu_util_trend: String,
     #[stat(desc = "Frame rate trend: increasing/decreasing/stable")]
     pub frame_rate_trend: String,
-    
+
     /* AI Analytics: Classification Confidence Scores */
     #[stat(desc = "Input handler classification confidence (0-100)")]
     pub input_handler_confidence: u8,
@@ -408,7 +408,7 @@ pub struct Metrics {
     pub network_confidence: u8,
     #[stat(desc = "Background classification confidence (0-100)")]
     pub background_confidence: u8,
-    
+
     /* AI Analytics: Thread Type Distribution Percentages */
     #[stat(desc = "Input handler threads percentage of total")]
     pub input_handler_pct: f64,
@@ -438,56 +438,72 @@ impl Metrics {
         if total == 0 {
             return 0;
         }
-        
+
         let target_count = (total as f64 * percentile / 100.0) as u64;
         let mut cumulative = 0u64;
-        
+
         // Bucket thresholds (midpoint of each bucket range)
         let thresholds = [
-            50,      // bucket 0: <100ns (use 50ns as midpoint)
-            150,     // bucket 1: 100-200ns
-            300,     // bucket 2: 200-400ns
-            600,     // bucket 3: 400-800ns
-            1200,    // bucket 4: 800ns-1.6us
-            2400,    // bucket 5: 1.6-3.2us
-            4800,    // bucket 6: 3.2-6.4us
-            9600,    // bucket 7: 6.4-12.8us
-            19200,   // bucket 8: 12.8-25.6us
-            38400,   // bucket 9: 25.6-51.2us
-            76800,   // bucket 10: 51.2-102.4us
-            153600,  // bucket 11: >102.4us (use upper bound estimate)
+            50,     // bucket 0: <100ns (use 50ns as midpoint)
+            150,    // bucket 1: 100-200ns
+            300,    // bucket 2: 200-400ns
+            600,    // bucket 3: 400-800ns
+            1200,   // bucket 4: 800ns-1.6us
+            2400,   // bucket 5: 1.6-3.2us
+            4800,   // bucket 6: 3.2-6.4us
+            9600,   // bucket 7: 6.4-12.8us
+            19200,  // bucket 8: 12.8-25.6us
+            38400,  // bucket 9: 25.6-51.2us
+            76800,  // bucket 10: 51.2-102.4us
+            153600, // bucket 11: >102.4us (use upper bound estimate)
         ];
-        
+
         for (i, &count) in hist.iter().enumerate() {
             cumulative += count;
             if cumulative >= target_count {
                 return thresholds[i];
             }
         }
-        
+
         // If we didn't find it (shouldn't happen), return last bucket threshold
         thresholds[11]
     }
-    
+
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         let edf_pct = if self.rr_enq + self.edf_enq > 0 {
             (self.edf_enq as f64) * 100.0 / (self.rr_enq + self.edf_enq) as f64
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let (in_pct, fr_pct) = if self.timer_elapsed_ns > 0 {
             (
                 (self.win_input_ns as f64) * 100.0 / (self.timer_elapsed_ns as f64),
                 (self.win_frame_ns as f64) * 100.0 / (self.timer_elapsed_ns as f64),
             )
-        } else { (0.0, 0.0) };
-        let direct_pct = if self.rr_enq + self.direct > 0 { (self.direct as f64) * 100.0 / (self.rr_enq + self.direct) as f64 } else { 0.0 };
+        } else {
+            (0.0, 0.0)
+        };
+        let direct_pct = if self.rr_enq + self.direct > 0 {
+            (self.direct as f64) * 100.0 / (self.rr_enq + self.direct) as f64
+        } else {
+            0.0
+        };
 
         let now = Local::now();
-        writeln!(w, "┌─ {} {} ─", crate::SCHEDULER_NAME, now.format("%H:%M:%S"))?;
+        writeln!(
+            w,
+            "┌─ {} {} ─",
+            crate::SCHEDULER_NAME,
+            now.format("%H:%M:%S")
+        )?;
         // Write CPU and EDF line without allocating intermediate Strings
-        write!(w, "│ CPU {:>5.1}% (avg {:>5.1}%)  EDF {:>4.1}%",
-               (self.cpu_util as f64) * 100.0 / 1024.0,
-               (self.cpu_util_avg as f64) * 100.0 / 1024.0,
-               edf_pct)?;
+        write!(
+            w,
+            "│ CPU {:>5.1}% (avg {:>5.1}%)  EDF {:>4.1}%",
+            (self.cpu_util as f64) * 100.0 / 1024.0,
+            (self.cpu_util_avg as f64) * 100.0 / 1024.0,
+            edf_pct
+        )?;
         // Conditionally write foreground info without allocations
         if !self.fg_app.is_empty() {
             write!(w, "  FG {}", self.fg_app)?;
@@ -498,11 +514,17 @@ impl Metrics {
             write!(w, "  FG {}", self.fg_pid)?;
         }
         writeln!(w)?;
-        writeln!(w, "│ q: rr {:>6}  edf {:>6}  dir {:>6} ({:>4.0}%)  sh {:>6}",
-                 self.rr_enq, self.edf_enq, self.direct, direct_pct, self.shared)?;
+        writeln!(
+            w,
+            "│ q: rr {:>6}  edf {:>6}  dir {:>6} ({:>4.0}%)  sh {:>6}",
+            self.rr_enq, self.edf_enq, self.direct, direct_pct, self.shared
+        )?;
         // Write win line without allocating intermediate Strings
-        write!(w, "│ win: in {:>4.0}%  fr {:>4.0}%   hint: idle {:>6}  mm {:>6}   FG {:>3}%   trig ",
-               in_pct, fr_pct, self.idle_pick, self.mm_hint_hit, self.fg_cpu_pct)?;
+        write!(
+            w,
+            "│ win: in {:>4.0}%  fr {:>4.0}%   hint: idle {:>6}  mm {:>6}   FG {:>3}%   trig ",
+            in_pct, fr_pct, self.idle_pick, self.mm_hint_hit, self.fg_cpu_pct
+        )?;
         // Conditionally write input mode indicator without allocations
         if self.continuous_input_mode != 0 {
             write!(w, "CONT@{}/s", self.input_trigger_rate)?;
@@ -510,19 +532,29 @@ impl Metrics {
             write!(w, "i:{:>5}", self.input_trig)?;
         }
         writeln!(w, " f:{:>5}", self.frame_trig)?;
-        writeln!(w, "│ mig {:>6}  blk {:>6}  sync {:>6}  fblk {:>6}  syncfast {:>6}",
-                 self.migrations, self.mig_blocked, self.sync_local, self.frame_mig_block, self.sync_wake_fast)?;
+        writeln!(
+            w,
+            "│ mig {:>6}  blk {:>6}  sync {:>6}  fblk {:>6}  syncfast {:>6}",
+            self.migrations,
+            self.mig_blocked,
+            self.sync_local,
+            self.frame_mig_block,
+            self.sync_wake_fast
+        )?;
         writeln!(w, "│ threads: input {:>2}  gpu {:>2}  sys_aud {:>2}  gm_aud {:>2}  comp {:>2}  net {:>2}  bg {:>2}",
                  self.input_handler_threads, self.gpu_submit_threads, self.system_audio_threads,
                  self.game_audio_threads, self.compositor_threads, self.network_threads, self.background_threads)?;
 
         // Show profiling data if available
         if self.prof_select_cpu_avg_ns > 0 || self.prof_enqueue_avg_ns > 0 {
-            writeln!(w, "│ prof: sel {:>4}ns  enq {:>4}ns  dsp {:>4}ns  dl {:>3}ns",
-                     self.prof_select_cpu_avg_ns,
-                     self.prof_enqueue_avg_ns,
-                     self.prof_dispatch_avg_ns,
-                     self.prof_deadline_avg_ns)?;
+            writeln!(
+                w,
+                "│ prof: sel {:>4}ns  enq {:>4}ns  dsp {:>4}ns  dl {:>3}ns",
+                self.prof_select_cpu_avg_ns,
+                self.prof_enqueue_avg_ns,
+                self.prof_dispatch_avg_ns,
+                self.prof_deadline_avg_ns
+            )?;
         }
         writeln!(w, "└─")?;
         Ok(())
@@ -543,13 +575,13 @@ impl Metrics {
             cpu_util_avg: self.cpu_util_avg,
             frame_hz_est: self.frame_hz_est,
             fg_pid: self.fg_pid,
-            fg_app: self.fg_app.clone(),  // String clone needed for delta (not in hot path)
+            fg_app: self.fg_app.clone(), // String clone needed for delta (not in hot path)
             fg_fullscreen: self.fg_fullscreen,
             win_input_ns: self.win_input_ns.saturating_sub(prev.win_input_ns),
             win_frame_ns: self.win_frame_ns.saturating_sub(prev.win_frame_ns),
             timer_elapsed_ns: self.timer_elapsed_ns.saturating_sub(prev.timer_elapsed_ns),
             idle_pick: self.idle_pick.saturating_sub(prev.idle_pick),
-            mm_hint_hit: 0,  // MM hint removed
+            mm_hint_hit: 0, // MM hint removed
             fg_cpu_pct: self.fg_cpu_pct,
             input_trig: self.input_trig.saturating_sub(prev.input_trig),
             frame_trig: self.frame_trig.saturating_sub(prev.frame_trig),
@@ -597,20 +629,20 @@ impl Metrics {
                 .taskgraph_borrow_grants
                 .saturating_sub(prev.taskgraph_borrow_grants),
             sync_wake_fast: self.sync_wake_fast.saturating_sub(prev.sync_wake_fast),
-            gpu_submit_threads: self.gpu_submit_threads,  // live count, not delta
-            background_threads: self.background_threads,  // live count, not delta
-            compositor_threads: self.compositor_threads,  // live count, not delta
-            network_threads: self.network_threads,  // live count, not delta
-            system_audio_threads: self.system_audio_threads,  // live count, not delta
-            game_audio_threads: self.game_audio_threads,  // live count, not delta
-            input_handler_threads: self.input_handler_threads,  // live count, not delta
-            taskgraph_threads: self.taskgraph_threads,  // live count, not delta
-            input_trigger_rate: self.input_trigger_rate,  // live rate (EMA), not delta
-            continuous_input_mode: self.continuous_input_mode,  // live flag, not delta
+            gpu_submit_threads: self.gpu_submit_threads, // live count, not delta
+            background_threads: self.background_threads, // live count, not delta
+            compositor_threads: self.compositor_threads, // live count, not delta
+            network_threads: self.network_threads,       // live count, not delta
+            system_audio_threads: self.system_audio_threads, // live count, not delta
+            game_audio_threads: self.game_audio_threads, // live count, not delta
+            input_handler_threads: self.input_handler_threads, // live count, not delta
+            taskgraph_threads: self.taskgraph_threads,   // live count, not delta
+            input_trigger_rate: self.input_trigger_rate, // live rate (EMA), not delta
+            continuous_input_mode: self.continuous_input_mode, // live flag, not delta
             continuous_input_lane_keyboard: self.continuous_input_lane_keyboard,
             continuous_input_lane_mouse: self.continuous_input_lane_mouse,
             continuous_input_lane_other: self.continuous_input_lane_other,
-            
+
             // Diagnostic counters: cumulative totals (show growth over time, not delta)
             classification_attempts: self.classification_attempts,
             first_classification_true: self.first_classification_true,
@@ -623,7 +655,7 @@ impl Metrics {
             runtime_pattern_audio_samples: self.runtime_pattern_audio_samples,
             input_handler_name_check_attempts: self.input_handler_name_check_attempts,
             input_handler_name_pattern_match: self.input_handler_name_pattern_match,
-            
+
             // Diagnostic counters for network/audio/background detection: cumulative totals
             network_fentry_checks: self.network_fentry_checks,
             network_fentry_matches: self.network_fentry_matches,
@@ -637,7 +669,7 @@ impl Metrics {
             background_name_matches: self.background_name_matches,
             background_pattern_checks: self.background_pattern_checks,
             background_pattern_samples: self.background_pattern_samples,
-            
+
             // Fentry hook call counters: cumulative totals
             network_detect_send_calls: self.network_detect_send_calls,
             network_detect_recv_calls: self.network_detect_recv_calls,
@@ -650,7 +682,7 @@ impl Metrics {
             fentry_gaming_events: self.fentry_gaming_events,
             fentry_filtered_events: self.fentry_filtered_events,
             ringbuf_overflow_events: self.ringbuf_overflow_events,
-            
+
             // Ring buffer latency: live measurements (not deltas)
             ringbuf_latency_avg_ns: self.ringbuf_latency_avg_ns,
             ringbuf_latency_p50_ns: self.ringbuf_latency_p50_ns,
@@ -665,17 +697,29 @@ impl Metrics {
 
             // Profiling: calculate averages from deltas
             prof_select_cpu_avg_ns: if self.prof_select_cpu_calls > prev.prof_select_cpu_calls {
-                (self.prof_select_cpu_ns - prev.prof_select_cpu_ns) / (self.prof_select_cpu_calls - prev.prof_select_cpu_calls)
-            } else { 0 },
+                (self.prof_select_cpu_ns - prev.prof_select_cpu_ns)
+                    / (self.prof_select_cpu_calls - prev.prof_select_cpu_calls)
+            } else {
+                0
+            },
             prof_enqueue_avg_ns: if self.prof_enqueue_calls > prev.prof_enqueue_calls {
-                (self.prof_enqueue_ns - prev.prof_enqueue_ns) / (self.prof_enqueue_calls - prev.prof_enqueue_calls)
-            } else { 0 },
+                (self.prof_enqueue_ns - prev.prof_enqueue_ns)
+                    / (self.prof_enqueue_calls - prev.prof_enqueue_calls)
+            } else {
+                0
+            },
             prof_dispatch_avg_ns: if self.prof_dispatch_calls > prev.prof_dispatch_calls {
-                (self.prof_dispatch_ns - prev.prof_dispatch_ns) / (self.prof_dispatch_calls - prev.prof_dispatch_calls)
-            } else { 0 },
+                (self.prof_dispatch_ns - prev.prof_dispatch_ns)
+                    / (self.prof_dispatch_calls - prev.prof_dispatch_calls)
+            } else {
+                0
+            },
             prof_deadline_avg_ns: if self.prof_deadline_calls > prev.prof_deadline_calls {
-                (self.prof_deadline_ns - prev.prof_deadline_ns) / (self.prof_deadline_calls - prev.prof_deadline_calls)
-            } else { 0 },
+                (self.prof_deadline_ns - prev.prof_deadline_ns)
+                    / (self.prof_deadline_calls - prev.prof_deadline_calls)
+            } else {
+                0
+            },
 
             // Raw counters (deltas for monitoring, absolute for export)
             prof_select_cpu_ns: self.prof_select_cpu_ns,
@@ -686,26 +730,26 @@ impl Metrics {
             prof_dispatch_calls: self.prof_dispatch_calls,
             prof_deadline_ns: self.prof_deadline_ns,
             prof_deadline_calls: self.prof_deadline_calls,
-            
+
             // P0: CPU Placement Verification - cumulative totals
             gpu_phys_kept: self.gpu_phys_kept,
             compositor_phys_kept: self.compositor_phys_kept,
             gpu_pref_fallback: self.gpu_pref_fallback,
-            
+
             // P0: Deadline Tracking - cumulative totals
             deadline_misses: self.deadline_misses,
             auto_boosts: self.auto_boosts,
-            
+
             // P0: Scheduler State - live values (not deltas)
             scheduler_generation: self.scheduler_generation,
             detected_fg_tgid: self.detected_fg_tgid,
-            
+
             // P0: Window Status - live values (not deltas)
             input_window_active: self.input_window_active,
             frame_window_active: self.frame_window_active,
             input_window_until_ns: self.input_window_until_ns,
             frame_window_until_ns: self.frame_window_until_ns,
-            
+
             // P1: Boost Distribution - live counts (not deltas)
             boost_distribution_0: self.boost_distribution_0,
             boost_distribution_1: self.boost_distribution_1,
@@ -715,25 +759,25 @@ impl Metrics {
             boost_distribution_5: self.boost_distribution_5,
             boost_distribution_6: self.boost_distribution_6,
             boost_distribution_7: self.boost_distribution_7,
-            
+
             // P1: Migration Cooldown - cumulative total
             mig_blocked_cooldown: self.mig_blocked_cooldown,
-            
+
             // P1: Input Lane Status - live rates (not deltas)
             input_lane_keyboard_rate: self.input_lane_keyboard_rate,
             input_lane_mouse_rate: self.input_lane_mouse_rate,
             input_lane_other_rate: self.input_lane_other_rate,
-            
+
             // P2: Game Detection Details - live values (not deltas)
             game_detection_method: self.game_detection_method.clone(),
             game_detection_score: self.game_detection_score,
             game_detection_timestamp: self.game_detection_timestamp,
-            
+
             // P2: Frame Timing - live values (not deltas)
             frame_interval_ns: self.frame_interval_ns,
             frame_count: self.frame_count,
             last_page_flip_ns: self.last_page_flip_ns,
-            
+
             // AI Analytics: Latency Percentiles - live values (not deltas)
             select_cpu_latency_p10: self.select_cpu_latency_p10,
             select_cpu_latency_p25: self.select_cpu_latency_p25,
@@ -759,13 +803,13 @@ impl Metrics {
             dispatch_latency_p95: self.dispatch_latency_p95,
             dispatch_latency_p99: self.dispatch_latency_p99,
             dispatch_latency_p999: self.dispatch_latency_p999,
-            
+
             // AI Analytics: Temporal Patterns - live values (not deltas)
             migrations_last_10s: self.migrations_last_10s,
             migrations_last_60s: self.migrations_last_60s,
             cpu_util_trend: self.cpu_util_trend.clone(),
             frame_rate_trend: self.frame_rate_trend.clone(),
-            
+
             // AI Analytics: Classification Confidence - live values (not deltas)
             input_handler_confidence: self.input_handler_confidence,
             gpu_submit_confidence: self.gpu_submit_confidence,
@@ -773,7 +817,7 @@ impl Metrics {
             system_audio_confidence: self.system_audio_confidence,
             network_confidence: self.network_confidence,
             background_confidence: self.background_confidence,
-            
+
             // AI Analytics: Thread Type Distribution - live values (not deltas)
             input_handler_pct: self.input_handler_pct,
             gpu_submit_pct: self.gpu_submit_pct,
@@ -841,7 +885,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     // Custom monitor with terminal clearing to prevent endless scrolling
     // Clears screen every 20 outputs (~100 seconds at 5s interval)
     let mut iteration_count = 0u32;
-    const CLEAR_INTERVAL: u32 = 20;  // Clear every 20 stats outputs
+    const CLEAR_INTERVAL: u32 = 20; // Clear every 20 stats outputs
 
     scx_utils::monitor_stats::<Metrics>(
         &[],
@@ -853,9 +897,12 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
             // Clear terminal every CLEAR_INTERVAL outputs
             // ANSI escape codes: \x1b[2J (clear screen) + \x1b[H (move cursor to top)
             if iteration_count % CLEAR_INTERVAL == 1 {
-                print!("\x1b[2J\x1b[H");  // Clear screen and move to top
+                print!("\x1b[2J\x1b[H"); // Clear screen and move to top
                 println!("─────────────────────────────────────────────────────────");
-                println!("scx_gamer stats (screen cleared every {} outputs)", CLEAR_INTERVAL);
+                println!(
+                    "scx_gamer stats (screen cleared every {} outputs)",
+                    CLEAR_INTERVAL
+                );
                 println!("─────────────────────────────────────────────────────────");
                 println!();
             }
@@ -878,18 +925,41 @@ pub fn monitor_watch_input(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<
             let boost_on = m.win_input_ns > 0;
             let boost_pct = if m.timer_elapsed_ns > 0 {
                 (m.win_input_ns as f64 * 100.0) / (m.timer_elapsed_ns as f64)
-            } else { 0.0 };
+            } else {
+                0.0
+            };
 
-            let kbd_lane = if m.continuous_input_lane_keyboard != 0 { "ON" } else { "off" };
-            let mouse_lane = if m.continuous_input_lane_mouse != 0 { "ON" } else { "off" };
-            let other_lane = if m.continuous_input_lane_other != 0 { "ON" } else { "off" };
-            let cont = if m.continuous_input_mode != 0 { "CONT" } else { "edge" };
+            let kbd_lane = if m.continuous_input_lane_keyboard != 0 {
+                "ON"
+            } else {
+                "off"
+            };
+            let mouse_lane = if m.continuous_input_lane_mouse != 0 {
+                "ON"
+            } else {
+                "off"
+            };
+            let other_lane = if m.continuous_input_lane_other != 0 {
+                "ON"
+            } else {
+                "off"
+            };
+            let cont = if m.continuous_input_mode != 0 {
+                "CONT"
+            } else {
+                "edge"
+            };
 
             println!(
                 "[{}] BOOST:{} ({:>3.0}%)  KBD:{}  MOUSE:{}  OTHER:{}  mode:{}  trig_rate:{}/s",
                 chrono::Local::now().format("%H:%M:%S"),
-                if boost_on { "ON" } else { "off" }, boost_pct,
-                kbd_lane, mouse_lane, other_lane, cont, m.input_trigger_rate
+                if boost_on { "ON" } else { "off" },
+                boost_pct,
+                kbd_lane,
+                mouse_lane,
+                other_lane,
+                cont,
+                m.input_trigger_rate
             );
             Ok(())
         },

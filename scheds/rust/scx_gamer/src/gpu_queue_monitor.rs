@@ -48,12 +48,12 @@ impl GpuQueueMonitor {
         Some(busy.min(100))
     }
 
-    pub fn guard_ns(&self, busy_percent: u32) -> u64 {
+    pub fn guard_ns(busy_percent: u32) -> u64 {
         match busy_percent {
-            80..=u32::MAX => 8_000_000,   // 8ms for heavy GPU workloads
-            50..=79 => 5_000_000,          // 5ms for moderate load
-            20..=49 => 3_000_000,          // 3ms for light load
-            _ => 0,                        // Treat as idle
+            80..=u32::MAX => 8_000_000, // 8ms for heavy GPU workloads
+            50..=79 => 5_000_000,       // 5ms for moderate load
+            20..=49 => 3_000_000,       // 3ms for light load
+            _ => 0,                     // Treat as idle
         }
     }
 }
@@ -94,4 +94,3 @@ pub fn monotonic_nanos() -> u64 {
         }
     }
 }
-

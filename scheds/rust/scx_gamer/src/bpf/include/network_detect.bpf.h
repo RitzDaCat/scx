@@ -15,6 +15,8 @@
 
 #include "config.bpf.h"
 
+extern volatile u32 detector_trace_enable;
+
 /*
  * Network Thread Info
  * Tracks threads that perform network I/O operations
@@ -164,6 +166,9 @@ static __always_inline void register_network_thread(u32 tid, u8 type)
 SEC("fentry/sock_sendmsg")
 int BPF_PROG(detect_network_send, void *sock, void *msg, size_t size)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&network_detect_send_calls, 1, __ATOMIC_RELAXED);
 	register_network_thread(tid, NETWORK_TYPE_UNKNOWN);
@@ -180,6 +185,9 @@ int BPF_PROG(detect_network_send, void *sock, void *msg, size_t size)
 SEC("fentry/sock_recvmsg")
 int BPF_PROG(detect_network_recv, void *sock, void *msg, size_t size, int flags)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&network_detect_recv_calls, 1, __ATOMIC_RELAXED);
 	register_network_thread(tid, NETWORK_TYPE_UNKNOWN);
@@ -199,6 +207,9 @@ int BPF_PROG(detect_network_recv, void *sock, void *msg, size_t size, int flags)
 SEC("fentry/tcp_sendmsg")
 int BPF_PROG(detect_network_tcp_send, void *sock, void *msg, size_t size)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&network_detect_tcp_calls, 1, __ATOMIC_RELAXED);
 	register_network_thread(tid, NETWORK_TYPE_TCP);
@@ -218,6 +229,9 @@ int BPF_PROG(detect_network_tcp_send, void *sock, void *msg, size_t size)
 SEC("fentry/udp_sendmsg")
 int BPF_PROG(detect_network_udp_send, void *sock, void *msg, size_t size)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&network_detect_udp_calls, 1, __ATOMIC_RELAXED);
 	register_network_thread(tid, NETWORK_TYPE_GAMING);

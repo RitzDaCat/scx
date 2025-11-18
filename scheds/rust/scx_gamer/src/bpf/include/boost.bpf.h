@@ -20,6 +20,7 @@ extern const volatile u64 mouse_boost_ns;
 extern volatile u64 input_until_global;
 extern volatile u64 input_lane_until[INPUT_LANE_MAX];
 extern volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
+extern volatile u32 kbd_pressed_count;
 extern volatile u32 input_trigger_rate;
 extern volatile u64 last_input_trigger_ns;
 extern volatile u64 napi_until_global;
@@ -35,6 +36,8 @@ extern volatile u64 nr_input_force_dispatch;
 extern volatile u64 nr_input_force_dispatch_late;
 extern volatile u64 input_force_dispatch_latency_ns;
 extern volatile u64 input_force_dispatch_latency_max_ns;
+
+static __always_inline void fanout_set_input_lane(u8 lane, u64 now);
 
 #define NAPI_SCAN_MAX 32
 
@@ -172,8 +175,21 @@ static __always_inline bool is_input_lane_active(u8 lane, u64 now)
 	
 	/* TIER 0: Array access (volatile array, cache-friendly) */
 	/* BPF VERIFIER: Explicit bounds check before array access */
-	if (likely(lane < INPUT_LANE_MAX))
-		return time_before(now, input_lane_until[lane]);
+	if (likely(lane < INPUT_LANE_MAX)) {
+		bool active = time_before(now, input_lane_until[lane]);
+
+		if (!active && lane == INPUT_LANE_KEYBOARD && kbd_pressed_count > 0) {
+			u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
+			if (!time_before(now + guard, input_lane_until[lane]))
+				fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
+			active = time_before(now, input_lane_until[lane]);
+		}
+
+		if (!active && continuous_input_lane_mode[lane])
+			continuous_input_lane_mode[lane] = 0;
+
+		return active;
+	}
 	
 	/* Fallback (should never reach here due to bounds check above) */
 	return time_before(now, input_until_global);
@@ -333,6 +349,26 @@ static __always_inline bool is_napi_softirq_preferred_cpu(s32 cpu, u64 now)
 
 	/* TIER 0: Check if CPU handled net softirq within timeout window */
 	return time_before(now, napi_last_softirq_ns[cpu] + NAPI_PREFER_TIMEOUT_NS);
+}
+
+#define INPUT_IDLE_DECAY_NS 1000000ULL
+
+static __always_inline void maybe_decay_input_windows(u64 now)
+{
+	if (continuous_input_mode || input_trigger_rate > 0) {
+		if (!time_before(now, last_input_trigger_ns + INPUT_IDLE_DECAY_NS)) {
+			input_trigger_rate = 0;
+			continuous_input_mode = 0;
+		}
+	}
+
+#pragma unroll
+	for (int lane = 0; lane < INPUT_LANE_MAX; lane++) {
+		if (!continuous_input_lane_mode[lane])
+			continue;
+		if (!time_before(now, input_lane_until[lane]))
+			continuous_input_lane_mode[lane] = 0;
+	}
 }
 
 /*

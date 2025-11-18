@@ -15,6 +15,8 @@
 
 #include "config.bpf.h"
 
+extern volatile u32 detector_trace_enable;
+
 /*
  * Memory Thread Info
  * Tracks threads that perform memory-intensive operations
@@ -164,6 +166,9 @@ static __always_inline void register_memory_thread(u32 tid, u8 memory_type)
 SEC("tracepoint/syscalls/sys_enter_brk")
 int BPF_PROG(detect_memory_page_fault, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&memory_detect_page_faults, 1, __ATOMIC_RELAXED);
 	register_memory_thread(tid, MEMORY_TYPE_PAGE_FAULT);
@@ -180,6 +185,9 @@ int BPF_PROG(detect_memory_page_fault, void *args)
 SEC("tracepoint/syscalls/sys_enter_mprotect")
 int BPF_PROG(detect_memory_mm_fault, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&memory_detect_allocations, 1, __ATOMIC_RELAXED);
 	register_memory_thread(tid, MEMORY_TYPE_ALLOCATION);
@@ -196,6 +204,9 @@ int BPF_PROG(detect_memory_mm_fault, void *args)
 SEC("tracepoint/syscalls/sys_enter_mmap")
 int BPF_PROG(detect_memory_allocation, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&memory_detect_allocations, 1, __ATOMIC_RELAXED);
 	register_memory_thread(tid, MEMORY_TYPE_ALLOCATION);
@@ -212,6 +223,9 @@ int BPF_PROG(detect_memory_allocation, void *args)
 SEC("tracepoint/syscalls/sys_enter_munmap")
 int BPF_PROG(detect_memory_deallocation, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&memory_detect_allocations, 1, __ATOMIC_RELAXED);
 	register_memory_thread(tid, MEMORY_TYPE_ALLOCATION);

@@ -44,20 +44,22 @@ pub fn trigger_input_window(skel: &mut crate::BpfSkel) -> Result<(), u32> {
 
 #[inline(always)]
 pub fn trigger_frame_window(skel: &mut crate::BpfSkel) -> Result<(), u32> {
-    if let Some(bss) = skel.maps.bss_data.as_mut() {
-        bss.cmd_flags |= 1u32 << 1;
-        return Ok(());
-    }
-    Err(1)
+    trigger_input_window(skel)
 }
 
 #[inline(always)]
 pub fn trigger_napi_softirq_window(skel: &mut crate::BpfSkel) -> Result<(), u32> {
-    if let Some(bss) = skel.maps.bss_data.as_mut() {
-        bss.cmd_flags |= 1u32 << 2;
-        return Ok(());
+    let prog = &mut skel.progs.set_napi_softirq_window;
+    match prog.test_run(libbpf_rs::ProgramInput::default()) {
+        Ok(out) => {
+            if out.return_value == 0 {
+                Ok(())
+            } else {
+                Err(out.return_value)
+            }
+        }
+        Err(_) => Err(1),
     }
-    Err(1)
 }
 
 #[inline(always)]
@@ -121,11 +123,34 @@ pub fn trigger_input_with_napi_lane(skel: &mut crate::BpfSkel, lane: InputLane) 
 }
 
 #[inline(always)]
-pub fn set_power_hint(
-    skel: &mut crate::BpfSkel,
-    level: u32,
-    duration_ms: u32,
-) -> Result<(), u32> {
+pub fn set_runtime_trace(skel: &mut crate::BpfSkel, enable: bool) -> Result<(), u32> {
+    if let Some(bss) = skel.maps.bss_data.as_mut() {
+        bss.runtime_trace_enable = if enable { 1 } else { 0 };
+        return Ok(());
+    }
+    Err(1)
+}
+
+#[inline(always)]
+pub fn set_detector_trace(skel: &mut crate::BpfSkel, enable: bool) -> Result<(), u32> {
+    if let Some(bss) = skel.maps.bss_data.as_mut() {
+        bss.detector_trace_enable = if enable { 1 } else { 0 };
+        return Ok(());
+    }
+    Err(1)
+}
+
+#[inline(always)]
+pub fn set_dispatch_events(skel: &mut crate::BpfSkel, enable: bool) -> Result<(), u32> {
+    if let Some(bss) = skel.maps.bss_data.as_mut() {
+        bss.dispatch_event_enable = if enable { 1 } else { 0 };
+        return Ok(());
+    }
+    Err(1)
+}
+
+#[inline(always)]
+pub fn set_power_hint(skel: &mut crate::BpfSkel, level: u32, duration_ms: u32) -> Result<(), u32> {
     let prog = &mut skel.progs.set_power_hint;
     let mut args = PowerHintArg { level, duration_ms };
     let prog_input = libbpf_rs::ProgramInput {
