@@ -62,9 +62,9 @@ pub struct MetricsSample {
     pub dispatches_per_sec: f64,
 
     /// Quality metrics
-    pub migration_block_rate: f64,  // % of migrations blocked
-    pub mm_hint_hit_rate: f64,      // % of mm hints that hit
-    pub direct_dispatch_rate: f64,  // % of direct dispatches
+    pub migration_block_rate: f64, // % of migrations blocked
+    pub mm_hint_hit_rate: f64,     // % of mm hints that hit
+    pub direct_dispatch_rate: f64, // % of direct dispatches
 
     /// Thread classification
     pub input_handler_count: u64,
@@ -99,11 +99,15 @@ pub struct MLCollector {
     config: SchedulerConfig,
     sample_interval: Duration,
     last_sample_time: SystemTime,
-    last_save_time: SystemTime,  // Track last save to prevent unbounded memory growth
+    last_save_time: SystemTime, // Track last save to prevent unbounded memory growth
 }
 
 impl MLCollector {
-    pub fn new(data_dir: impl AsRef<Path>, config: SchedulerConfig, sample_interval: Duration) -> Result<Self> {
+    pub fn new(
+        data_dir: impl AsRef<Path>,
+        config: SchedulerConfig,
+        sample_interval: Duration,
+    ) -> Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir)?;
 
@@ -127,7 +131,7 @@ impl MLCollector {
             if let Err(e) = self.save_samples(&prev_game) {
                 log::warn!("Failed to save ML data for {}: {}", prev_game.name, e);
             } else {
-                self.last_save_time = SystemTime::now();  // Update save time on successful save
+                self.last_save_time = SystemTime::now(); // Update save time on successful save
             }
             // No need to clear - drain() already emptied the vec
         }
@@ -138,8 +142,12 @@ impl MLCollector {
     /// Record a performance sample
     pub fn record_sample(&mut self, metrics: &Metrics) -> Result<()> {
         let now = SystemTime::now();
-        if now.duration_since(self.last_sample_time).unwrap_or(Duration::ZERO) < self.sample_interval {
-            return Ok(());  // Too soon, skip sample
+        if now
+            .duration_since(self.last_sample_time)
+            .unwrap_or(Duration::ZERO)
+            < self.sample_interval
+        {
+            return Ok(()); // Too soon, skip sample
         }
 
         self.last_sample_time = now;
@@ -160,13 +168,19 @@ impl MLCollector {
         };
 
         self.samples.push(sample);
-        log::debug!("ML: Recorded sample #{} for {}", self.samples.len(), game.name);
+        log::debug!(
+            "ML: Recorded sample #{} for {}",
+            self.samples.len(),
+            game.name
+        );
 
         // Auto-save strategy to prevent unbounded memory growth:
         // 1. Save every 100 samples (original logic)
         // 2. Save every 5 minutes (time-based flush to prevent multi-hour accumulation)
         const MAX_SAVE_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
-        let time_since_save = now.duration_since(self.last_save_time).unwrap_or(Duration::ZERO);
+        let time_since_save = now
+            .duration_since(self.last_save_time)
+            .unwrap_or(Duration::ZERO);
 
         if self.samples.len() >= 100 || time_since_save >= MAX_SAVE_INTERVAL {
             self.save_samples(&game)?;
@@ -189,17 +203,23 @@ impl MLCollector {
             latency_enqueue_avg_ns: m.prof_enqueue_avg_ns,
             latency_dispatch_avg_ns: m.prof_dispatch_avg_ns,
             latency_deadline_avg_ns: m.prof_deadline_avg_ns,
-            enqueues_per_sec: total_enq as f64,  // Will be divided by interval in analysis
+            enqueues_per_sec: total_enq as f64, // Will be divided by interval in analysis
             dispatches_per_sec: (m.direct + m.shared) as f64,
             migration_block_rate: if total_mig > 0 {
                 (m.mig_blocked as f64) / (total_mig as f64)
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             mm_hint_hit_rate: if total_idle_pick > 0 {
                 (m.mm_hint_hit as f64) / (total_idle_pick as f64)
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             direct_dispatch_rate: if total_enq > 0 {
                 (m.direct as f64) / (total_enq as f64)
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             input_handler_count: m.input_handler_threads,
             gpu_submit_count: m.gpu_submit_threads,
             compositor_count: m.compositor_threads,
@@ -230,8 +250,12 @@ impl MLCollector {
         let json = serde_json::to_string_pretty(&data)?;
         fs::write(&filename, json)?;
 
-        log::info!("ML: Saved {} samples for {} (score: {:.2})",
-                   sample_count, game.name, current_score);
+        log::info!(
+            "ML: Saved {} samples for {} (score: {:.2})",
+            sample_count,
+            game.name,
+            current_score
+        );
 
         Ok(())
     }
@@ -405,7 +429,11 @@ impl Drop for MLCollector {
                 is_steam: false,
             });
 
-            log::info!("ML: Saving {} pending samples on shutdown for '{}'", self.samples.len(), game.name);
+            log::info!(
+                "ML: Saving {} pending samples on shutdown for '{}'",
+                self.samples.len(),
+                game.name
+            );
             if let Err(e) = self.save_samples(&game) {
                 log::warn!("ML: Failed to save final samples: {}", e);
             } else {

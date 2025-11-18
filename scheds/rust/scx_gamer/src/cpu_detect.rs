@@ -13,7 +13,7 @@ use std::fs;
 #[derive(Debug, Clone)]
 pub struct CpuInfo {
     pub model_name: String,
-    pub safe_name: String,  // Filesystem-safe version
+    pub safe_name: String, // Filesystem-safe version
 }
 
 impl CpuInfo {
@@ -75,17 +75,13 @@ impl CpuInfo {
         // Look for patterns like "9800X3D", "14900K", "5950X"
         for part in &parts {
             // If part contains numbers and letters, likely the model
-            if part.chars().any(|c| c.is_numeric()) &&
-               part.chars().any(|c| c.is_alphabetic()) {
+            if part.chars().any(|c| c.is_numeric()) && part.chars().any(|c| c.is_alphabetic()) {
                 return part.to_string();
             }
         }
 
         // Fallback: use first 2-3 meaningful parts
-        parts.iter()
-            .take(3).copied()
-            .collect::<Vec<_>>()
-            .join("_")
+        parts.iter().take(3).copied().collect::<Vec<_>>().join("_")
     }
 }
 

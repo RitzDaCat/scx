@@ -6,7 +6,7 @@
 // Centralized performance scoring logic for ML-based parameter optimization.
 // Used by both ml_collect and ml_autotune to ensure consistent evaluation.
 
-use crate::ml_collect::{PerformanceSample, MetricsSample};
+use crate::ml_collect::{MetricsSample, PerformanceSample};
 
 /// Calculate performance score for ML optimization (higher is better).
 ///
@@ -43,7 +43,7 @@ pub fn calculate_performance_score(samples: &[PerformanceSample]) -> f64 {
         // **COMBINED SCORE** with reweighted priorities (no frame data)
         total_score += latency_score * 10.0     // Latency is now primary
                      + cache_score * 5.0        // Cache efficiency
-                     + migration_score * 2.0;   // Migration control
+                     + migration_score * 2.0; // Migration control
     }
 
     total_score / samples.len() as f64
@@ -72,7 +72,7 @@ fn calculate_migration_score(m: &MetricsSample) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ml_collect::{PerformanceSample, SchedulerConfig, GameInfo};
+    use crate::ml_collect::{GameInfo, PerformanceSample, SchedulerConfig};
 
     #[test]
     fn test_scoring_consistency() {
@@ -122,6 +122,10 @@ mod tests {
         let score = calculate_performance_score(&[sample]);
 
         // Reasonable config should score > 0 (scheduler metrics only now)
-        assert!(score > 0.0, "Score should be positive for valid config: {}", score);
+        assert!(
+            score > 0.0,
+            "Score should be positive for valid config: {}",
+            score
+        );
     }
 }

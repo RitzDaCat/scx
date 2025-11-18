@@ -97,10 +97,7 @@ impl PowerMonitor {
                 "Power monitor: {} sensor -> {} ({})",
                 sensor.kind.name(),
                 sensor.path.display(),
-                sensor
-                    .label
-                    .as_deref()
-                    .unwrap_or("unlabeled")
+                sensor.label.as_deref().unwrap_or("unlabeled")
             );
         } else {
             warn!("Power monitor: temperature sensor not found; thermal hints disabled");
@@ -111,10 +108,7 @@ impl PowerMonitor {
                 "Power monitor: {} sensor -> {} ({})",
                 sensor.kind.name(),
                 sensor.path.display(),
-                sensor
-                    .label
-                    .as_deref()
-                    .unwrap_or("unlabeled")
+                sensor.label.as_deref().unwrap_or("unlabeled")
             );
         } else {
             warn!("Power monitor: power sensor not found; power-limit hints disabled");
@@ -181,7 +175,8 @@ impl PowerMonitor {
 
         if desired > 0 {
             let duration_ms = hint_duration(desired);
-            let refresh = Duration::from_millis((duration_ms.max(1) as u64) / 2).max(MIN_REFRESH_INTERVAL);
+            let refresh =
+                Duration::from_millis((duration_ms.max(1) as u64) / 2).max(MIN_REFRESH_INTERVAL);
             if now.duration_since(self.last_change) >= refresh {
                 self.last_change = now;
                 return Some(PowerHint {
@@ -347,7 +342,12 @@ fn discover_temperature_sensor() -> Option<Sensor> {
 
 fn discover_power_sensor() -> Option<Sensor> {
     let preferred_names = ["zenpower"];
-    discover_sensor("power", 1f64 / 1_000_000f64, SensorKind::Power, &preferred_names)
+    discover_sensor(
+        "power",
+        1f64 / 1_000_000f64,
+        SensorKind::Power,
+        &preferred_names,
+    )
 }
 
 fn discover_sensor(
@@ -397,12 +397,7 @@ fn discover_sensor(
     choose_best_sensor(fallback, prefix)
 }
 
-fn gather_hwmon_sensors(
-    base: &Path,
-    prefix: &str,
-    scale: f64,
-    kind: SensorKind,
-) -> Vec<Sensor> {
+fn gather_hwmon_sensors(base: &Path, prefix: &str, scale: f64, kind: SensorKind) -> Vec<Sensor> {
     let mut sensors = Vec::new();
     let entries = match fs::read_dir(base) {
         Ok(entries) => entries,
@@ -418,7 +413,9 @@ fn gather_hwmon_sensors(
         }
         let suffix = &name[prefix.len()..name.len() - "_input".len()];
         let label_path = base.join(format!("{prefix}{suffix}_label"));
-        let label = fs::read_to_string(&label_path).ok().map(|s| s.trim().to_string());
+        let label = fs::read_to_string(&label_path)
+            .ok()
+            .map(|s| s.trim().to_string());
         if let Ok(file) = File::open(&path) {
             sensors.push(Sensor {
                 path,
@@ -463,4 +460,3 @@ fn choose_best_sensor(mut sensors: Vec<Sensor>, prefix: &str) -> Option<Sensor> 
 
     sensors.into_iter().next()
 }
-

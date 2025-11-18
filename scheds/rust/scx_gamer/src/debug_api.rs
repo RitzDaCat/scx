@@ -5,12 +5,12 @@
 //
 // Simple HTTP server that exposes scheduler metrics as JSON for debugging/MCP integration
 
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use crate::stats::Metrics;
 use anyhow::Result;
 use log::{info, warn};
 use serde_json;
-use crate::stats::Metrics;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 /// Shared metrics storage for the debug API
 /// PERF: Uses Arc<Metrics> to avoid expensive clone operations (2000-4000× faster)
@@ -38,15 +38,22 @@ impl DebugApiState {
     /// Get metrics Arc clone (cheap reference counting)
     /// PERF: Arc::clone is ~1-2ns vs struct clone ~100-200µs
     pub fn get_metrics(&self) -> Option<Arc<Metrics>> {
-        self.metrics.read().ok().and_then(|m| m.as_ref().map(Arc::clone))
+        self.metrics
+            .read()
+            .ok()
+            .and_then(|m| m.as_ref().map(Arc::clone))
     }
 }
 
 /// Start the debug API HTTP server
-pub fn start_debug_api(port: u16, state: Arc<DebugApiState>, shutdown: Arc<std::sync::atomic::AtomicBool>) -> Result<std::thread::JoinHandle<()>> {
+pub fn start_debug_api(
+    port: u16,
+    state: Arc<DebugApiState>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<std::thread::JoinHandle<()>> {
     let bind_addr = format!("127.0.0.1:{}", port);
     info!("🔌 Debug API starting on http://{}", bind_addr);
-    
+
     let handle = std::thread::Builder::new()
         .name("debug-api".into())
         .spawn(move || {
@@ -77,7 +84,8 @@ pub fn start_debug_api(port: u16, state: Arc<DebugApiState>, shutdown: Arc<std::
                     }
 
                     // Use non-blocking accept with timeout
-                    match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+                    match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
+                    {
                         Ok(Ok((stream, addr))) => {
                             let state_clone = Arc::clone(&state);
                             tokio::spawn(async move {
@@ -101,7 +109,10 @@ pub fn start_debug_api(port: u16, state: Arc<DebugApiState>, shutdown: Arc<std::
     Ok(handle)
 }
 
-async fn handle_connection(mut stream: tokio::net::TcpStream, state: Arc<DebugApiState>) -> Result<()> {
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    state: Arc<DebugApiState>,
+) -> Result<()> {
     use tokio::io::AsyncReadExt;
 
     // Simple HTTP request parsing (just enough for GET /metrics)
@@ -114,19 +125,25 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: Arc<DebugAp
             return Ok(());
         }
     };
-    
+
     let request = String::from_utf8_lossy(&buffer[..n]);
     let lines: Vec<&str> = request.lines().collect();
-    
+
     if lines.is_empty() {
         return Ok(());
     }
 
     let request_line = lines[0];
     let parts: Vec<&str> = request_line.split_whitespace().collect();
-    
+
     if parts.len() < 2 {
-        return send_response(&mut stream, 400, "application/json", r#"{"error": "Invalid request"}"#).await;
+        return send_response(
+            &mut stream,
+            400,
+            "application/json",
+            r#"{"error": "Invalid request"}"#,
+        )
+        .await;
     }
 
     let method = parts[0];
@@ -195,7 +212,7 @@ async fn send_response(
     body: &str,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    
+
     let status_text = match status_code {
         200 => "OK",
         400 => "Bad Request",
@@ -203,7 +220,7 @@ async fn send_response(
         500 => "Internal Server Error",
         _ => "Unknown",
     };
-    
+
     let response = format!(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
@@ -212,11 +229,14 @@ async fn send_response(
          Connection: close\r\n\
          \r\n\
          {}",
-        status_code, status_text, content_type, body.len(), body
+        status_code,
+        status_text,
+        content_type,
+        body.len(),
+        body
     );
-    
+
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
 }
-

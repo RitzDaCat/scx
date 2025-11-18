@@ -198,7 +198,10 @@ PROFILE
                 launch_scx "Baseline" \
                     --env "RUST_LOG=warn" \
                     --arg "--slice-us" \
-                    --arg "1000"
+                    --arg "1000" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             2)
@@ -227,7 +230,10 @@ PROFILE
                     --arg "10000" \
                     --arg "--preferred-idle-scan" \
                     --arg "--mm-affinity" \
-                    --arg "--prefer-napi-on-input"
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             3)
@@ -244,9 +250,11 @@ PROFILE
                 echo "  --mig-max 4                    (Migration rate limiting)"
                 echo "  --preferred-idle-scan          (Smart CPU placement)"
                 echo "  --avoid-smt                    (Prevents SMT contention)"
+                echo "  Instrumentation: Detectors, runtime trace, and dispatch events are OFF"
                 echo
                 launch_scx "Esports" \
                     --env "RUST_LOG=warn" \
+                    --env "SCX_GAMER_INPUT_LATENCY=0" \
                     --arg "--slice-us" \
                     --arg "250" \
                     --arg "--wakeup-timer-us" \
@@ -260,7 +268,10 @@ PROFILE
                     --arg "--mig-max" \
                     --arg "4" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--avoid-smt"
+                    --arg "--avoid-smt" \
+                    --arg "--disable-runtime-trace" \
+                    --arg "--disable-detectors" \
+                    --arg "--disable-dispatch-events"
                 return
                 ;;
             4)
@@ -278,7 +289,10 @@ PROFILE
                     --arg "--slice-us" \
                     --arg "500" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--prefer-napi-on-input"
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             5)
@@ -326,6 +340,7 @@ PROFILE
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
                     launch_scx "Ultra-Latency" \
                         --env "RUST_LOG=warn" \
+                        --env "SCX_GAMER_INPUT_LATENCY=0" \
                         --arg "--realtime-scheduling" \
                         --arg "--rt-priority" \
                         --arg "50" \
@@ -342,7 +357,10 @@ PROFILE
                         --arg "--avoid-smt" \
                         --arg "--mig-max" \
                         --arg "2" \
-                        --arg "--preferred-idle-scan"
+                        --arg "--preferred-idle-scan" \
+                        --arg "--disable-runtime-trace" \
+                        --arg "--disable-detectors" \
+                        --arg "--disable-dispatch-events"
                 else
                     echo
                     echo "Ultra-Latency mode cancelled."
@@ -393,6 +411,7 @@ PROFILE
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
                     launch_scx "SCHED_DEADLINE" \
                         --env "RUST_LOG=warn" \
+                        --env "SCX_GAMER_INPUT_LATENCY=0" \
                         --arg "--deadline-scheduling" \
                         --arg "--deadline-runtime-us" \
                         --arg "800" \
@@ -410,7 +429,10 @@ PROFILE
                         --arg "250" \
                         --arg "--avoid-smt" \
                         --arg "--mig-max" \
-                        --arg "4"
+                        --arg "4" \
+                        --arg "--disable-runtime-trace" \
+                        --arg "--disable-detectors" \
+                        --arg "--disable-dispatch-events"
                 else
                     echo
                     echo "SCHED_DEADLINE mode cancelled."
@@ -436,7 +458,10 @@ run_verbose() {
     launch_scx "Verbose Mode" \
         --env "RUST_LOG=info" \
         --arg "--stats" \
-        --arg "1.0"
+        --arg "1.0" \
+        --arg "--enable-runtime-trace" \
+        --arg "--enable-detectors" \
+        --arg "--enable-dispatch-events"
 }
 
 run_tui() {
@@ -480,7 +505,10 @@ TUI_PROFILE
                 launch_scx "TUI Baseline" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
-                    --arg "${interval}"
+                    --arg "${interval}" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             2)
@@ -493,7 +521,10 @@ TUI_PROFILE
                     --arg "--tui" \
                     --arg "${interval}" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--mm-affinity"
+                    --arg "--mm-affinity" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             3)
@@ -518,7 +549,10 @@ TUI_PROFILE
                     --arg "--wakeup-timer-us" \
                     --arg "250" \
                     --arg "--mig-max" \
-                    --arg "2"
+                    --arg "2" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             4)
@@ -531,7 +565,10 @@ TUI_PROFILE
                     --arg "--tui" \
                     --arg "${interval}" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--prefer-napi-on-input"
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             q|Q|0)
@@ -559,7 +596,10 @@ run_ml_collect() {
         --arg "--ml-sample-interval" \
         --arg "5.0" \
         --arg "--stats" \
-        --arg "2.0"
+        --arg "2.0" \
+        --arg "--enable-runtime-trace" \
+        --arg "--enable-detectors" \
+        --arg "--enable-dispatch-events"
 }
 
 run_ml_profiles() {
@@ -571,7 +611,10 @@ run_ml_profiles() {
     echo
     launch_scx "ML Profile Manager" \
         --env "RUST_LOG=info" \
-        --arg "--ml-profiles"
+        --arg "--ml-profiles" \
+        --arg "--enable-runtime-trace" \
+        --arg "--enable-detectors" \
+        --arg "--enable-dispatch-events"
 }
 
 run_ml_full() {
@@ -592,7 +635,10 @@ run_ml_full() {
         --arg "--ml-bayesian" \
         --arg "--stats" \
         --arg "2.0" \
-        --arg "--verbose"
+        --arg "--verbose" \
+        --arg "--enable-runtime-trace" \
+        --arg "--enable-detectors" \
+        --arg "--enable-dispatch-events"
 }
 
 run_debug() {
@@ -613,7 +659,10 @@ run_debug() {
         --env "SCX_BPF_LOG=trace" \
         --arg "--stats" \
         --arg "1.0" \
-        --arg "--verbose"
+        --arg "--verbose" \
+        --arg "--enable-runtime-trace" \
+        --arg "--enable-detectors" \
+        --arg "--enable-dispatch-events"
 }
 
 run_debug_api() {
@@ -669,7 +718,10 @@ DEBUG_API_MENU
                     --arg "--debug-api" \
                     --arg "${port}" \
                     --arg "--slice-us" \
-                    --arg "1000"
+                    --arg "1000" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             2)
@@ -681,6 +733,7 @@ DEBUG_API_MENU
                 echo
                 launch_scx "Esports + Debug API" \
                     --env "RUST_LOG=info" \
+                    --env "SCX_GAMER_INPUT_LATENCY=0" \
                     --arg "--debug-api" \
                     --arg "${port}" \
                     --arg "--slice-us" \
@@ -697,7 +750,10 @@ DEBUG_API_MENU
                     --arg "4" \
                     --arg "--preferred-idle-scan" \
                     --arg "--avoid-smt" \
-                    --arg "--prefer-napi-on-input"
+                    --arg "--prefer-napi-on-input" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             3)
@@ -714,7 +770,10 @@ DEBUG_API_MENU
                     --arg "--debug-api" \
                     --arg "${port}" \
                     --arg "--preferred-idle-scan" \
-                    --arg "--mm-affinity"
+                    --arg "--mm-affinity" \
+                    --arg "--enable-runtime-trace" \
+                    --arg "--enable-detectors" \
+                    --arg "--enable-dispatch-events"
                 return
                 ;;
             4)

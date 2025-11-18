@@ -80,11 +80,8 @@ const volatile u32 freq_ccd_cpu_count;
 #define BACKGROUND_EXEC_THRESH_NS        5000000ULL	/* >5ms exec suggests CPU-intensive background work */
 #define BACKGROUND_FREQ_MAX              10ULL		/* low wakeup freq (<10 = >100ms sleep) indicates batch */
 #define BACKGROUND_STABLE_SAMPLES        4		/* require N consistent samples */
-/* Command flags for userspace -> BPF triggers via BSS cmd_flags. */
-#define CMD_INPUT   (1u << 0)
-#define CMD_FRAME   (1u << 1)
-#define CMD_NAPI    (1u << 2)
-
+#define UTIL_SAMPLE_INTERVAL_NS          (500ULL * NSEC_PER_USEC)  /* 0.5ms */
+#define HOUSEKEEPING_INTERVAL_NS         (5ULL * NSEC_PER_MSEC)
 /*
  * Thresholds for applying hysteresis to CPU performance scaling:
  *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
@@ -155,7 +152,7 @@ const volatile bool mm_affinity;
 /*
  * Enable deferred wakeup.
  */
-const volatile bool deferred_wakeups = true;
+const volatile bool deferred_wakeups = false;
 
 /*
  * Ignore synchronous wakeup events.
@@ -237,6 +234,8 @@ volatile u64 interactive_sys_avg;
 volatile u64 win_input_ns_total;
 volatile u64 win_frame_ns_total;
 volatile u64 timer_elapsed_ns_total;
+volatile u64 last_util_sample_ns;
+volatile u64 last_housekeeping_ns;
 /* Hint/selection quality metrics and fg runtime accounting. */
 volatile u64 nr_idle_cpu_pick;
 /* MM hint removed - was volatile u64 nr_mm_hint_hit; */
@@ -308,6 +307,8 @@ static inline struct slowpath_hint_snapshot capture_slowpath_hints(u64 now)
 	snap.power_medium = snap.power_level == 1;
 	return snap;
 }
+
+
 
 /* Frame timing tracking for GPU/compositor deadline adjustment */
 volatile u64 last_page_flip_ns;		/* Timestamp of last page flip (frame presentation) */
@@ -415,8 +416,453 @@ volatile u64 hist_select_cpu[HIST_BUCKETS];
 volatile u64 hist_enqueue[HIST_BUCKETS];
 volatile u64 hist_dispatch[HIST_BUCKETS];
 
-/* Userspace-triggered commands (set bits; drained in wakeup_timerfn). */
-volatile u32 cmd_flags;
+static __always_inline void maybe_sample_cpu_util(void)
+{
+	u64 now = scx_bpf_now();
+	u64 last = last_util_sample_ns;
+	if (last && time_before(now, last + UTIL_SAMPLE_INTERVAL_NS))
+		return;
+
+	last_util_sample_ns = now;
+
+	u64 ncpus = nr_cpu_ids ? nr_cpu_ids : 1;
+	u64 busy = 0;
+	const struct cpumask *idle = scx_bpf_get_idle_cpumask();
+	if (idle) {
+		u64 idle_cnt = bpf_cpumask_weight(idle);
+		scx_bpf_put_idle_cpumask(idle);
+		if (ncpus > idle_cnt)
+			busy = ncpus - idle_cnt;
+	}
+	cpu_util = (busy * 1024) / ncpus;
+
+	u64 old = cpu_util_avg;
+	u64 new = cpu_util;
+	cpu_util_avg = (old - (old >> 2)) + (new >> 2);
+}
+
+static __always_inline void aggregate_percpu_counters(void)
+{
+	u64 total_idle_picks = 0;
+	u64 total_sync_fast = 0;
+	u64 total_migrations = 0;
+	u64 total_mig_blocked = 0;
+	u64 total_direct_dispatches = 0;
+	u64 total_rr_enq = 0;
+	u64 total_edf_enq = 0;
+	u64 total_shared_dispatches = 0;
+	struct cpu_ctx *prefetched_cctx = NULL;
+
+	{
+		if (likely(1 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(1);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		struct cpu_ctx *cctx = try_lookup_cpu_ctx(0);
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(1);
+		if (likely(2 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(2);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(2);
+		if (likely(3 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(3);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(3);
+		if (likely(4 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(4);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(4);
+		if (likely(5 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(5);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(5);
+		if (likely(6 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(6);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(6);
+		if (likely(7 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(7);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	{
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(7);
+		if (likely(8 < nr_cpu_ids)) {
+			prefetched_cctx = try_lookup_cpu_ctx(8);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+		if (cctx) {
+			total_idle_picks += cctx->local_nr_idle_cpu_pick;
+			total_sync_fast += cctx->local_nr_sync_wake_fast;
+			total_migrations += cctx->local_nr_migrations;
+			total_mig_blocked += cctx->local_nr_mig_blocked;
+			total_direct_dispatches += cctx->local_nr_direct_dispatches;
+			total_rr_enq += cctx->local_rr_enq;
+			total_edf_enq += cctx->local_edf_enq;
+			total_shared_dispatches += cctx->local_nr_shared_dispatches;
+			cctx->local_nr_idle_cpu_pick = 0;
+			cctx->local_nr_sync_wake_fast = 0;
+			cctx->local_nr_migrations = 0;
+			cctx->local_nr_mig_blocked = 0;
+			cctx->local_nr_direct_dispatches = 0;
+			cctx->local_rr_enq = 0;
+			cctx->local_edf_enq = 0;
+			cctx->local_nr_shared_dispatches = 0;
+		}
+	}
+
+	s32 cpu;
+	bpf_for(cpu, 8, nr_cpu_ids) {
+		struct cpu_ctx *cctx = prefetched_cctx;
+		prefetched_cctx = NULL;
+		if (!cctx)
+			cctx = try_lookup_cpu_ctx(cpu);
+		if (likely(cpu + 1 < nr_cpu_ids && cpu < 16)) {
+			prefetched_cctx = try_lookup_cpu_ctx(cpu + 1);
+			if (likely(prefetched_cctx))
+				__builtin_prefetch(prefetched_cctx, 0, 2);
+		}
+
+		if (!cctx)
+			continue;
+
+		total_idle_picks += cctx->local_nr_idle_cpu_pick;
+		total_sync_fast += cctx->local_nr_sync_wake_fast;
+		total_migrations += cctx->local_nr_migrations;
+		total_mig_blocked += cctx->local_nr_mig_blocked;
+		total_direct_dispatches += cctx->local_nr_direct_dispatches;
+		total_rr_enq += cctx->local_rr_enq;
+		total_edf_enq += cctx->local_edf_enq;
+		total_shared_dispatches += cctx->local_nr_shared_dispatches;
+
+		cctx->local_nr_idle_cpu_pick = 0;
+		cctx->local_nr_sync_wake_fast = 0;
+		cctx->local_nr_migrations = 0;
+		cctx->local_nr_mig_blocked = 0;
+		cctx->local_nr_direct_dispatches = 0;
+		cctx->local_rr_enq = 0;
+		cctx->local_edf_enq = 0;
+		cctx->local_nr_shared_dispatches = 0;
+	}
+
+	if (total_idle_picks)
+		__atomic_fetch_add(&nr_idle_cpu_pick, total_idle_picks, __ATOMIC_RELAXED);
+	if (total_sync_fast)
+		__atomic_fetch_add(&nr_sync_wake_fast, total_sync_fast, __ATOMIC_RELAXED);
+	if (total_migrations)
+		__atomic_fetch_add(&nr_migrations, total_migrations, __ATOMIC_RELAXED);
+	if (total_mig_blocked)
+		__atomic_fetch_add(&nr_mig_blocked, total_mig_blocked, __ATOMIC_RELAXED);
+	if (total_direct_dispatches)
+		__atomic_fetch_add(&nr_direct_dispatches, total_direct_dispatches, __ATOMIC_RELAXED);
+	if (total_rr_enq)
+		__atomic_fetch_add(&rr_enq, total_rr_enq, __ATOMIC_RELAXED);
+	if (total_edf_enq)
+		__atomic_fetch_add(&edf_enq, total_edf_enq, __ATOMIC_RELAXED);
+	if (total_shared_dispatches)
+		nr_shared_dispatches += total_shared_dispatches;
+}
+
+static __always_inline void aggregate_classification_stats(void)
+{
+	u64 total_class_attempts = 0;
+	u64 total_first_class = 0;
+	u64 total_exact_game = 0;
+	u64 total_name_checks = 0;
+	u64 total_name_patterns = 0;
+	u64 total_name_hits = 0;
+	u64 total_input_handlers = 0;
+	u64 total_main_hits = 0;
+	u64 total_taskgraph = 0;
+	const u32 idx = 0;
+	s32 cpu;
+
+	bpf_for(cpu, 0, nr_cpu_ids ? nr_cpu_ids : 1) {
+		struct gamer_class_stats *stats =
+			bpf_map_lookup_percpu_elem(&gamer_class_stats_map, &idx, cpu);
+		if (!stats)
+			continue;
+
+		total_class_attempts += stats->classification_attempts;
+		total_first_class += stats->first_classification;
+		total_exact_game += stats->exact_game_thread;
+		total_name_checks += stats->input_handler_name_checks;
+		total_name_patterns += stats->input_handler_name_patterns;
+		total_name_hits += stats->input_handler_name_hits;
+		total_input_handlers += stats->input_handler_threads;
+		total_main_hits += stats->main_thread_hits;
+		total_taskgraph += stats->taskgraph_threads;
+
+		__builtin_memset(stats, 0, sizeof(*stats));
+	}
+
+	if (total_class_attempts)
+		nr_classification_attempts += total_class_attempts;
+	if (total_first_class)
+		nr_first_classification_true += total_first_class;
+	if (total_exact_game)
+		nr_is_exact_game_thread_true += total_exact_game;
+	if (total_name_checks)
+		nr_input_handler_name_check_attempts += total_name_checks;
+	if (total_name_patterns)
+		nr_input_handler_name_pattern_match += total_name_patterns;
+	if (total_name_hits)
+		nr_input_handler_name_match += total_name_hits;
+	if (total_input_handlers)
+		nr_input_handler_threads += total_input_handlers;
+	if (total_main_hits)
+		nr_main_thread_match += total_main_hits;
+	if (total_taskgraph)
+		nr_taskgraph_threads += total_taskgraph;
+}
+
+static __always_inline void accumulate_window_activity(u64 delta, u64 now)
+{
+	__atomic_fetch_add(&timer_elapsed_ns_total, delta, __ATOMIC_RELAXED);
+	if (time_before(now, input_until_global))
+		__atomic_fetch_add(&win_input_ns_total, delta, __ATOMIC_RELAXED);
+}
+
+static __always_inline void sync_detected_fg(void)
+{
+	u32 staging = detected_fg_tgid_staging;
+	if (staging == detected_fg_tgid)
+		return;
+
+	u32 old_fg = detected_fg_tgid;
+	detected_fg_tgid = staging;
+	scheduler_generation++;
+
+	nr_input_handler_threads = 0;
+	nr_gpu_submit_threads = 0;
+	nr_compositor_threads = 0;
+	nr_network_threads = 0;
+	nr_system_audio_threads = 0;
+	nr_usb_audio_threads = 0;
+	nr_game_audio_threads = 0;
+	nr_taskgraph_threads = 0;
+	nr_nvme_io_threads = 0;
+	nr_background_threads = 0;
+	fg_input_handler_pid = 0;
+	if (old_fg) {
+		bpf_map_delete_elem(&gpu_vendor_by_tgid_map, &old_fg);
+		gpu_queue_busy_until = 0;
+	}
+}
+
+static __always_inline void refresh_keyboard_lane(u64 now)
+{
+	if (!kbd_pressed_count)
+		return;
+
+	u64 expiry = input_lane_until[INPUT_LANE_KEYBOARD];
+	u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
+	/* Keep the window warm if we're within 50ms of expiry. */
+	u64 margin = guard > 50000000ULL ? 50000000ULL : guard;
+	if (!time_before(now + margin, expiry))
+		fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
+}
+
+static __always_inline void maybe_run_housekeeping(void)
+{
+	u64 now = scx_bpf_now();
+	u64 last = last_housekeeping_ns;
+	if (last && time_before(now, last + HOUSEKEEPING_INTERVAL_NS))
+		return;
+
+	u64 delta = (last && now > last) ? (now - last) : HOUSEKEEPING_INTERVAL_NS;
+	last_housekeeping_ns = now;
+
+	accumulate_window_activity(delta, now);
+	refresh_keyboard_lane(now);
+	sync_detected_fg();
+
+	bool stats_owner = (bpf_get_smp_processor_id() == 0);
+	if (!no_stats && stats_owner) {
+		aggregate_percpu_counters();
+		aggregate_classification_stats();
+	}
+}
+
 /* Runtime tracing control: 0 = disabled (default), 1 = enabled */
 volatile u32 runtime_trace_enable;
 /* Detector trace control: 0 = disabled (default), 1 = enabled */
@@ -587,12 +1033,6 @@ int tp_sys_enter_futex(struct trace_event_raw_sys_enter *ctx)
     return 0;
 }
 
-/* Bitmap of CPUs with local DSQ work pending that may need a kick. */
-#define KICK_WORDS ((MAX_CPUS + 63) / 64)
-volatile u64 kick_mask[KICK_WORDS];
-
-/* Helper functions (stat_inc, set_kick_cpu, clear_kick_cpu) now in helpers.bpf.h */
-
 char _license[] SEC("license") = "GPL";
 
 /*
@@ -696,6 +1136,16 @@ struct enqueue_plan {
 	u64 timestamp;
 };
 
+static __always_inline void aggregate_classification_stats(void);
+
+#define CLASS_STAT_INC(stats_ptr, field, global_var)				\
+	do {									\
+		if (stats_ptr)							\
+			(stats_ptr)->field++;					\
+		else								\
+			__atomic_fetch_add(&(global_var), 1, __ATOMIC_RELAXED);	\
+	} while (0)
+
 static inline void wakeup_cpu(s32 cpu);
 static __always_inline s32 cached_cpu_node_lookup(s32 cpu, s32 *last_cpu, s32 *last_node);
 static __noinline void gamer_runnable_slow_path(struct task_struct *p,
@@ -703,6 +1153,7 @@ static __noinline void gamer_runnable_slow_path(struct task_struct *p,
 						bool is_first_classification,
 						u32 fg_tgid,
 						bool is_exact_game_thread,
+						struct gamer_class_stats *class_stats,
 						bool *classification_changed);
 
 static inline void execute_enqueue_plan(struct enqueue_plan *plan,
@@ -799,7 +1250,7 @@ static __noinline void gamer_stopping_gpu_patterns(struct task_struct *p,
 			recompute_boost_shift(tctx);
 			update_task_flags_cache(p, tctx);
 
-			if (likely(!no_stats)) {
+			if (likely(dispatch_event_enable) && likely(!no_stats)) {
 				struct gpu_submit_detect_event *gpu_evt =
 					bpf_ringbuf_reserve(&gpu_submit_detect_ringbuf, sizeof(*gpu_evt), 0);
 				if (gpu_evt) {
@@ -2364,12 +2815,6 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
     return 0;  /* Don't interfere with normal event delivery */
 }
 
-/* Timer tick counter for rate-limiting expensive operations */
-static volatile u64 timer_tick_counter = 0;
-
-/* CPU utilization sampling: track offset for stride-based sampling */
-/* util_sample_offset removed - userspace CPU util sampling deprecated in favor of BPF-side sampling */
-
 /*
  * Kick idle CPUs with pending tasks.
  *
@@ -2386,702 +2831,13 @@ static volatile u64 timer_tick_counter = 0;
 static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	int err;
-
-	timer_tick_counter++;
-
-    /* Sustain keyboard boost while any key is held (even without repeats).
-     * Micro-guard: only refresh when the lane is near expiry to reduce writes. */
-    if (kbd_pressed_count > 0) {
-        u64 now = scx_bpf_now();
-        const u64 margin = 50ULL * 1000ULL * 1000ULL; /* 50ms */
-        /* If (now + margin) is not strictly before expiry, extend */
-        if (!time_before(now + margin, input_lane_until[INPUT_LANE_KEYBOARD]))
-            fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
-    }
-
-	/*
-	 * Iterate over all CPUs and wake up those that have pending tasks
-	 * in their local DSQ.
-	 *
-	 * Note that tasks are only enqueued in ops.enqueue(), but we never
-	 * wake-up the CPUs from there to reduce overhead in the hot path.
-	 *
-	 * Optimization: Iterate bitmap words first, skip zero words to avoid
-	 * checking CPUs with no pending work. This reduces iteration overhead
-	 * from O(nr_cpu_ids) to O(CPUs_with_work) on average.
-         */
-    {
-        u64 kick_dirty = kick_mask[0] | kick_mask[1] | kick_mask[2] | kick_mask[3];
-        if (!kick_dirty)
-            goto skip_kick_scan;
-        s32 bcpu;
-        u64 scan_iters = 0;
-        const struct cpumask *primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
-
-        /* HFT PATTERN: Loop unrolling for bitmap word iteration.
-         * KICK_WORDS = 4 for MAX_CPUS=256, so unroll all 4 iterations.
-         * Eliminates loop overhead (~5-10ns per word) for dispatch/timer path.
-         * Expected impact: ~20-40ns savings per dispatch tick. */
-        
-        /* WORD 0: Unrolled for zero overhead */
-        {
-            u64 mask = kick_mask[0];
-            if (mask) {
-                for (int i = 0; i < 64; i++) {
-            if (!mask)
-                        break;
-                    s32 bit_idx = __builtin_ffsll(mask) - 1;
-                    bcpu = (0 << 6) + bit_idx;
-                    mask &= mask - 1;
-                    scan_iters++;
-                    u64 nr_local = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | bcpu);
-                    if (!nr_local) {
-                        clear_kick_cpu(bcpu);
-                continue;
-                    }
-                    if (is_cpu_idle(bcpu)) {
-                        clear_kick_cpu(bcpu);
-                        scx_bpf_kick_cpu(bcpu, SCX_KICK_IDLE);
-                    }
-                }
-            }
-        }
-        
-        /* WORD 1: Unrolled for zero overhead */
-        {
-            u64 mask = kick_mask[1];
-            if (mask) {
-            for (int i = 0; i < 64; i++) {
-                if (!mask)
-                    break;
-                s32 bit_idx = __builtin_ffsll(mask) - 1;
-                    bcpu = (1 << 6) + bit_idx;
-                mask &= mask - 1;
-                scan_iters++;
-                    u64 nr_local = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | bcpu);
-                    if (!nr_local) {
-                        clear_kick_cpu(bcpu);
-                        continue;
-                    }
-                    if (is_cpu_idle(bcpu)) {
-                        clear_kick_cpu(bcpu);
-                        scx_bpf_kick_cpu(bcpu, SCX_KICK_IDLE);
-                    }
-                }
-            }
-        }
-        
-        /* WORD 2: Unrolled for zero overhead */
-        {
-            u64 mask = kick_mask[2];
-            if (mask) {
-                for (int i = 0; i < 64; i++) {
-                    if (!mask)
-                        break;
-                    s32 bit_idx = __builtin_ffsll(mask) - 1;
-                    bcpu = (2 << 6) + bit_idx;
-                    mask &= mask - 1;
-                    scan_iters++;
-                u64 nr_local = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | bcpu);
-                if (!nr_local) {
-                    clear_kick_cpu(bcpu);
-                    continue;
-                    }
-                    if (is_cpu_idle(bcpu)) {
-                        clear_kick_cpu(bcpu);
-                        scx_bpf_kick_cpu(bcpu, SCX_KICK_IDLE);
-                    }
-                }
-            }
-        }
-        
-        /* WORD 3: Unrolled for zero overhead */
-        {
-            u64 mask = kick_mask[3];
-            if (mask) {
-                for (int i = 0; i < 64; i++) {
-                    if (!mask)
-                        break;
-                    s32 bit_idx = __builtin_ffsll(mask) - 1;
-                    bcpu = (3 << 6) + bit_idx;
-                    mask &= mask - 1;
-                    scan_iters++;
-                    u64 nr_local = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | bcpu);
-                    if (!nr_local) {
-                        clear_kick_cpu(bcpu);
-                        continue;
-                    }
-                if (is_cpu_idle(bcpu)) {
-                    clear_kick_cpu(bcpu);
-                    scx_bpf_kick_cpu(bcpu, SCX_KICK_IDLE);
-                    }
-                }
-            }
-        }
-
-        if (primary)
-            scx_bpf_put_cpumask(primary);
-
-        if (scan_iters) {
-            /* stats removed to keep program size under verifier limits */
-        }
-skip_kick_scan:
-        ;
-    }
-
-    /* Simplified CPU utilization sampling: use idle cpumask weight.
-     * This avoids complex loops that can exceed verifier jump limits. */
-    {
-        u64 ncpus = nr_cpu_ids ? nr_cpu_ids : 1;
-        u64 busy = 0;
-        const struct cpumask *idle = scx_bpf_get_idle_cpumask();
-        if (idle) {
-            u64 idle_cnt = bpf_cpumask_weight(idle);
-            scx_bpf_put_idle_cpumask(idle);
-            if (ncpus > idle_cnt)
-                busy = ncpus - idle_cnt;
-        }
-        cpu_util = (busy * 1024) / ncpus;
-    }
-
-    /* Update EMA of CPU util in BPF to stabilize busy detection. */
-    {
-        /* 3/4 old + 1/4 new (same calc_avg). */
-        u64 old = cpu_util_avg;
-        u64 new = cpu_util;
-        cpu_util_avg = (old - (old >> 2)) + (new >> 2);
-    }
-
-    /* Decay futex co-boost window (per-CPU). If expired, clear to avoid stale boosts. */
-    {
-        const u32 idx = 0;
-        u64 now = scx_bpf_now();
-        u64 *until = bpf_map_lookup_percpu_elem(&futex_wake_until, &idx, bpf_get_smp_processor_id());
-        if (until && !time_before(now, *until))
-            *until = 0;
-    }
-
-    /* OPTIMIZATION: Aggregate per-CPU stats into global counters.
-     * Rate-limited to every 10 ticks (~5ms at default timer rate) to reduce overhead.
-     * Stats collection runs periodically instead of on every scheduling decision.
-     * Eliminates expensive atomic operations from hot paths.
-     * Trade-off: Stats are slightly delayed (max 5ms) but accuracy is preserved. */
-    if (!no_stats && (timer_tick_counter % 10) == 0) {
-        u64 total_idle_picks = 0;
-        /* MM hint removed - was u64 total_mm_hits = 0; */
-        u64 total_sync_fast = 0;
-        u64 total_migrations = 0;
-        u64 total_mig_blocked = 0;
-		/* PERF: Aggregate new per-CPU counters (Phase 1.3 optimization) */
-		u64 total_direct_dispatches = 0;
-		u64 total_rr_enq = 0;
-		u64 total_edf_enq = 0;
-        u64 total_shared_dispatches = 0;
-        struct cpu_ctx *prefetched_cctx = NULL;
-
-        /* HFT PATTERN: Loop unrolling for 8-core systems (9800X3D, etc.)
-         * Unroll first 8 iterations to eliminate loop overhead (~40-80ns savings per timer tick).
-         * This improves branch prediction and reduces loop control overhead.
-         * Expected impact: ~10-15% faster timer aggregation on 8-core systems.
-         * Timer runs every 500µs, so savings accumulate over time. */
-        
-        /* CPU 0: Unrolled for zero overhead */
-        {
-            if (likely(1 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(1);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);  /* Read, low temporal locality */
-                }
-            }
-            struct cpu_ctx *cctx = try_lookup_cpu_ctx(0);
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 1: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(1);
-            if (likely(2 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(2);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 2: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(2);
-            if (likely(3 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(3);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 3: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(3);
-            if (likely(4 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(4);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 4: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(4);
-            if (likely(5 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(5);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 5: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(5);
-            if (likely(6 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(6);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 6: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(6);
-            if (likely(7 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(7);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* CPU 7: Unrolled for zero overhead */
-        {
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(7);
-            if (likely(8 < nr_cpu_ids)) {
-                prefetched_cctx = try_lookup_cpu_ctx(8);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);
-                }
-            }
-            if (cctx) {
-                total_idle_picks += cctx->local_nr_idle_cpu_pick;
-                /* MM hint removed */
-                total_sync_fast += cctx->local_nr_sync_wake_fast;
-                total_migrations += cctx->local_nr_migrations;
-                total_mig_blocked += cctx->local_nr_mig_blocked;
-                total_direct_dispatches += cctx->local_nr_direct_dispatches;
-                total_rr_enq += cctx->local_rr_enq;
-                total_edf_enq += cctx->local_edf_enq;
-                total_shared_dispatches += cctx->local_nr_shared_dispatches;
-                cctx->local_nr_idle_cpu_pick = 0;
-                /* MM hint removed */
-                cctx->local_nr_sync_wake_fast = 0;
-                cctx->local_nr_migrations = 0;
-                cctx->local_nr_mig_blocked = 0;
-                cctx->local_nr_direct_dispatches = 0;
-                cctx->local_rr_enq = 0;
-                cctx->local_edf_enq = 0;
-                cctx->local_nr_shared_dispatches = 0;
-            }
-        }
-        
-        /* Fallback loop for CPUs 8+ (larger systems) */
-        s32 cpu;
-        bpf_for(cpu, 8, nr_cpu_ids) {
-            /* MECHANICAL SYMPATHY: Prefetch NEXT CPU context while processing CURRENT one.
-             * This hides cache miss latency for sequential CPU scans during timer aggregation.
-             * Prefetch while processing current CPU's counters, so next CPU context is ready.
-             * Low temporal locality (2) - data will be accessed soon (next iteration).
-             * Benefit: ~10-15ns savings per CPU if next lookup causes cache miss.
-             * 
-             * Limit prefetching to first 16 CPUs to avoid cache pollution on large systems. */
-            struct cpu_ctx *cctx = prefetched_cctx;
-            prefetched_cctx = NULL;
-            if (!cctx)
-                cctx = try_lookup_cpu_ctx(cpu);
-            if (likely(cpu + 1 < nr_cpu_ids && cpu < 16)) {
-                prefetched_cctx = try_lookup_cpu_ctx(cpu + 1);
-                if (likely(prefetched_cctx)) {
-                    __builtin_prefetch(prefetched_cctx, 0, 2);  /* Read, low temporal locality */
-                }
-            }
-
-            if (!cctx)
-                continue;
-
-            /* Accumulate local counters */
-            total_idle_picks += cctx->local_nr_idle_cpu_pick;
-            /* MM hint removed */
-            total_sync_fast += cctx->local_nr_sync_wake_fast;
-            total_migrations += cctx->local_nr_migrations;
-            total_mig_blocked += cctx->local_nr_mig_blocked;
-			total_direct_dispatches += cctx->local_nr_direct_dispatches;
-			total_rr_enq += cctx->local_rr_enq;
-			total_edf_enq += cctx->local_edf_enq;
-			total_shared_dispatches += cctx->local_nr_shared_dispatches;
-
-            /* Reset local counters (avoid overflow) */
-            cctx->local_nr_idle_cpu_pick = 0;
-            /* MM hint removed */
-            cctx->local_nr_sync_wake_fast = 0;
-            cctx->local_nr_migrations = 0;
-            cctx->local_nr_mig_blocked = 0;
-			cctx->local_nr_direct_dispatches = 0;
-			cctx->local_rr_enq = 0;
-			cctx->local_edf_enq = 0;
-			cctx->local_nr_shared_dispatches = 0;
-        }
-
-        /* Batch update globals (9 atomics per 5ms vs 1000s per ms in hot path!) */
-        if (total_idle_picks)
-            __atomic_fetch_add(&nr_idle_cpu_pick, total_idle_picks, __ATOMIC_RELAXED);
-        /* MM hint removed */
-        if (total_sync_fast)
-            __atomic_fetch_add(&nr_sync_wake_fast, total_sync_fast, __ATOMIC_RELAXED);
-        if (total_migrations)
-            __atomic_fetch_add(&nr_migrations, total_migrations, __ATOMIC_RELAXED);
-        if (total_mig_blocked)
-            __atomic_fetch_add(&nr_mig_blocked, total_mig_blocked, __ATOMIC_RELAXED);
-		if (total_direct_dispatches)
-			__atomic_fetch_add(&nr_direct_dispatches, total_direct_dispatches, __ATOMIC_RELAXED);
-		if (total_rr_enq)
-			__atomic_fetch_add(&rr_enq, total_rr_enq, __ATOMIC_RELAXED);
-		if (total_edf_enq)
-			__atomic_fetch_add(&edf_enq, total_edf_enq, __ATOMIC_RELAXED);
-		if (total_shared_dispatches)
-			__atomic_fetch_add(&nr_shared_dispatches, total_shared_dispatches, __ATOMIC_RELAXED);
-    }
-
-	    /* Accumulate window activity and elapsed time for monitor percentages. */
-    {
-        u64 period = wakeup_timer_ns ? wakeup_timer_ns : slice_ns;
-        u64 now = scx_bpf_now();
-        __atomic_fetch_add(&timer_elapsed_ns_total, period, __ATOMIC_RELAXED);
-        if (time_before(now, input_until_global))
-            __atomic_fetch_add(&win_input_ns_total, period, __ATOMIC_RELAXED);
-    }
-
-	/* Copy staging to active for race-free foreground game detection.
-	 * Userspace writes to detected_fg_tgid_staging, BPF copies to detected_fg_tgid here.
-	 * This ensures hot paths (select_cpu, runnable) read stable values. */
-	{
-        u32 staging = detected_fg_tgid_staging;
-        if (staging != detected_fg_tgid) {
-			u32 old_fg = detected_fg_tgid;
-            /* Game changed! Reset all thread classification counters.
-             * This prevents counter drift when switching between games. */
-            detected_fg_tgid = staging;
-
-            /* CRITICAL: Increment scheduler generation to force re-classification of all threads.
-             * Without this, existing task_ctx entries have matching scheduler_gen, so is_first_classification
-             * stays false and counters never increment after reset. This ensures threads are re-classified
-             * for the new game and counters increment correctly. */
-            scheduler_generation++;
-
-            /* Reset all classification counters - new game, fresh start */
-            nr_input_handler_threads = 0;
-            nr_gpu_submit_threads = 0;
-            nr_compositor_threads = 0;
-            nr_network_threads = 0;
-            nr_system_audio_threads = 0;
-            nr_usb_audio_threads = 0;
-            nr_game_audio_threads = 0;
-            nr_taskgraph_threads = 0;
-            nr_nvme_io_threads = 0;
-            nr_background_threads = 0;
-            fg_input_handler_pid = 0;
-			if (old_fg) {
-				bpf_map_delete_elem(&gpu_vendor_by_tgid_map, &old_fg);
-				gpu_queue_busy_until = 0;
-			}
-        }
-    }
-
-    /* TODO: add userspace-driven periodic counter validation if drift observed */
-
-    /* ACTIVE INPUT STOP DETECTION: Check on every timer tick for ultra-low latency.
-     * Timer runs at 500µs (2kHz) during input activity, so we detect stops within ~1.5ms total.
-     * This gives symmetric start/stop latency for precision aiming with 8000Hz peripherals. */
-    if (continuous_input_mode || input_trigger_rate > 0) {
-        u64 now = scx_bpf_now();
-        u64 delta_ns = now - last_input_trigger_ns;
-        if (delta_ns > 1000000) {  /* 1ms idle = mouse stopped (8000Hz = 0.125ms/event) */
-            input_trigger_rate = 0;
-            continuous_input_mode = 0;
-        }
-    }
-
-    /* Update boost state flags: clear expired lanes for TUI display
-     * Check all lanes every timer tick - if boost window expired, clear flag */
-    {
-        u64 now = scx_bpf_now();
-        
-        /* Clear flag if boost window expired (now >= expiry time) */
-        if (continuous_input_lane_mode[INPUT_LANE_KEYBOARD]) {
-            if (!time_before(now, input_lane_until[INPUT_LANE_KEYBOARD]))
-                continuous_input_lane_mode[INPUT_LANE_KEYBOARD] = 0;
-        }
-            
-        if (continuous_input_lane_mode[INPUT_LANE_MOUSE]) {
-            if (!time_before(now, input_lane_until[INPUT_LANE_MOUSE]))
-                continuous_input_lane_mode[INPUT_LANE_MOUSE] = 0;
-        }
-            
-        if (continuous_input_lane_mode[INPUT_LANE_CONTROLLER]) {
-            if (!time_before(now, input_lane_until[INPUT_LANE_CONTROLLER]))
-                continuous_input_lane_mode[INPUT_LANE_CONTROLLER] = 0;
-        }
-            
-        if (continuous_input_lane_mode[INPUT_LANE_OTHER]) {
-            if (!time_before(now, input_lane_until[INPUT_LANE_OTHER]))
-                continuous_input_lane_mode[INPUT_LANE_OTHER] = 0;
-        }
-    }
-
-    /* Drain userspace-triggered commands. */
-    {
-        u32 flags = __atomic_exchange_n(&cmd_flags, 0, __ATOMIC_RELAXED);
-        if (flags & CMD_INPUT)
-        {
-            u64 cmd_now = scx_bpf_now();
-            fanout_set_input_window(cmd_now);
-            __atomic_fetch_add(&nr_input_trig, 1, __ATOMIC_RELAXED);
-
-            /* Track input trigger rate for continuous input detection.
-             * High sustained rate (>100/sec) indicates aim trainer or mouse-heavy game. */
-            u64 delta_ns = cmd_now - last_input_trigger_ns;
-            if (delta_ns > 0) {
-                /* Calculate instantaneous rate: 1e9 / delta_ns = triggers/sec */
-                u32 instant_rate = delta_ns < 10000000 ? (u32)(1000000000ULL / delta_ns) : 0;
-                /* Update EMA: new = (7*old + instant) / 8 */
-                input_trigger_rate = (input_trigger_rate * 7 + instant_rate) >> 3;
-
-                /* Enter continuous mode if rate >150/sec sustained */
-                if (input_trigger_rate > 150)
-                    continuous_input_mode = 1;
-                /* Exit if rate drops below 75/sec (wide hysteresis) */
-                else if (input_trigger_rate < 75)
-                    continuous_input_mode = 0;
-            }
-            last_input_trigger_ns = cmd_now;
-        }
-        if (flags & CMD_NAPI)
-            fanout_set_napi_window();
-        if (flags & CMD_TRACE_RU_ON)
-            runtime_trace_enable = 1;
-        if (flags & CMD_TRACE_RU_OFF)
-            runtime_trace_enable = 0;
-        if (flags & CMD_DETECT_ON)
-            detector_trace_enable = 1;
-        if (flags & CMD_DETECT_OFF)
-            detector_trace_enable = 0;
-        if (flags & CMD_DISPATCH_EVT_ON)
-            dispatch_event_enable = 1;
-        if (flags & CMD_DISPATCH_EVT_OFF)
-            dispatch_event_enable = 0;
-    }
-
-    /* Re-arm the wakeup timer with adaptive period.
-     * OPTIMIZATION: Slow down timer when stats are disabled or system is idle.
-     * ESPORTS OVERRIDE: Keep timer fast during input activity for 8000Hz responsiveness.
-     * - no_stats mode: 5ms period (200Hz) - reduces overhead by 90%
-     * - idle system (cpu_util < 100 = ~10%): 2ms period (500Hz) - reduces overhead by 75%
-     * - active system OR input activity: base period (default 500us = 2kHz) - full responsiveness
-     * - input activity = recent input within 10ms (prevents timer slowdown during light gameplay)
-     */
-    {
-        u64 base_period = wakeup_timer_ns ? wakeup_timer_ns : slice_ns;
-        u64 period;
-        u64 now = scx_bpf_now();
-        u64 time_since_input = now - last_input_trigger_ns;
-        bool recent_input = time_since_input < 10000000;  /* Input within last 10ms */
-
-        if (no_stats) {
-            /* Stats disabled: slow timer significantly (5ms = 10x slower than default) */
-            period = base_period * 10;
-        } else if (cpu_util < 100 && !recent_input) {
-            /* System idle AND no recent input: moderately slow timer (2ms = 4x slower) */
-            period = base_period * 4;
-        } else {
-            /* System active OR input activity: use base period for responsiveness */
-            period = base_period;
-        }
-
-        err = bpf_timer_start(timer, period, 0);
-    }
+	u64 period = wakeup_timer_ns ? wakeup_timer_ns : slice_ns;
+	err = bpf_timer_start(timer, period, 0);
 	if (err)
 		scx_bpf_error("Failed to re-arm wakeup timer");
 	return 0;
 }
+
 /*
  * Return true if the CPU is part of a fully busy SMT core, false
  * otherwise.
@@ -3306,7 +3062,18 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 {
 	PROF_START_HIST(select_cpu);
 	u64 now = scx_bpf_now();  /* Get timestamp once for migration tracking */
+	maybe_decay_input_windows(now);
 	struct slowpath_hint_snapshot hints = capture_slowpath_hints(now);
+	struct task_ctx *tctx = NULL;
+#define RETURN_SELECTED_CPU(val)						\
+	do {								\
+		if (tctx) {						\
+			tctx->last_idle_cpu_hint = (val);		\
+			tctx->last_idle_cpu_hint_ts = now;		\
+		}							\
+		PROF_END_HIST(select_cpu);				\
+		return (val);						\
+	} while (0)
 
 	/* CRITICAL: Per-CPU kthread priority path - must run BEFORE other fast paths.
 	 * Per-CPU kthreads (kworker/N:M, ksoftirqd/N, etc.) are bound to a single CPU
@@ -3326,8 +3093,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | per_cpu_bound, kworker_slice, 0);
 		/* Kick the CPU if idle - if busy, task will be picked up in next dispatch */
 		scx_bpf_kick_cpu(per_cpu_bound, SCX_KICK_IDLE);
-		PROF_END_HIST(select_cpu);
-		return per_cpu_bound;  /* INSTANT RETURN - prevent kthread starvation! */
+		RETURN_SELECTED_CPU(per_cpu_bound);  /* INSTANT RETURN - prevent kthread starvation! */
 	}
 	
 	/* CRITICAL SAFETY: Respect migrate_disable constraint (prevents Incident #1: vkd3d-swapchain crash).
@@ -3345,8 +3111,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 	if (unlikely(is_migration_disabled(p))) {
 		/* Task has migration disabled - return prev_cpu immediately.
 		 * This is a correctness requirement, not a performance optimization. */
-		PROF_END_HIST(select_cpu);
-		return prev_cpu;
+		RETURN_SELECTED_CPU(prev_cpu);
 	}
 	
 	/* HYBRID FLAG CACHING: GPU thread fast path - check cached flags FIRST (zero map lookup!)
@@ -3357,8 +3122,30 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 	 * This happens before hot_path_cache, current task, and other expensive operations.
 	 */
 	bool is_critical_gpu = is_gpu_submit_cached(p);
-	struct task_ctx *tctx = try_lookup_task_ctx(p);  /* Load early for TaskGraph/Audio checks */
+	if (!tctx)
+		tctx = try_lookup_task_ctx(p);
 	bool is_taskgraph_worker = (tctx && tctx->is_taskgraph_worker);
+
+	if (tctx) {
+		s32 hint_cpu = tctx->last_idle_cpu_hint;
+		u64 hint_ts = tctx->last_idle_cpu_hint_ts;
+		if (hint_cpu >= 0 && hint_ts) {
+			if ((now - hint_ts) <= IDLE_HINT_VALID_NS) {
+				if (scx_bpf_test_and_clear_cpu_idle(hint_cpu)) {
+					struct cpu_ctx *hint_cctx = try_lookup_cpu_ctx(hint_cpu);
+					if (hint_cctx)
+						stat_inc_local(&hint_cctx->local_nr_idle_cpu_pick);
+					else
+						__atomic_fetch_add(&nr_idle_cpu_pick, 1, __ATOMIC_RELAXED);
+					tctx->last_idle_cpu_hint_ts = now;
+					RETURN_SELECTED_CPU(hint_cpu);
+				}
+			} else {
+				tctx->last_idle_cpu_hint = -1;
+				tctx->last_idle_cpu_hint_ts = 0;
+			}
+		}
+	}
 	
 	/* UE5.6 DX12 WAKE CHAIN BOOST EXPIRATION: Check and expire wake chain boosts
 	 * Wake chain boosts are temporary and must expire after their window to prevent
@@ -3491,8 +3278,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 				if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
 					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate,
 							   task_slice(p), 0);
-					PROF_END_HIST(select_cpu);
-					return candidate;
+					RETURN_SELECTED_CPU(candidate);
 				}
 			}
 		}
@@ -3514,8 +3300,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 			    (!hints.freq_ccd_count || cpu_ccd_class[cpu] == CCD_CLASS_FREQ) &&
 			    scx_bpf_test_and_clear_cpu_idle(cpu)) {
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
-				PROF_END_HIST(select_cpu);
-				return cpu;
+				RETURN_SELECTED_CPU(cpu);
 			}
 			cpu++;
 		}
@@ -3574,8 +3359,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 					if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
 						__atomic_fetch_add(&nr_taskgraph_borrow_grants, 1, __ATOMIC_RELAXED);
 						scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate, task_slice(p), 0);
-						PROF_END_HIST(select_cpu);
-						return candidate;
+						RETURN_SELECTED_CPU(candidate);
 					}
 				}
 			}
@@ -3593,8 +3377,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 			/* PERF: Minimal context load - only what's needed for slice calculation */
 			struct cpu_ctx *prev_cctx = try_lookup_cpu_ctx(prev_cpu);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_fast(p, prev_cctx, true, false), 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;  /* prev_cpu is physical core and idle - perfect! */
+			RETURN_SELECTED_CPU(prev_cpu);  /* prev_cpu is physical core and idle - perfect! */
 		}
 		
 		s32 phys_cpu = prev_cpu & ~1;  /* Clear SMT bit to get physical core sibling */
@@ -3612,8 +3395,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 			if (tctx->preferred_physical_core != prev_cpu) {
 				tctx->last_migration_ns = now;
 			}
-			PROF_END_HIST(select_cpu);
-			return tctx->preferred_physical_core;  /* Cached core still idle! */
+			RETURN_SELECTED_CPU(tctx->preferred_physical_core);  /* Cached core still idle! */
 		} else if (tctx && tctx->preferred_physical_core >= 0 &&
 			   !is_gpu_preferred_cpu(tctx->preferred_physical_core)) {
 			tctx->preferred_physical_core = -1;
@@ -3633,8 +3415,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 				/* Track migration (phys_cpu != prev_cpu by design here) */
 				tctx->last_migration_ns = now;
 			}
-			PROF_END_HIST(select_cpu);
-			return phys_cpu;  /* Physical core sibling idle! */
+			RETURN_SELECTED_CPU(phys_cpu);  /* Physical core sibling idle! */
 		}
 		
 		/* All preferred cores busy - fall through to full physical core search */
@@ -3683,15 +3464,13 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 			    bpf_cpumask_test_cpu(phys_cpu, p->cpus_ptr) &&
 			    scx_bpf_test_and_clear_cpu_idle(phys_cpu)) {
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, input_slice, 0);
-				PROF_END_HIST(select_cpu);
-				return phys_cpu;  /* Physical core idle - best cache isolation! */
+				RETURN_SELECTED_CPU(phys_cpu);  /* Physical core idle - best cache isolation! */
 			}
 			
 			/* Fallback to prev_cpu if physical core busy or same as prev_cpu */
 			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, input_slice, 0);
-				PROF_END_HIST(select_cpu);
-				return prev_cpu;  /* INSTANT RETURN - input latency minimized! */
+				RETURN_SELECTED_CPU(prev_cpu);  /* INSTANT RETURN - input latency minimized! */
 			}
 			/* Both busy: fall through to find idle CPU instead of queueing */
 		}
@@ -3707,8 +3486,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		/* Force local dispatch - never migrate USB audio threads */
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, usb_slice, 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;  /* INSTANT RETURN - USB audio latency minimized! */
+			RETURN_SELECTED_CPU(prev_cpu);  /* INSTANT RETURN - USB audio latency minimized! */
 		}
 		/* If prev_cpu busy, fall through to find idle CPU */
 	}
@@ -3723,8 +3501,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		/* Prefer CPUs with better memory bandwidth for sequential I/O */
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, nvme_slice, 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;  /* INSTANT RETURN - NVMe I/O optimized! */
+			RETURN_SELECTED_CPU(prev_cpu);  /* INSTANT RETURN - NVMe I/O optimized! */
 		}
 		/* If prev_cpu busy, fall through to find idle CPU */
 	}
@@ -3743,8 +3520,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		/* Force local dispatch to preserve cache affinity for sequential I/O */
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, hot_path_slice, 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;  /* INSTANT RETURN - NVMe hot path optimized! */
+			RETURN_SELECTED_CPU(prev_cpu);  /* INSTANT RETURN - NVMe hot path optimized! */
 		}
 		/* If prev_cpu busy, fall through to find idle CPU */
 	}
@@ -3763,8 +3539,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		/* Force local dispatch to preserve cache affinity for I/O operations */
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, storage_hot_path_slice, 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;  /* INSTANT RETURN - Storage hot path optimized! */
+			RETURN_SELECTED_CPU(prev_cpu);  /* INSTANT RETURN - Storage hot path optimized! */
 		}
 		/* If prev_cpu busy, fall through to find idle CPU */
 	}
@@ -3783,8 +3558,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		/* Force local dispatch to preserve cache affinity for network processing */
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, ethernet_interrupt_slice, 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;  /* INSTANT RETURN - Ethernet NIC interrupt optimized! */
+			RETURN_SELECTED_CPU(prev_cpu);  /* INSTANT RETURN - Ethernet NIC interrupt optimized! */
 		}
 		/* If prev_cpu busy, fall through to find idle CPU */
 	}
@@ -3827,8 +3601,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 				  tctx->is_nvme_hot_path));
 		if (!latency_critical) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
-			PROF_END_HIST(select_cpu);
-			return prev_cpu;
+			RETURN_SELECTED_CPU(prev_cpu);
 		}
 	}
 
@@ -3904,8 +3677,7 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 	 * Hit rate: ~40-60% on light load, ~10-20% on heavy load. */
 	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_fast(p, cache.cctx, cache.is_fg, cache.input_active), 0);
-		PROF_END_HIST(select_cpu);
-		return prev_cpu;  /* FAST EXIT - prev_cpu still idle! */
+		RETURN_SELECTED_CPU(prev_cpu);  /* FAST EXIT - prev_cpu still idle! */
 	}
 
     /* Pass cached values to avoid redundant lookups in pick_idle_cpu */
@@ -3927,17 +3699,17 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 		if (tctx && cpu != prev_cpu && (tctx->is_gpu_submit || tctx->is_compositor)) {
 			tctx->last_migration_ns = now;  /* Record migration timestamp for cooldown */
 		}
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
-		return cpu;
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
+		RETURN_SELECTED_CPU(cpu);
 	}
 
 	if (!cache.is_busy) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 	}
 
-	PROF_END_HIST(select_cpu);
-	return prev_cpu;
+	RETURN_SELECTED_CPU(prev_cpu);
 }
+#undef RETURN_SELECTED_CPU
 
 s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
@@ -3979,6 +3751,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
     bool is_busy = is_system_busy();
 	u32 fg_tgid = get_fg_tgid();
 	u64 now = scx_bpf_now();
+	maybe_decay_input_windows(now);
 	bool input_active = is_input_active_now(now);
 	bool lane_active = tctx ? is_input_lane_active(tctx->input_lane, now) : input_active;
     bool is_fg = is_foreground_task_cached(p, fg_tgid);
@@ -4208,13 +3981,17 @@ skip_wake_chain:
 
     /* Co-boost non-sync futex wakes (FG only): if wakee enqueued soon after a futex wake,
      * apply a small transient chain boost. futex_wake_until is set by tracepoint handler. */
-    if (is_fg) {
-        const u32 idx = 0;
-        u64 *until = bpf_map_lookup_percpu_elem(&futex_wake_until, &idx, bpf_get_smp_processor_id());
-        if (until && time_before(now, *until) && tctx) {
-            tctx->chain_boost = MIN(tctx->chain_boost + 1, CHAIN_BOOST_MAX);
-        }
-    }
+	if (is_fg) {
+		const u32 idx = 0;
+		u64 *until = bpf_map_lookup_percpu_elem(&futex_wake_until, &idx, bpf_get_smp_processor_id());
+		if (until) {
+			if (!time_before(now, *until)) {
+				*until = 0;
+			} else if (tctx) {
+				tctx->chain_boost = MIN(tctx->chain_boost + 1, CHAIN_BOOST_MAX);
+			}
+		}
+	}
 
 	/* WAKEUP CHAIN FRONT-RUN: Game Thread Force Dispatch
 	 * When game thread wakes and input flag is set, force dispatch immediately.
@@ -4427,6 +4204,8 @@ SCX_OPS_DEFINE(gamer_tailcall_anchor,
 void BPF_STRUCT_OPS(gamer_dispatch, s32 cpu, struct task_struct *prev)
 {
 	PROF_START_HIST(dispatch);
+	maybe_sample_cpu_util();
+	maybe_run_housekeeping();
 	struct cpu_ctx *cpu_cctx = try_lookup_cpu_ctx(cpu);
 
 	/*
@@ -4445,7 +4224,7 @@ void BPF_STRUCT_OPS(gamer_dispatch, s32 cpu, struct task_struct *prev)
 		 * 
 		 * PERFORMANCE HIERARCHY: Skip ring buffer write when monitoring disabled (no_stats=true)
 		 * Ring buffer operations are Tier 3 (100-200ns) - avoid when not needed */
-		if (likely(!no_stats)) {
+		if (likely(dispatch_event_enable) && likely(!no_stats)) {
 			struct dispatch_event *disp_evt = bpf_ringbuf_reserve(&dispatch_event_ringbuf, sizeof(*disp_evt), 0);
 			if (disp_evt) {
 				/* OPTIMIZED LAYOUT: Fields ordered by descending size (u64 → u32 → u8) */
@@ -4798,6 +4577,7 @@ static __noinline void gamer_runnable_slow_path(struct task_struct *p,
 						bool is_first_classification,
 						u32 fg_tgid,
 						bool is_exact_game_thread,
+						struct gamer_class_stats *class_stats,
 						bool *classification_changed)
 {
 	/*
@@ -4953,12 +4733,56 @@ static __noinline void gamer_runnable_slow_path(struct task_struct *p,
 	gamer_runnable_name_fallbacks(p, tctx, is_exact_game_thread,
 				      is_first_classification, classification_changed);
 }
+
+static __always_inline bool is_latency_critical_thread(const struct task_ctx *tctx)
+{
+	if (!tctx)
+		return false;
+
+	if (tctx->is_input_handler ||
+	    tctx->is_gpu_submit ||
+	    tctx->is_compositor ||
+	    tctx->is_game_audio ||
+	    tctx->is_system_audio ||
+	    tctx->is_usb_audio ||
+	    tctx->is_taskgraph_worker)
+		return true;
+
+	return tctx->boost_shift >= 5;
+}
+
+static __always_inline bool should_run_stopping_cold_path(struct task_ctx *tctx,
+							  bool is_first_classification,
+							  u64 now)
+{
+	if (!tctx)
+		return false;
+
+	if (is_first_classification)
+		return true;
+
+	if (is_latency_critical_thread(tctx))
+		return false;
+
+	u8 backoff_shift = tctx->classification_backoff_shift;
+	if (backoff_shift > CLASSIFICATION_BACKOFF_MAX_SHIFT)
+		backoff_shift = CLASSIFICATION_BACKOFF_MAX_SHIFT;
+
+	u64 refresh_ns = CLASSIFICATION_REFRESH_NS << backoff_shift;
+	u64 last_refresh = tctx->last_classification_update;
+
+	if (!last_refresh)
+		return true;
+
+	return (now - last_refresh) >= refresh_ns;
+}
 void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = scx_bpf_now(), delta_t;
 	struct task_ctx *tctx;
     s32 cpu = scx_bpf_task_cpu(p);
     struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
+	struct gamer_class_stats *class_stats = local_class_stats();
 
 	/* PERF: Always create task_ctx on first wake to guarantee non-NULL in hot paths.
 	 * This eliminates NULL checks and string comparison fallbacks in select_cpu/enqueue.
@@ -4977,7 +4801,11 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 			return;  /* Should never happen with CREATE flag */
 		tctx->scheduler_gen = current_gen;  /* Mark with current generation */
 		is_first_classification = true;  /* Only increment counters for new threads */
-		__atomic_fetch_add(&nr_first_classification_true, 1, __ATOMIC_RELAXED);
+		tctx->classification_stable_runs = 0;
+		tctx->classification_backoff_shift = 0;
+		tctx->last_idle_cpu_hint = -1;
+		tctx->last_idle_cpu_hint_ts = 0;
+		CLASS_STAT_INC(class_stats, first_classification, nr_first_classification_true);
 		
 		/* Initialize RMS fields to zero (non-periodic by default) */
 		tctx->rms_priority = 0;
@@ -4992,7 +4820,11 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 		/* Stale task_ctx from previous scheduler run! Re-classify this thread. */
 		tctx->scheduler_gen = current_gen;
 		is_first_classification = true;  /* Re-increment counters for this restart */
-		__atomic_fetch_add(&nr_first_classification_true, 1, __ATOMIC_RELAXED);
+		tctx->classification_stable_runs = 0;
+		tctx->classification_backoff_shift = 0;
+		tctx->last_idle_cpu_hint = -1;
+		tctx->last_idle_cpu_hint_ts = 0;
+		CLASS_STAT_INC(class_stats, first_classification, nr_first_classification_true);
 		
 		/* Reset RMS fields on scheduler restart */
 		tctx->rms_priority = 0;
@@ -5005,7 +4837,7 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 		tctx->worst_case_response_ns = 0;
 	}
 	/* Track total classification attempts (for diagnostic purposes) */
-	__atomic_fetch_add(&nr_classification_attempts, 1, __ATOMIC_RELAXED);
+	CLASS_STAT_INC(class_stats, classification_attempts, nr_classification_attempts);
 
 	/* ENGINE PROFILE CACHE: Preload behavioral hints for known thread names.
 	 * Reduces detection latency for recurring engine threads (Unity, Source, etc.). */
@@ -5056,20 +4888,35 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
 	bool is_exact_game_thread = fg_tgid && ((u32)p->tgid == fg_tgid);
 	if (is_exact_game_thread)
-		__atomic_fetch_add(&nr_is_exact_game_thread_true, 1, __ATOMIC_RELAXED);
+		CLASS_STAT_INC(class_stats, exact_game_thread, nr_is_exact_game_thread_true);
 
 	/* Track if any classification changed to trigger boost_shift recomputation */
 	bool classification_changed = false;
 	bool run_slow_path = is_first_classification;
 	if (!run_slow_path) {
+		u8 backoff_shift = tctx->classification_backoff_shift;
+		if (backoff_shift > CLASSIFICATION_BACKOFF_MAX_SHIFT)
+			backoff_shift = CLASSIFICATION_BACKOFF_MAX_SHIFT;
+		u64 refresh_ns = CLASSIFICATION_REFRESH_NS << backoff_shift;
 		u64 last_refresh = tctx->last_classification_update;
-		if (!last_refresh || (now - last_refresh) >= CLASSIFICATION_REFRESH_NS)
+		if (!last_refresh || (now - last_refresh) >= refresh_ns)
 			run_slow_path = true;
 	}
 	if (run_slow_path) {
 		gamer_runnable_slow_path(p, tctx, is_first_classification, fg_tgid,
-					 is_exact_game_thread, &classification_changed);
+					 is_exact_game_thread, class_stats,
+					 &classification_changed);
 		tctx->last_classification_update = now;
+		if (classification_changed) {
+			tctx->classification_stable_runs = 0;
+			tctx->classification_backoff_shift = 0;
+		} else {
+			if (tctx->classification_stable_runs < 0xFF)
+				tctx->classification_stable_runs++;
+			if (tctx->classification_stable_runs >= 3 &&
+			    tctx->classification_backoff_shift < CLASSIFICATION_BACKOFF_MAX_SHIFT)
+				tctx->classification_backoff_shift++;
+		}
 	}
 	
 	/*
@@ -5109,7 +4956,7 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 		/* Only classify as TaskGraph worker if DX12 mode (or unknown - assume DX12 for safety) */
 	if (api_mode == 2) {
 			tctx->is_taskgraph_worker = 1;
-			__atomic_fetch_add(&nr_taskgraph_threads, 1, __ATOMIC_RELAXED);
+			CLASS_STAT_INC(class_stats, taskgraph_threads, nr_taskgraph_threads);
 			classification_changed = true;
 			/* TaskGraph workers get medium-high priority (boost=5, below RenderThread=6)
 			 * but should not preempt Golden Threads (GameThread=7, RenderThread=6, RHIThread=6) */
@@ -5134,16 +4981,20 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 * for GPU-specific optimizations (physical core caching, migration resistance, etc.). */
 	/* DIAGNOSTIC: Track name pattern matching regardless of is_exact_game_thread to debug why input handler isn't detected */
 	if (!tctx->is_input_handler) {
-		__atomic_fetch_add(&nr_input_handler_name_check_attempts, 1, __ATOMIC_RELAXED);
+		CLASS_STAT_INC(class_stats, input_handler_name_checks,
+			       nr_input_handler_name_check_attempts);
 		if (is_input_handler_name(p->comm)) {
-			__atomic_fetch_add(&nr_input_handler_name_pattern_match, 1, __ATOMIC_RELAXED);
+			CLASS_STAT_INC(class_stats, input_handler_name_patterns,
+				       nr_input_handler_name_pattern_match);
 			if (is_exact_game_thread) {
-				__atomic_fetch_add(&nr_input_handler_name_match, 1, __ATOMIC_RELAXED);
+				CLASS_STAT_INC(class_stats, input_handler_name_hits,
+					       nr_input_handler_name_match);
 		tctx->is_input_handler = 1;
 				/* CRITICAL FIX: Increment counter when !tctx->is_input_handler (first input handler classification)
 				 * The is_first_classification check was preventing counters from incrementing for threads that
 				 * already had task_ctx but weren't yet classified as input handler. */
-			__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
+			CLASS_STAT_INC(class_stats, input_handler_threads,
+				       nr_input_handler_threads);
 		classification_changed = true;
 				/* CRITICAL: Recompute boost_shift immediately to ensure input handler priority (7) over GPU submit (6) */
 				recompute_boost_shift(tctx);
@@ -5170,10 +5021,11 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	 * NOTE: Uses fg_tgid computed above (line 3227) which follows detected_fg_tgid pattern.
 	 */
 	if (!tctx->is_input_handler && p->tgid == fg_tgid && p->pid == p->tgid) {
-		__atomic_fetch_add(&nr_main_thread_match, 1, __ATOMIC_RELAXED);
+		CLASS_STAT_INC(class_stats, main_thread_hits, nr_main_thread_match);
 		tctx->is_input_handler = 1;
 		/* CRITICAL FIX: Increment counter when !tctx->is_input_handler (first input handler classification) */
-			__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
+			CLASS_STAT_INC(class_stats, input_handler_threads,
+				       nr_input_handler_threads);
 		classification_changed = true;
 		/* CRITICAL: Recompute boost_shift immediately to ensure input handler priority (7) over GPU submit (6) */
 		recompute_boost_shift(tctx);
@@ -5229,7 +5081,8 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 			 * Also require low exec time (<1ms) to avoid false positives from GPU threads */
 			if (ratio >= 60 && tctx->exec_avg < 1000000) {  /* 60%+ correlation, <1ms exec */
 				tctx->is_input_handler = 1;
-				__atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
+				CLASS_STAT_INC(class_stats, input_handler_threads,
+					       nr_input_handler_threads);
 				classification_changed = true;
 				recompute_boost_shift(tctx);  /* Ensure input handler priority (7) */
 				/* HYBRID FLAG CACHING: Update cached flags after classification change */
@@ -5693,7 +5546,8 @@ void BPF_STRUCT_OPS(gamer_running, struct task_struct *p)
 	/*
 	 * Refresh cpufreq performance level.
 	 */
-	update_cpufreq(cpu);
+	if (likely(cpufreq_enabled))
+		update_cpufreq(cpu);
 
     /* MM hint removed for gaming workloads - see update_mm_last_cpu() comment */
 
@@ -5735,7 +5589,9 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the used time slice.
 	 */
 	u64 now = scx_bpf_now();
+	bool run_cold_path;
 	slice = MIN(now - tctx->last_run_at, slice_ns);
+	run_cold_path = should_run_stopping_cold_path(tctx, is_first_classification, now);
 
 	/* DEADLINE MISS DETECTION: Check if task completed after its expected deadline
 	 * This enables self-tuning scheduler that auto-boosts tasks missing deadlines
@@ -5758,7 +5614,7 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
 			 * 
 			 * PERFORMANCE HIERARCHY: Skip ring buffer write when monitoring disabled (no_stats=true)
 			 * Ring buffer operations are Tier 3 (100-200ns) - avoid when not needed */
-			if (likely(!no_stats)) {
+			if (likely(dispatch_event_enable) && likely(!no_stats)) {
 				struct deadline_miss_event *dm_evt = bpf_ringbuf_reserve(&deadline_miss_ringbuf, sizeof(*dm_evt), 0);
 				if (dm_evt) {
 					/* OPTIMIZED LAYOUT: Fields ordered by descending size (u64 → u32 → u8) */
@@ -5859,264 +5715,216 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
      */
     tctx->exec_avg = calc_avg(tctx->exec_avg, tctx->exec_runtime);
 
-    /*
-     * Track page fault rate to detect asset-loading threads vs hot-loop threads.
-     * High page fault rate indicates cache thrashing (loading new assets/textures).
-     * Low/zero page faults indicate hot rendering loops (should preserve cache).
-     */
-    u64 current_pgfaults = p->maj_flt + p->min_flt;
-    u64 pgfault_delta = current_pgfaults - tctx->last_pgfault_total;
-    tctx->last_pgfault_total = current_pgfaults;
-    /* Update EMA of page faults per wake (use 4:1 ratio like other EMAs) */
-    tctx->pgfault_rate = calc_avg(tctx->pgfault_rate, pgfault_delta);
+	/*
+	 * Track page fault rate to detect asset-loading threads vs hot-loop threads.
+	 * High page fault rate indicates cache thrashing (loading new assets/textures).
+	 * Low/zero page faults indicate hot rendering loops (should preserve cache).
+	 */
+	if (likely(detector_trace_enable)) {
+		u64 current_pgfaults = p->maj_flt + p->min_flt;
+		u64 pgfault_delta = current_pgfaults - tctx->last_pgfault_total;
+		tctx->last_pgfault_total = current_pgfaults;
+		/* Update EMA of page faults per wake (use 4:1 ratio like other EMAs) */
+		tctx->pgfault_rate = calc_avg(tctx->pgfault_rate, pgfault_delta);
+	}
 
-    /*
-     * Detect GPU submission threads by thread name.
-     * Name-based detection only - no heuristics to avoid false positives.
-     * ONLY classify threads in the actual game process (exact TGID match).
-     */
-    u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
-    bool is_exact_game_thread = fg_tgid && ((u32)p->tgid == fg_tgid);
-    u16 wakeup_hz = tctx->wakeup_freq >> 2;  /* Approx Hz (wakeup_freq/4) */
+	if (run_cold_path) {
+		/*
+		 * Detect GPU submission threads by thread name.
+		 * Name-based detection only - no heuristics to avoid false positives.
+		 * ONLY classify threads in the actual game process (exact TGID match).
+		 */
+		u32 fg_tgid = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
+		bool is_exact_game_thread = fg_tgid && ((u32)p->tgid == fg_tgid);
+		u16 wakeup_hz = tctx->wakeup_freq >> 2;  /* Approx Hz (wakeup_freq/4) */
 
-    /* CRITICAL: Also check for input handler threads in gamer_running() (same as GPU submit detection).
-     * GameThread in Unreal Engine handles both input AND GPU submission, so we need to detect it here too.
-     * This ensures threads are classified even if they don't wake up through gamer_runnable() first. */
-    if (!tctx->is_input_handler && is_exact_game_thread && is_input_handler_name(p->comm)) {
-        tctx->is_input_handler = 1;
-        __atomic_fetch_add(&nr_input_handler_threads, 1, __ATOMIC_RELAXED);
-        recompute_boost_shift(tctx);  /* Ensure input handler priority (7) over GPU submit (6) */
-        /* HYBRID FLAG CACHING: Update cached flags after classification change */
-        update_task_flags_cache(p, tctx);
-        if ((u32)p->tgid == fg_tgid)
-            fg_input_handler_pid = (u32)p->pid;
-        update_input_handler_cpu(p);
-        
-		/* WAKEUP CHAIN FRONT-RUN: Input handler detected - per-CPU signaling
-		 * (handled via hotpath_signals.input_ns shared BSS) */
-    }
+		/* CRITICAL: Also check for input handler threads in gamer_running() (same as GPU submit detection).
+		 * GameThread in Unreal Engine handles both input AND GPU submission, so we need to detect it here too.
+		 * This ensures threads are classified even if they don't wake up through gamer_runnable() first. */
+		if (!tctx->is_input_handler && is_exact_game_thread && is_input_handler_name(p->comm)) {
+			tctx->is_input_handler = 1;
+			CLASS_STAT_INC(local_class_stats(), input_handler_threads,
+				       nr_input_handler_threads);
+			recompute_boost_shift(tctx);  /* Ensure input handler priority (7) over GPU submit (6) */
+			/* HYBRID FLAG CACHING: Update cached flags after classification change */
+			update_task_flags_cache(p, tctx);
+			if ((u32)p->tgid == fg_tgid)
+				fg_input_handler_pid = (u32)p->pid;
+			update_input_handler_cpu(p);
+		}
 
-    /* PERF: Fentry-based GPU detection - immediate classification on first GPU submit
-     * This provides ~666,000x faster detection than heuristic approach (200-500ns vs 333ms)
-     * Zero false positives - only detects actual GPU API calls */
-    if (!tctx->is_gpu_submit && is_exact_game_thread && is_gpu_submit_thread(p->pid)) {
-		__atomic_fetch_add(&nr_gpu_submit_fentry_match, 1, __ATOMIC_RELAXED);
-        tctx->is_gpu_submit = 1;
-		/* PERF: Initialize physical core cache to -1 (unset) on first detection */
-		tctx->preferred_physical_core = -1;
-		/* CRITICAL FIX: Increment counter when !tctx->is_gpu_submit (first GPU classification for this thread)
-		 * is_first_classification is not available in gamer_running(), but !tctx->is_gpu_submit check
-		 * ensures this is the first classification, preventing double-counting. */
+		/* PERF: Fentry-based GPU detection - immediate classification on first GPU submit */
+		if (!tctx->is_gpu_submit && is_exact_game_thread && is_gpu_submit_thread(p->pid)) {
+			__atomic_fetch_add(&nr_gpu_submit_fentry_match, 1, __ATOMIC_RELAXED);
+			tctx->is_gpu_submit = 1;
+			tctx->preferred_physical_core = -1;
 			__atomic_fetch_add(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
-		{
-			u8 vendor = gpu_vendor_for_tid(p->pid);
-			if (vendor) {
-				tctx->gpu_vendor_cached = vendor;
-				u32 vkey = (u32)p->tgid;
-				bpf_map_update_elem(&gpu_vendor_by_tgid_map, &vkey, &vendor, BPF_ANY);
+			{
+				u8 vendor = gpu_vendor_for_tid(p->pid);
+				if (vendor) {
+					tctx->gpu_vendor_cached = vendor;
+					u32 vkey = (u32)p->tgid;
+					bpf_map_update_elem(&gpu_vendor_by_tgid_map, &vkey, &vendor, BPF_ANY);
+				}
+			}
+			recompute_boost_shift(tctx);
+			update_task_flags_cache(p, tctx);
+
+			if (likely(dispatch_event_enable) && likely(!no_stats)) {
+				struct gpu_submit_detect_event *gpu_evt =
+					bpf_ringbuf_reserve(&gpu_submit_detect_ringbuf, sizeof(*gpu_evt), 0);
+				if (gpu_evt) {
+					gpu_evt->timestamp = scx_bpf_now();
+					gpu_evt->tid = p->pid;
+					gpu_evt->detection_method = 0;
+					gpu_evt->gpu_vendor = gpu_vendor_for_tid(p->pid);
+					gpu_evt->_pad[0] = 0;
+					gpu_evt->_pad[1] = 0;
+					bpf_ringbuf_submit(gpu_evt, 0);
+				}
 			}
 		}
-        recompute_boost_shift(tctx);  /* Update boost for GPU thread */
-        /* HYBRID FLAG CACHING: Update cached flags after classification change */
-        update_task_flags_cache(p, tctx);
-        
-		/* WAKEUP CHAIN FRONT-RUN: GPU submitter detected - per-CPU signaling
-		 * (handled via hotpath_signals.compositor_ns shared BSS) */
-        
-		/* PERF: Emit GPU detection event to ring buffer for real-time tracking
-		 * Event-driven notification enables immediate awareness of GPU threads
-		 * 
-		 * PERFORMANCE HIERARCHY: Skip ring buffer write when monitoring disabled (no_stats=true)
-		 * Ring buffer operations are Tier 3 (100-200ns) - avoid when not needed */
-		if (likely(!no_stats)) {
-			struct gpu_submit_detect_event *gpu_evt = bpf_ringbuf_reserve(&gpu_submit_detect_ringbuf, sizeof(*gpu_evt), 0);
-			if (gpu_evt) {
-				/* OPTIMIZED LAYOUT: Fields ordered by descending size (u64 → u32 → u8) */
-				gpu_evt->timestamp = scx_bpf_now();
-				gpu_evt->tid = p->pid;
-				gpu_evt->detection_method = 0;  /* 0 = fentry */
-				gpu_evt->gpu_vendor = gpu_vendor_for_tid(p->pid);
-				gpu_evt->_pad[0] = 0;  /* Explicit padding initialization */
-				gpu_evt->_pad[1] = 0;
-				bpf_ringbuf_submit(gpu_evt, 0);
-			}
-		}
-    }
-    
-    /* FALLBACK: Name-based detection for threads that don't use standard GPU APIs
-     * This handles custom engines, older games, or non-standard GPU implementations */
-    if (!tctx->is_gpu_submit && is_exact_game_thread && is_gpu_submit_name(p->comm)) {
-		__atomic_fetch_add(&nr_gpu_submit_name_match, 1, __ATOMIC_RELAXED);
-        tctx->is_gpu_submit = 1;
-		/* PERF: Initialize physical core cache to -1 (unset) on first detection */
-		tctx->preferred_physical_core = -1;
-		/* CRITICAL FIX: Increment counter when !tctx->is_gpu_submit (first GPU classification for this thread)
-		 * is_first_classification is not available in gamer_running(), but !tctx->is_gpu_submit check
-		 * ensures this is the first classification, preventing double-counting. */
+
+		/* FALLBACK: Name-based detection for threads that don't use standard GPU APIs */
+		if (!tctx->is_gpu_submit && is_exact_game_thread && is_gpu_submit_name(p->comm)) {
+			__atomic_fetch_add(&nr_gpu_submit_name_match, 1, __ATOMIC_RELAXED);
+			tctx->is_gpu_submit = 1;
+			tctx->preferred_physical_core = -1;
 			__atomic_fetch_add(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
-		{
-			u8 vendor = tctx->gpu_vendor_cached;
-			if (!vendor) {
-				u32 vkey = (u32)p->tgid;
-				u8 *vendor_ptr = bpf_map_lookup_elem(&gpu_vendor_by_tgid_map, &vkey);
-				if (vendor_ptr)
-					vendor = *vendor_ptr;
-			}
-			if (vendor) {
-				tctx->gpu_vendor_cached = vendor;
-				u32 vkey = (u32)p->tgid;
-				bpf_map_update_elem(&gpu_vendor_by_tgid_map, &vkey, &vendor, BPF_ANY);
-			}
-		}
-        recompute_boost_shift(tctx);  /* Update boost for GPU thread */
-        /* HYBRID FLAG CACHING: Update cached flags after classification change */
-        update_task_flags_cache(p, tctx);
-        
-        /* WAKEUP CHAIN FRONT-RUN: GPU submitter detected - per-CPU signaling
-         * (handled via hotpath_signals.compositor_ns shared BSS) */
-        
-		/* PERF: Emit GPU detection event to ring buffer for real-time tracking
-		 * 
-		 * PERFORMANCE HIERARCHY: Skip ring buffer write when monitoring disabled (no_stats=true)
-		 * Ring buffer operations are Tier 3 (100-200ns) - avoid when not needed */
-		if (likely(!no_stats)) {
-			struct gpu_submit_detect_event *gpu_evt = bpf_ringbuf_reserve(&gpu_submit_detect_ringbuf, sizeof(*gpu_evt), 0);
-			if (gpu_evt) {
-				/* OPTIMIZED LAYOUT: Fields ordered by descending size (u64 → u32 → u8) */
-				gpu_evt->timestamp = scx_bpf_now();
-				gpu_evt->tid = p->pid;
-				gpu_evt->detection_method = 1;  /* 1 = name-based */
+			{
 				u8 vendor = tctx->gpu_vendor_cached;
 				if (!vendor) {
-					u32 tgid = (u32)p->tgid;
-					u8 *vendor_ptr = bpf_map_lookup_elem(&gpu_vendor_by_tgid_map, &tgid);
+					u32 vkey = (u32)p->tgid;
+					u8 *vendor_ptr = bpf_map_lookup_elem(&gpu_vendor_by_tgid_map, &vkey);
 					if (vendor_ptr)
 						vendor = *vendor_ptr;
 				}
-				gpu_evt->gpu_vendor = vendor;
-				gpu_evt->_pad[0] = 0;  /* Explicit padding initialization */
-				gpu_evt->_pad[1] = 0;
-				bpf_ringbuf_submit(gpu_evt, 0);
+				if (vendor) {
+					tctx->gpu_vendor_cached = vendor;
+					u32 vkey = (u32)p->tgid;
+					bpf_map_update_elem(&gpu_vendor_by_tgid_map, &vkey, &vendor, BPF_ANY);
+				}
+			}
+			recompute_boost_shift(tctx);
+			update_task_flags_cache(p, tctx);
+
+			if (likely(dispatch_event_enable) && likely(!no_stats)) {
+				struct gpu_submit_detect_event *gpu_evt =
+					bpf_ringbuf_reserve(&gpu_submit_detect_ringbuf, sizeof(*gpu_evt), 0);
+				if (gpu_evt) {
+					gpu_evt->timestamp = scx_bpf_now();
+					gpu_evt->tid = p->pid;
+					gpu_evt->detection_method = 1;
+					u8 vendor = tctx->gpu_vendor_cached;
+					if (!vendor) {
+						u32 tgid = (u32)p->tgid;
+						u8 *vendor_ptr = bpf_map_lookup_elem(&gpu_vendor_by_tgid_map, &tgid);
+						if (vendor_ptr)
+							vendor = *vendor_ptr;
+					}
+					gpu_evt->gpu_vendor = vendor;
+					gpu_evt->_pad[0] = 0;
+					gpu_evt->_pad[1] = 0;
+					bpf_ringbuf_submit(gpu_evt, 0);
+				}
 			}
 		}
-    }
 
-    /*
-     * LEGACY HEURISTIC CLASSIFICATION: Fallback for threads not detected by fentry/name
-     * This works for games with custom engines or non-standard GPU implementations.
-     */
-    if (is_exact_game_thread && !tctx->is_input_handler && !tctx->is_gpu_submit)
-        gamer_stopping_gpu_patterns(p, tctx, wakeup_hz);
-    else if (tctx->is_gpu_submit) {
-        if (wakeup_hz < 40 || wakeup_hz > 350) {
-            tctx->is_gpu_submit = 0;
-            tctx->low_cpu_samples = 0;
-            if (nr_gpu_submit_threads > 0)
-                __atomic_fetch_sub(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
-            recompute_boost_shift(tctx);
-        }
-    }
-    
-    /* Audio thread detection: Very high frequency (~300-1200Hz), short bursts
-     * Audio callbacks at 48kHz sample rate / 60 samples = 800Hz
-     * Very consistent pattern, short exec time (<500µs)
-     * FIXED: Moved out of GPU submit block - audio detection now works independently
-     * 
-     * LAYER 2: Process-aware runtime pattern detection
-     * - If in game process (p->tgid == fg_tgid) → game audio
-     * - If not in game process and not in audio server → system audio (fallback)
-     */
-    if (!tctx->is_game_audio && !tctx->is_system_audio && !tctx->is_gpu_submit &&
-        wakeup_hz >= 300 && wakeup_hz <= 1200 &&
-        tctx->exec_avg < 500000) {
-        tctx->high_cpu_samples = MIN(tctx->high_cpu_samples + 1, 10);
-        __atomic_fetch_add(&nr_runtime_pattern_audio_samples, 1, __ATOMIC_RELAXED);
-        if (tctx->high_cpu_samples >= 10) {
-            if (is_exact_game_thread) {
-                if (!tctx->is_game_audio) {
-                    tctx->is_game_audio = 1;
-                    __atomic_fetch_add(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
-                    if (tctx->audio_sample_rate == 0) {
-                        if (wakeup_hz >= 750 && wakeup_hz <= 800) {
-                            tctx->audio_sample_rate = 48000;
-                            tctx->audio_buffer_size = 64;
-                        } else if (wakeup_hz >= 375 && wakeup_hz <= 400) {
-                            tctx->audio_sample_rate = 48000;
-                            tctx->audio_buffer_size = 128;
-                        } else if (wakeup_hz >= 187 && wakeup_hz <= 200) {
-                            tctx->audio_sample_rate = 48000;
-                            tctx->audio_buffer_size = 256;
-                        } else {
-                            tctx->audio_sample_rate = 48000;
-                            tctx->audio_buffer_size =
-                                detect_audio_buffer_size(wakeup_hz, 48000);
-                        }
-                    }
-                    recompute_boost_shift(tctx);
-                }
-            } else if (!tctx->is_system_audio) {
-                u32 tgid = (u32)p->tgid;
-                u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
-                if (!is_audio_server || !*is_audio_server) {
-                    tctx->is_system_audio = 1;
-                    __atomic_fetch_add(&nr_system_audio_threads, 1, __ATOMIC_RELAXED);
-                    recompute_boost_shift(tctx);
-                }
-            }
-        }
-    }
+		if (is_exact_game_thread && !tctx->is_input_handler && !tctx->is_gpu_submit)
+			gamer_stopping_gpu_patterns(p, tctx, wakeup_hz);
+		else if (tctx->is_gpu_submit) {
+			if (wakeup_hz < 40 || wakeup_hz > 350) {
+				tctx->is_gpu_submit = 0;
+				tctx->low_cpu_samples = 0;
+				if (nr_gpu_submit_threads > 0)
+					__atomic_fetch_sub(&nr_gpu_submit_threads, 1, __ATOMIC_RELAXED);
+				recompute_boost_shift(tctx);
+			}
+		}
 
+		if (!tctx->is_game_audio && !tctx->is_system_audio && !tctx->is_gpu_submit &&
+		    wakeup_hz >= 300 && wakeup_hz <= 1200 &&
+		    tctx->exec_avg < 500000) {
+			tctx->high_cpu_samples = MIN(tctx->high_cpu_samples + 1, 10);
+			__atomic_fetch_add(&nr_runtime_pattern_audio_samples, 1, __ATOMIC_RELAXED);
+			if (tctx->high_cpu_samples >= 10) {
+				if (is_exact_game_thread) {
+					if (!tctx->is_game_audio) {
+						tctx->is_game_audio = 1;
+						__atomic_fetch_add(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
+						if (tctx->audio_sample_rate == 0) {
+							if (wakeup_hz >= 750 && wakeup_hz <= 800) {
+								tctx->audio_sample_rate = 48000;
+								tctx->audio_buffer_size = 64;
+							} else if (wakeup_hz >= 375 && wakeup_hz <= 400) {
+								tctx->audio_sample_rate = 48000;
+								tctx->audio_buffer_size = 128;
+							} else if (wakeup_hz >= 187 && wakeup_hz <= 200) {
+								tctx->audio_sample_rate = 48000;
+								tctx->audio_buffer_size = 256;
+							} else {
+								tctx->audio_sample_rate = 48000;
+								tctx->audio_buffer_size =
+									detect_audio_buffer_size(wakeup_hz, 48000);
+							}
+						}
+						recompute_boost_shift(tctx);
+					}
+				} else if (!tctx->is_system_audio) {
+					u32 tgid = (u32)p->tgid;
+					u8 *is_audio_server = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
+					if (!is_audio_server || !*is_audio_server) {
+						tctx->is_system_audio = 1;
+						__atomic_fetch_add(&nr_system_audio_threads, 1, __ATOMIC_RELAXED);
+						recompute_boost_shift(tctx);
+					}
+				}
+			}
+		}
 
-    /*
-     * Detect background tasks: high CPU usage (>5ms), low wakeup frequency.
-     * These are shader compilers, asset loaders, or other batch work.
-     * 
-     * CRITICAL: Only declassify if NOT name-based background (Chromium, Discord, etc.)
-     * Name-based background threads should persist regardless of runtime patterns.
-     */
-    bool is_name_based_background = is_background_name(p->comm) || 
-                                    is_steam_webhelper_name(p->comm) || 
-                                    is_discord_name(p->comm) || 
-                                    is_chromium_name(p->comm) || 
-                                    is_cursor_name(p->comm) || 
-                                    is_plasma_systemmonitor_name(p->comm);
-    
-    if (is_foreground_task(p) && tctx->wakeup_freq < BACKGROUND_FREQ_MAX) {
-        __atomic_fetch_add(&nr_background_pattern_checks, 1, __ATOMIC_RELAXED);
-        if (tctx->exec_avg > BACKGROUND_EXEC_THRESH_NS) {
-            tctx->high_cpu_samples = MIN(tctx->high_cpu_samples + 1, BACKGROUND_STABLE_SAMPLES);
-            __atomic_fetch_add(&nr_background_pattern_samples, 1, __ATOMIC_RELAXED);
-            if (tctx->high_cpu_samples >= BACKGROUND_STABLE_SAMPLES) {
-                if (update_background_state(p, tctx, true) && is_first_classification)
-                    __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
-            }
-        } else {
-            /* FIXED: Declassify if background pattern no longer matches
-             * BUT: Protect name-based background threads (Chromium, Discord, etc.) */
-            if (!is_name_based_background &&
-                update_background_state(p, tctx, false)) {
-                u64 old_val = __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
-                if (old_val == 0)
-                    __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
-            }
-            tctx->high_cpu_samples = 0;
-        }
-    } else {
-        /* Reset background flag if wakeup pattern changes
-         * BUT: Protect name-based background threads (Chromium, Discord, etc.)
-         * These should remain classified as background regardless of runtime patterns */
-        tctx->high_cpu_samples = 0;
-        if (!is_name_based_background &&
-            update_background_state(p, tctx, false)) {
-            u64 old_val = __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
-            if (old_val == 0)
-                __atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
-        }
-    }
+		bool is_name_based_background = is_background_name(p->comm) ||
+						is_steam_webhelper_name(p->comm) ||
+						is_discord_name(p->comm) ||
+						is_chromium_name(p->comm) ||
+						is_cursor_name(p->comm) ||
+						is_plasma_systemmonitor_name(p->comm);
 
-    /*
-     * Update per-CPU statistics and propagate chain boost across wake chains.
-     */
+		if (is_foreground_task(p) && tctx->wakeup_freq < BACKGROUND_FREQ_MAX) {
+			__atomic_fetch_add(&nr_background_pattern_checks, 1, __ATOMIC_RELAXED);
+			if (tctx->exec_avg > BACKGROUND_EXEC_THRESH_NS) {
+				tctx->high_cpu_samples =
+					MIN(tctx->high_cpu_samples + 1, BACKGROUND_STABLE_SAMPLES);
+				__atomic_fetch_add(&nr_background_pattern_samples, 1, __ATOMIC_RELAXED);
+				if (tctx->high_cpu_samples >= BACKGROUND_STABLE_SAMPLES) {
+					if (update_background_state(p, tctx, true) && is_first_classification)
+						__atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
+				}
+			} else {
+				if (!is_name_based_background &&
+				    update_background_state(p, tctx, false)) {
+					u64 old_val =
+						__atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
+					if (old_val == 0)
+						__atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
+				}
+				tctx->high_cpu_samples = 0;
+			}
+		} else {
+			tctx->high_cpu_samples = 0;
+			if (!is_name_based_background &&
+			    update_background_state(p, tctx, false)) {
+				u64 old_val = __atomic_fetch_sub(&nr_background_threads, 1, __ATOMIC_RELAXED);
+				if (old_val == 0)
+					__atomic_fetch_add(&nr_background_threads, 1, __ATOMIC_RELAXED);
+			}
+		}
+
+		tctx->last_classification_update = now;
+	}
+
+	/*
+	 * Update per-CPU statistics and propagate chain boost across wake chains.
+	 */
     update_cpu_load(p, slice);
     /* Runtime accounting for foreground vs total. */
     __atomic_fetch_add(&total_runtime_ns_total, slice, __ATOMIC_RELAXED);
@@ -6126,7 +5934,7 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
 
 	/* ENGINE PROFILE CACHE UPDATE: Record observed execution pattern for this thread name.
 	 * Helps future threads with same comm skip warm-up classification. */
-	if (tctx && is_foreground_task(p)) {
+	if (run_cold_path && tctx && is_foreground_task(p)) {
 		struct engine_profile_key key = {};
 		__builtin_memcpy(key.comm, p->comm, sizeof(key.comm));
 
@@ -6165,7 +5973,7 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
     
     /* AUDIOTHREAD DEADLINE TRACKING: Update completion time for deadline scheduling
      * UE5.6 DX12 optimization: Track when AudioThread completes to calculate next deadline. */
-    if (tctx && tctx->is_game_audio) {
+    if (run_cold_path && tctx && tctx->is_game_audio) {
         tctx->last_completion_time = scx_bpf_now();
     }
     if (runnable && tctx->chain_boost) {

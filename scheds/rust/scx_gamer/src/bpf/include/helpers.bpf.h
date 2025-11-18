@@ -143,66 +143,22 @@ static __always_inline u64 update_freq(u64 freq, u64 interval)
 /* scale_by_task_weight() and scale_by_task_weight_inverse() provided by scx/common.bpf.h */
 
 /*
- * Kick Bitmap Helpers
+ * Kick Helpers
  *
- * Used to track which CPUs need to be kicked (interrupted)
- * to check for higher-priority work.
- */
-
-/* Global kick bitmap */
-extern volatile u64 kick_mask[KICK_WORDS];
-
-/**
- * set_kick_cpu - Set kick bit for CPU
- * @cpu: CPU ID to set kick bit for
- *
- * Used to track which CPUs need to be kicked (interrupted)
- * to check for higher-priority work.
- *
- * TIER 0: Optimized bitmap operations
- * - Bounds checks: Tier 0 (~0.5-1ns each)
- * - Bit shift operations: Tier 0 (~0.5-1ns each)
- * - Atomic OR: Tier 0 (~1-2ns)
- * - Total: ~3-6ns
+ * SCX already exposes scx_bpf_kick_cpu(), so we can directly wake CPUs when
+ * needed instead of deferring to a bitmap processed by wakeup_timerfn().
+ * This keeps enqueue hot paths simple while still allowing deferred wakeups
+ * if the compile-time flag re-enables the timer.
  */
 static __always_inline void set_kick_cpu(s32 cpu)
 {
-	/* TIER 0: Bounds check (early exit, ~0.5-1ns) */
 	if (unlikely(cpu < 0 || (u32)cpu >= MAX_CPUS))
 		return;
 
-	/* TIER 0: Calculate word index (bit shift, ~0.5-1ns) */
-	u32 w = (u32)cpu >> 6;  /* Word index (cpu / 64) */
-	if (unlikely(w >= KICK_WORDS))
-		return;
-
-	/* TIER 0: Calculate bit position and set atomically (~1-2ns) */
-	u64 bit = 1ULL << (cpu & 63);  /* Bit within word */
-	__atomic_fetch_or(&kick_mask[w], bit, __ATOMIC_RELAXED);
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
-/**
- * clear_kick_cpu - Clear kick bit for CPU
- * @cpu: CPU ID to clear kick bit for
- *
- * TIER 0: Optimized bitmap operations (~3-6ns)
- * Same performance characteristics as set_kick_cpu.
- */
-static __always_inline void clear_kick_cpu(s32 cpu)
-{
-	/* TIER 0: Bounds check (early exit, ~0.5-1ns) */
-	if (unlikely(cpu < 0 || (u32)cpu >= MAX_CPUS))
-		return;
-
-	/* TIER 0: Calculate word index (bit shift, ~0.5-1ns) */
-	u32 w = (u32)cpu >> 6;
-	if (unlikely(w >= KICK_WORDS))
-		return;
-
-	/* TIER 0: Calculate bit position and clear atomically (~1-2ns) */
-	u64 bit = 1ULL << (cpu & 63);
-	__atomic_fetch_and(&kick_mask[w], ~bit, __ATOMIC_RELAXED);
-}
+static __always_inline void clear_kick_cpu(__maybe_unused s32 cpu) {}
 
 /*
  * CPU Frequency Scaling

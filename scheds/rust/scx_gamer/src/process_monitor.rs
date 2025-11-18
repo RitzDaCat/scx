@@ -48,15 +48,15 @@ pub mod nvidia {
 
     #[derive(Debug, Clone)]
     struct ProcStatSnapshot {
-        utime: u64,      // User time
-        stime: u64,      // System time
+        utime: u64, // User time
+        stime: u64, // System time
         timestamp: Instant,
     }
 
     /// NVIDIA-specific process monitor. Requires `nvidia-smi` to be present.
     pub struct ProcessMonitor {
         last_snapshots: HashMap<u32, ProcStatSnapshot>,
-        system_hz: u64,  // System clock ticks per second
+        system_hz: u64, // System clock ticks per second
         // Cached GPU usage per PID with TTL to avoid frequent nvidia-smi calls
         gpu_cache: HashMap<u32, (f64, Instant)>,
         gpu_cache_ttl: Duration,
@@ -70,7 +70,10 @@ pub mod nvidia {
             let system_hz = unsafe {
                 let hz = libc::sysconf(libc::_SC_CLK_TCK);
                 if hz <= 0 {
-                    return Err(anyhow::anyhow!("sysconf(_SC_CLK_TCK) failed: {}", std::io::Error::last_os_error()));
+                    return Err(anyhow::anyhow!(
+                        "sysconf(_SC_CLK_TCK) failed: {}",
+                        std::io::Error::last_os_error()
+                    ));
                 }
                 hz as u64
             };
@@ -122,15 +125,18 @@ pub mod nvidia {
                     0.0
                 }
             } else {
-                0.0  // First sample, no delta available
+                0.0 // First sample, no delta available
             };
 
             // Store current snapshot for next calculation
-            self.last_snapshots.insert(pid, ProcStatSnapshot {
-                utime,
-                stime,
-                timestamp: now,
-            });
+            self.last_snapshots.insert(
+                pid,
+                ProcStatSnapshot {
+                    utime,
+                    stime,
+                    timestamp: now,
+                },
+            );
 
             // Get process name from /proc/[pid]/comm
             let name = fs::read_to_string(format!("/proc/{}/comm", pid))

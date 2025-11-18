@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use inotify::{Inotify, WatchMask, EventMask};
+use inotify::{EventMask, Inotify, WatchMask};
 use log::{info, warn};
 use nix::fcntl;
 use rustc_hash::FxHashSet;
@@ -37,7 +37,7 @@ const FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 pub struct AudioServerDetector {
     inotify: Option<Inotify>,
     inotify_fd: Option<i32>,
-    pub shutdown: Arc<AtomicBool>,  // Made public so run() can update it
+    pub shutdown: Arc<AtomicBool>, // Made public so run() can update it
     last_scan: Instant,
     active_audio_pids: FxHashSet<u32>,
     proc_root: PathBuf,
@@ -60,11 +60,14 @@ impl AudioServerDetector {
                         let new_flags = flags | fcntl::OFlag::O_NONBLOCK;
                         match fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(new_flags)) {
                             Ok(_) => {
-                                match inotify.watches().add("/proc", WatchMask::CREATE | WatchMask::DELETE | WatchMask::ONLYDIR) {
+                                match inotify.watches().add(
+                                    "/proc",
+                                    WatchMask::CREATE | WatchMask::DELETE | WatchMask::ONLYDIR,
+                                ) {
                                     Ok(_) => {
                                         info!("Audio detection: Using inotify for event-driven detection (non-blocking)");
                                         Some((inotify, fd))
-                                    },
+                                    }
                                     Err(e) => {
                                         warn!("Audio detection: Failed to watch /proc: {}, falling back to periodic scan", e);
                                         None
@@ -82,9 +85,12 @@ impl AudioServerDetector {
                         None
                     }
                 }
-            },
+            }
             Err(e) => {
-                warn!("Audio detection: Failed to init inotify: {}, falling back to periodic scan", e);
+                warn!(
+                    "Audio detection: Failed to init inotify: {}, falling back to periodic scan",
+                    e
+                );
                 None
             }
         };
@@ -146,10 +152,10 @@ impl AudioServerDetector {
                             }
                         }
                     }
-                },
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No events, this is normal
-                },
+                }
                 Err(e) => {
                     warn!("Audio detection: inotify error: {}, disabling inotify", e);
                     self.inotify = None;
@@ -181,7 +187,10 @@ impl AudioServerDetector {
         match fs::read(&comm_path) {
             Ok(mut bytes) => {
                 // Trim null bytes and newlines from end (proc files often have trailing nulls)
-                while bytes.last() == Some(&0) || bytes.last() == Some(&b'\n') || bytes.last() == Some(&b'\r') {
+                while bytes.last() == Some(&0)
+                    || bytes.last() == Some(&b'\n')
+                    || bytes.last() == Some(&b'\r')
+                {
                     bytes.pop();
                 }
                 // Trim leading whitespace
@@ -189,9 +198,9 @@ impl AudioServerDetector {
                     bytes.remove(0);
                 }
                 // Compare as bytes (faster than String, no UTF-8 validation needed)
-                AUDIO_SERVER_NAMES.iter().any(|&name| {
-                    bytes == name.as_bytes() || bytes.starts_with(name.as_bytes())
-                })
+                AUDIO_SERVER_NAMES
+                    .iter()
+                    .any(|&name| bytes == name.as_bytes() || bytes.starts_with(name.as_bytes()))
             }
             Err(_) => false, // Process might have exited already
         }
@@ -221,14 +230,20 @@ impl AudioServerDetector {
                     if update_map_fn(pid, true) {
                         registered_count += 1;
                         self.active_audio_pids.insert(pid);
-                        info!("Audio detection: Registered audio server PID {} (initial scan)", pid);
+                        info!(
+                            "Audio detection: Registered audio server PID {} (initial scan)",
+                            pid
+                        );
                     }
                 }
             }
         }
 
         if registered_count > 0 {
-            info!("Audio detection: Initial scan registered {} audio server(s)", registered_count);
+            info!(
+                "Audio detection: Initial scan registered {} audio server(s)",
+                registered_count
+            );
         }
 
         registered_count
@@ -321,4 +336,3 @@ mod tests {
         );
     }
 }
-

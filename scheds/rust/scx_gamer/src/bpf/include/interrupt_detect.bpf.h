@@ -167,9 +167,14 @@ static __always_inline void register_interrupt_thread(u32 tid, u8 interrupt_type
  * Frequency: 10-1000 calls/sec
  * Net overhead: ~620μs-319ms/sec
  */
+extern volatile u32 detector_trace_enable;
+
 SEC("tracepoint/irq/irq_handler_entry")
 int BPF_PROG(detect_interrupt_hardware, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&interrupt_detect_hardware, 1, __ATOMIC_RELAXED);
 	register_interrupt_thread(tid, INTERRUPT_TYPE_HARDWARE);
@@ -186,6 +191,9 @@ int BPF_PROG(detect_interrupt_hardware, void *args)
 SEC("tracepoint/irq/irq_handler_exit")
 int BPF_PROG(detect_interrupt_hardware_exit, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&interrupt_detect_hardware, 1, __ATOMIC_RELAXED);
 	register_interrupt_thread(tid, INTERRUPT_TYPE_HARDWARE);
@@ -205,6 +213,9 @@ int BPF_PROG(detect_interrupt_hardware_exit, void *args)
 SEC("tracepoint/irq/softirq_entry")
 int BPF_PROG(detect_interrupt_softirq, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&interrupt_detect_softirq, 1, __ATOMIC_RELAXED);
 	register_interrupt_thread(tid, INTERRUPT_TYPE_SOFTIRQ);
@@ -221,6 +232,9 @@ int BPF_PROG(detect_interrupt_softirq, void *args)
 SEC("tracepoint/irq/softirq_exit")
 int BPF_PROG(detect_interrupt_softirq_exit, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&interrupt_detect_softirq, 1, __ATOMIC_RELAXED);
 	register_interrupt_thread(tid, INTERRUPT_TYPE_SOFTIRQ);
@@ -240,6 +254,9 @@ int BPF_PROG(detect_interrupt_softirq_exit, void *args)
 SEC("tracepoint/irq/tasklet_entry")
 int BPF_PROG(detect_interrupt_tasklet, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&interrupt_detect_tasklet, 1, __ATOMIC_RELAXED);
 	register_interrupt_thread(tid, INTERRUPT_TYPE_TASKLET);
@@ -256,6 +273,9 @@ int BPF_PROG(detect_interrupt_tasklet, void *args)
 SEC("tracepoint/irq/tasklet_exit")
 int BPF_PROG(detect_interrupt_tasklet_exit, void *args)
 {
+	if (!detector_trace_enable)
+		return 0;
+
 	u32 tid = bpf_get_current_pid_tgid();
 	__atomic_fetch_add(&interrupt_detect_tasklet, 1, __ATOMIC_RELAXED);
 	register_interrupt_thread(tid, INTERRUPT_TYPE_TASKLET);

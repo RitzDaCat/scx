@@ -6,10 +6,10 @@
 // Automatically saves and loads optimal scheduler configurations per game.
 // When a game is detected, its best known config is applied automatically.
 
+use ahash::AHashMap;
 use anyhow::Result;
 use log::info;
 use serde::{Deserialize, Serialize};
-use ahash::AHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +22,7 @@ pub struct GameProfile {
     pub best_config: SchedulerConfig,
     pub best_score: f64,
     pub sample_count: usize,
-    pub last_updated: u64,  // Unix timestamp
+    pub last_updated: u64, // Unix timestamp
     pub avg_fps: f64,
     pub avg_jitter_ms: f64,
     pub avg_latency_ns: u64,
@@ -93,10 +93,7 @@ impl ProfileManager {
 
         info!(
             "Profile: Saved '{}' - Score: {:.2}, FPS: {:.1}, Jitter: {:.2}ms",
-            profile.game_name,
-            profile.best_score,
-            profile.avg_fps,
-            profile.avg_jitter_ms
+            profile.game_name, profile.best_score, profile.avg_fps, profile.avg_jitter_ms
         );
 
         // Update in-memory cache
@@ -127,13 +124,10 @@ impl ProfileManager {
         }
 
         let total_games = self.profiles.len();
-        let avg_score = self.profiles.values()
-            .map(|p| p.best_score)
-            .sum::<f64>() / total_games as f64;
+        let avg_score =
+            self.profiles.values().map(|p| p.best_score).sum::<f64>() / total_games as f64;
 
-        let avg_fps = self.profiles.values()
-            .map(|p| p.avg_fps)
-            .sum::<f64>() / total_games as f64;
+        let avg_fps = self.profiles.values().map(|p| p.avg_fps).sum::<f64>() / total_games as f64;
 
         ProfileSummary {
             total_games,

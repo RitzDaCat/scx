@@ -17,23 +17,23 @@
 use anyhow::Result;
 use libbpf_rs::RingBufferBuilder;
 use log::{debug, info, warn};
+use nix::errno::Errno;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
-use nix::errno::Errno;
 use scx_utils::NR_CPU_IDS;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 /// Affinity event type from BPF
-/// 
+///
 /// CRITICAL: This struct MUST match the BPF layout exactly (affinity_detect.bpf.h)
 /// BPF struct order: timestamp (u64), type (u32), pid (u32), nr_cpus_allowed (u32), _pad (u32), comm[16]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct AffinityEvent {
-    timestamp: u64,         // MUST be first to match BPF layout
-    event_type: u32,        // Renamed from 'type' to match Rust conventions
+    timestamp: u64,  // MUST be first to match BPF layout
+    event_type: u32, // Renamed from 'type' to match Rust conventions
     pid: u32,
     nr_cpus_allowed: u32,
     _pad: u32,
@@ -54,13 +54,13 @@ pub struct AffinityStats {
 /// Receives affinity change events from BPF and resets custom affinities
 /// to full CPU mask for optimal scheduler control.
 pub struct AffinityOverride {
-    #[allow(dead_code)]  // Stats accessible via stats() method for monitoring
+    #[allow(dead_code)] // Stats accessible via stats() method for monitoring
     stats: Arc<AffinityStats>,
     shutdown: Arc<AtomicBool>,
     _thread: Option<JoinHandle<()>>,
-    #[allow(dead_code)]  // Must be kept alive to maintain hook attachments
-    _syscall_link: Option<libbpf_rs::Link>,  // Syscall entry hook
-    _kprobe_link: Option<libbpf_rs::Link>,  // set_cpus_allowed_ptr hook
+    #[allow(dead_code)] // Must be kept alive to maintain hook attachments
+    _syscall_link: Option<libbpf_rs::Link>, // Syscall entry hook
+    _kprobe_link: Option<libbpf_rs::Link>, // set_cpus_allowed_ptr hook
 }
 
 impl AffinityOverride {
@@ -78,14 +78,15 @@ impl AffinityOverride {
             Ok(link) => {
                 debug!("✓ Syscall entry kprobe attached successfully");
                 Some(link)
-            },
+            }
             Err(e) => {
                 let err_str = e.to_string();
                 // EEXIST means kprobe already attached (likely from previous instance)
-                if err_str.contains("EEXIST") 
-                    || err_str.contains("File exists") 
+                if err_str.contains("EEXIST")
+                    || err_str.contains("File exists")
                     || err_str.contains("already exists")
-                    || err_str.contains("-17")  // EEXIST error code
+                    || err_str.contains("-17")
+                // EEXIST error code
                 {
                     warn!(
                         "⚠️  Affinity Override: Syscall entry kprobe already attached (another instance running?)
@@ -125,14 +126,15 @@ impl AffinityOverride {
             Ok(link) => {
                 debug!("✓ Kprobe hook attached successfully");
                 Some(link)
-            },
+            }
             Err(e) => {
                 let err_str = e.to_string();
                 // EEXIST means kprobe already attached (likely from previous instance)
-                if err_str.contains("EEXIST") 
-                    || err_str.contains("File exists") 
+                if err_str.contains("EEXIST")
+                    || err_str.contains("File exists")
                     || err_str.contains("already exists")
-                    || err_str.contains("-17")  // EEXIST error code
+                    || err_str.contains("-17")
+                // EEXIST error code
                 {
                     warn!(
                         "⚠️  Affinity Override: Kprobe hook already attached (another instance running?)
@@ -172,7 +174,7 @@ impl AffinityOverride {
                 info!("✅ Affinity Override: ENABLED (proper userspace vs kernel detection)");
                 info!("   → Will override userspace-set affinities (e.g., Unreal Engine pinning)");
                 info!("   → Will respect kernel-set affinities (NUMA, thermal, cgroups)");
-            },
+            }
             (false, true) => {
                 warn!("⚠️  Affinity Override: PARTIALLY ENABLED (fallback mode)");
                 warn!("   → Syscall entry kprobe: FAILED (kprobe may not be attachable)");
@@ -180,25 +182,29 @@ impl AffinityOverride {
                 warn!("   → FALLBACK: Using single-CPU heuristic (catches Unreal Engine pinning)");
                 warn!("   → IMPACT: Will override single-CPU affinities, respect multi-CPU (NUMA/thermal)");
                 warn!("   → STATUS: Functional but less accurate than full detection");
-            },
+            }
             (true, false) => {
                 warn!("⚠️  Affinity Override: PARTIALLY ENABLED (non-functional)");
                 warn!("   → Syscall hook: WORKING");
                 warn!("   → Kprobe hook: FAILED (required for detection)");
-                warn!("   → IMPACT: Affinity override DISABLED (custom affinities will be respected)");
+                warn!(
+                    "   → IMPACT: Affinity override DISABLED (custom affinities will be respected)"
+                );
                 warn!("   → RECOMMENDATION: Fix kprobe hook attachment (see errors above)");
-            },
+            }
             (false, false) => {
                 warn!("❌ Affinity Override: DISABLED (both hooks failed)");
                 warn!("   → Syscall hook: FAILED");
                 warn!("   → Kprobe hook: FAILED");
                 warn!("   → IMPACT: Custom affinities will be respected (scheduler still works)");
                 warn!("   → TROUBLESHOOTING:");
-                warn!("      1. Check for running instances: ps aux | grep scx_gamer | grep -v grep");
+                warn!(
+                    "      1. Check for running instances: ps aux | grep scx_gamer | grep -v grep"
+                );
                 warn!("      2. Kill existing instances: sudo pkill scx_gamer");
                 warn!("      3. Check syscall function name: cat /proc/kallsyms | grep sched_setaffinity");
                 warn!("      4. Check kprobe support: cat /proc/sys/kernel/kprobes");
-            },
+            }
         }
 
         // Create separate Arc clones for each closure (fixes move error)
@@ -214,11 +220,7 @@ impl AffinityOverride {
         // TIER 1: Ring buffer callback runs in interrupt context (~2-10μs)
         let mut builder = RingBufferBuilder::new();
         builder.add(&skel.maps.affinity_events, move |data: &[u8]| -> i32 {
-            handle_affinity_event(
-                data,
-                &ringbuf_stats,
-                &full_cpumask,
-            )
+            handle_affinity_event(data, &ringbuf_stats, &full_cpumask)
         })?;
 
         let ringbuf = builder.build()?;
@@ -304,7 +306,7 @@ impl AffinityOverride {
     ///
     /// Used for monitoring and debugging affinity override system.
     /// Can be called from debug API or periodic logging.
-    #[allow(dead_code)]  // Public API for future monitoring/debugging use
+    #[allow(dead_code)] // Public API for future monitoring/debugging use
     pub fn stats(&self) -> &AffinityStats {
         &self.stats
     }
@@ -334,11 +336,7 @@ impl Drop for AffinityOverride {
 /// - Avoid String allocations in hot path (use stack buffers)
 /// - Fast error checking (Errno comparison, not string matching)
 /// - Minimal heap allocations
-fn handle_affinity_event(
-    data: &[u8],
-    stats: &AffinityStats,
-    full_cpumask: &CpuSet,
-) -> i32 {
+fn handle_affinity_event(data: &[u8], stats: &AffinityStats, full_cpumask: &CpuSet) -> i32 {
     // TIER 1: Size check before unsafe cast (~1-2ns)
     if data.len() < std::mem::size_of::<AffinityEvent>() {
         warn!("Affinity event too small: {} bytes", data.len());
@@ -347,9 +345,7 @@ fn handle_affinity_event(
 
     // TIER 1: Unaligned read to avoid UB across architectures (~10-20ns)
     // No heap allocation - stack copy only
-    let event = unsafe {
-        (data.as_ptr() as *const AffinityEvent).read_unaligned()
-    };
+    let event = unsafe { (data.as_ptr() as *const AffinityEvent).read_unaligned() };
 
     stats.events_received.fetch_add(1, Ordering::Relaxed);
 
@@ -371,7 +367,7 @@ fn handle_affinity_event(
         let comm_slice = &event.comm[..comm_len];
         String::from_utf8_lossy(comm_slice)
     };
-    
+
     #[cfg(debug_assertions)]
     debug!(
         "Affinity event: PID={} comm={} nr_cpus={}",
@@ -395,8 +391,7 @@ fn handle_affinity_event(
                     len
                 };
                 // Use Cow<str> to avoid allocation - stack buffer is valid for this scope
-                let comm_str = std::str::from_utf8(&comm_buf[..comm_len])
-                    .unwrap_or("<invalid>");
+                let comm_str = std::str::from_utf8(&comm_buf[..comm_len]).unwrap_or("<invalid>");
                 info!(
                     "Affinity override: first event processed (pid={} comm='{}' nr_cpus={})",
                     event.pid, comm_str, event.nr_cpus_allowed
@@ -405,12 +400,13 @@ fn handle_affinity_event(
             stats.affinities_reset.fetch_add(1, Ordering::Relaxed);
             #[cfg(debug_assertions)]
             debug!("Reset affinity for PID {} ({})", event.pid, comm_str);
-            0  // Success
+            0 // Success
         }
         Err(e) => {
             // TIER 1: Fast error checking using Errno (no string allocation)
             // Check error source directly instead of converting to string
-            let is_esrch = e.downcast_ref::<Errno>()
+            let is_esrch = e
+                .downcast_ref::<Errno>()
                 .map(|&errno| errno == Errno::ESRCH)
                 .unwrap_or_else(|| {
                     // Fallback: check string representation only if Errno check fails
@@ -419,16 +415,19 @@ fn handle_affinity_event(
                     let err_str = e.to_string();
                     err_str.contains("ESRCH") || err_str.contains("No such process")
                 });
-            
+
             if is_esrch {
                 stats.process_not_found.fetch_add(1, Ordering::Relaxed);
                 #[cfg(debug_assertions)]
-                debug!("Process {} ({}) exited before affinity reset", event.pid, comm_str);
+                debug!(
+                    "Process {} ({}) exited before affinity reset",
+                    event.pid, comm_str
+                );
             } else {
                 stats.reset_failures.fetch_add(1, Ordering::Relaxed);
                 warn!("Failed to reset affinity for PID {}: {}", event.pid, e);
             }
-            -1  // Failure
+            -1 // Failure
         }
     }
 }
@@ -486,7 +485,7 @@ fn scan_and_reset_affinities(full_cpumask: &CpuSet, stats: &AffinityStats) -> Re
         let pid_str = entry.file_name();
         let pid: u32 = match pid_str.to_string_lossy().parse() {
             Ok(p) => p,
-            Err(_) => continue,  // Not a PID directory
+            Err(_) => continue, // Not a PID directory
         };
 
         // Skip PID 0 and 1 (kernel and init)
@@ -528,7 +527,7 @@ fn has_custom_affinity(pid: u32) -> Result<bool> {
         let prefix = b"/proc/";
         path_buf[pos..pos + prefix.len()].copy_from_slice(prefix);
         pos += prefix.len();
-        
+
         // Write PID as decimal string (manual conversion, no allocation)
         let mut pid_val = pid;
         let mut digits = [0u8; 10];
@@ -548,11 +547,11 @@ fn has_custom_affinity(pid: u32) -> Result<bool> {
             path_buf[pos] = digits[i];
             pos += 1;
         }
-        
+
         let suffix = b"/status";
         path_buf[pos..pos + suffix.len()].copy_from_slice(suffix);
         pos += suffix.len();
-        
+
         std::str::from_utf8(&path_buf[..pos]).unwrap_or("/proc")
     };
 
@@ -564,28 +563,30 @@ fn has_custom_affinity(pid: u32) -> Result<bool> {
         if line.starts_with("Cpus_allowed_list:") {
             // TIER 1: Fast string splitting using split_once (more efficient than split(':').nth())
             // split_once() is ~10-20ns faster than split(':').nth(1) for this use case
-            let cpus_list = line.split_once(':')
+            let cpus_list = line
+                .split_once(':')
                 .map(|(_, rest)| rest.trim())
                 .unwrap_or("");
 
             // TIER 1: Fast heuristic checks (no allocations)
             // Simple heuristic: if contains comma or is single digit, it's restricted
             if cpus_list.contains(',') || !cpus_list.contains('-') {
-                return Ok(true);  // Custom affinity
+                return Ok(true); // Custom affinity
             }
 
             // TIER 1: Parse range (e.g., "0-15")
             if let Some((start_str, end_str)) = cpus_list.split_once('-') {
                 // TIER 1: Parse integers (no allocations)
-                if let (Ok(start), Ok(end)) = (start_str.parse::<usize>(), end_str.parse::<usize>()) {
+                if let (Ok(start), Ok(end)) = (start_str.parse::<usize>(), end_str.parse::<usize>())
+                {
                     // Check if range covers most CPUs (within 2 of total)
                     // This handles hyperthreading cases where full might be "0-15" on 8C/16T
                     let range_size = end - start + 1;
                     let nr_cpus = *NR_CPU_IDS;
-                    
+
                     // If range is significantly smaller than total CPUs, it's restricted
                     if range_size < nr_cpus.saturating_sub(2) {
-                        return Ok(true);  // Custom affinity
+                        return Ok(true); // Custom affinity
                     }
                 }
             }
@@ -594,6 +595,5 @@ fn has_custom_affinity(pid: u32) -> Result<bool> {
         }
     }
 
-    Ok(false)  // Full affinity or unable to determine
+    Ok(false) // Full affinity or unable to determine
 }
-

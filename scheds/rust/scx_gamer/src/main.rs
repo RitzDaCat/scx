@@ -6,7 +6,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-
 // Removed: enable_kernel_busy_polling() - no longer needed with interrupt-driven approach
 // Removed: pin_current_thread_to_cpu() - unused function (was for input thread CPU pinning)
 
@@ -15,53 +14,55 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
-mod stats;
-mod ring_buffer;
-mod trigger;
+mod affinity_override; // CPU affinity override system (proactive)
+mod audio_detect;
+mod cpu_detect;
+mod debug_api;
+mod engine_presets;
 mod game_detect;
-mod game_detect_bpf;  // BPF LSM-based game detection (modern, kernel-level)
-mod ml_collect;
-mod ml_scoring;
+mod game_detect_bpf; // BPF LSM-based game detection (modern, kernel-level)
+mod gpu_queue_monitor;
 mod ml_autotune;
 mod ml_bayesian;
+mod ml_collect;
 mod ml_profiles;
-mod cpu_detect;
-mod tui;
-mod process_monitor;
-mod debug_api;
-mod audio_detect;
-mod affinity_override;  // CPU affinity override system (proactive)
+mod ml_scoring;
 mod power_monitor;
-mod gpu_queue_monitor;
-mod engine_presets;
+mod process_monitor;
+mod ring_buffer;
+mod stats;
+mod trigger;
+mod tui;
 // Thread learning modules removed - experimental, not production-ready
 // mod thread_patterns;
 // mod thread_sampler;
-use crate::trigger::TriggerOps;
+use crate::cpu_detect::CpuInfo;
+use crate::engine_presets::seed_engine_presets;
 use crate::game_detect::GameDetector;
 use crate::game_detect_bpf::BpfGameDetector;
-use crate::ml_collect::MLCollector;
+use crate::gpu_queue_monitor::{monotonic_nanos, GpuQueueMonitor};
 use crate::ml_autotune::MLAutotuner;
+use crate::ml_collect::MLCollector;
 use crate::ml_profiles::ProfileManager;
-use crate::cpu_detect::CpuInfo;
-use crate::power_monitor::PowerMonitor;
-use crate::gpu_queue_monitor::{GpuQueueMonitor, monotonic_nanos};
-use crate::engine_presets::seed_engine_presets;
+use crate::power_monitor::{PowerHint, PowerMonitor};
+use crate::trigger::TriggerOps;
 // Thread learning removed:
 // use crate::thread_patterns::ThreadPatternManager;
 // use crate::thread_sampler::ThreadSampler;
 use rustc_hash::FxHashSet;
 use std::ffi::c_int;
 // removed: userspace /proc/stat util sampling
+use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
-use std::path::Path;
-use std::collections::HashMap;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -71,15 +72,20 @@ use evdev::EventType;
 use libbpf_rs::MapCore;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libc::{
+    sched_attr, sched_param, sched_setscheduler, SCHED_DEADLINE, SCHED_FIFO, SCHED_FLAG_DL_OVERRUN,
+    SCHED_OTHER,
+};
 use log::{info, warn};
-use nix::sched::{sched_setaffinity, CpuSet};
-use nix::unistd::Pid;
 use nix::fcntl;
-use libc::{sched_setscheduler, SCHED_FIFO, SCHED_DEADLINE, SCHED_OTHER, sched_param, sched_attr, SCHED_FLAG_DL_OVERRUN};
+use nix::sched::{sched_setaffinity, CpuSet};
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
+use nix::unistd::Pid;
+use once_cell::sync::Lazy;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::init_libbpf_logging;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::parse_cpu_list;
 use scx_utils::scx_ops_attach;
@@ -92,9 +98,7 @@ use scx_utils::CoreType;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
-use scx_utils::init_libbpf_logging;
 use stats::Metrics;
-use once_cell::sync::Lazy;
 
 const SCHEDULER_NAME: &str = "scx_gamer";
 const CCD_CLASS_UNKNOWN: u8 = 0;
@@ -113,7 +117,10 @@ fn stats_interval_from_secs(value: f64) -> Option<Duration> {
 // Gracefully handle detection failures with default fallback
 static CPU_INFO: Lazy<CpuInfo> = Lazy::new(|| {
     CpuInfo::detect().unwrap_or_else(|e| {
-        warn!("CPU detection failed: {}, using defaults. ML autotune will use generic profile.", e);
+        warn!(
+            "CPU detection failed: {}, using defaults. ML autotune will use generic profile.",
+            e
+        );
         CpuInfo {
             model_name: "Unknown CPU".to_string(),
             safe_name: "Unknown_CPU".to_string(),
@@ -161,11 +168,11 @@ struct DeviceInfo {
 
 impl DeviceInfo {
     /// Create new DeviceInfo with packed idx and lane
-    /// 
+    ///
     /// # Arguments
     /// * `idx` - Device index (max 16M devices)
     /// * `lane` - Input lane type
-    /// 
+    ///
     /// # Returns
     /// * `Self` - Packed DeviceInfo
     fn new(idx: usize, lane: InputLane) -> Self {
@@ -173,17 +180,17 @@ impl DeviceInfo {
         let packed_info = ((idx as u32) & 0xFFFFFF) | ((lane as u32) << 24);
         Self { packed_info }
     }
-    
+
     /// Get device index
-    /// 
+    ///
     /// # Returns
     /// * `usize` - Device index
     fn idx(&self) -> usize {
         (self.packed_info & 0xFFFFFF) as usize
     }
-    
+
     /// Get input lane
-    /// 
+    ///
     /// # Returns
     /// * `InputLane` - Input lane type
     fn lane(&self) -> InputLane {
@@ -334,6 +341,31 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     prefer_napi_on_input: bool,
 
+    /// Enable extended detector hooks (network/storage/fs/memory).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_detectors: bool,
+
+    /// Enable runtime tracing (track_thread_ru).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_runtime_trace: bool,
+
+    /// Disable runtime tracing explicitly (overrides --enable-runtime-trace).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_runtime_trace: bool,
+
+    /// Emit dispatch events to the ring buffer (for watchdog / diagnostics).
+    /// Disabled by default to avoid hot-path overhead.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_dispatch_events: bool,
+
+    /// Disable dispatch events explicitly (overrides --enable-dispatch-events).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_dispatch_events: bool,
+
+    /// Disable optional detector tracepoints (overrides --enable-detectors).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_detectors: bool,
+
     /// Disable per-mm recent CPU hint (cache affinity hinting, enabled by default).
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_mm_hint: bool,
@@ -459,7 +491,6 @@ struct Opts {
     /// Exposes HTTP endpoint on localhost with current scheduler metrics as JSON
     #[clap(long)]
     debug_api: Option<u16>,
-
     // Thread learning CLI options removed - experimental feature not production-ready
     // If needed in future, restore from git history
 }
@@ -475,34 +506,39 @@ struct Scheduler<'a> {
     stats_server: Option<StatsServer<(), Metrics>>,
     input_devs: Vec<evdev::Device>,
     epoll_fd: Option<Epoll>,
-    input_fd_info_vec: Vec<Option<DeviceInfo>>,  // Direct array access for hot path
+    input_fd_info_vec: Vec<Option<DeviceInfo>>, // Direct array access for hot path
     registered_epoll_fds: FxHashSet<i32>,
     trig: trigger::BpfTrigger,
     input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane),
-    bpf_game_detector: Option<BpfGameDetector>,    // BPF LSM game detection (kernel-level, preferred)
-    game_detector: Option<GameDetector>,           // Fallback inotify detection (if BPF unavailable)
-    ml_collector: Option<MLCollector>,  // ML data collection for per-game tuning
-    ml_autotuner: Option<MLAutotuner>,  // Automated parameter exploration
-    profile_manager: Option<ProfileManager>,  // Per-game config profiles
-    last_detected_game: String,  // Track game changes for profile loading
-    input_ring_buffer: Option<ring_buffer::InputRingBufferManager>,  // Interrupt-driven ring buffer for ultra-low latency input
-    dispatch_event_ringbuf: Option<libbpf_rs::RingBuffer<'a>>,  // Event-driven dispatch events for watchdog (eliminates polling)
-    debug_api_state: Option<Arc<debug_api::DebugApiState>>,  // Debug API state for external metric access
-    audio_detector: Option<audio_detect::AudioServerDetector>,  // Event-driven audio server detection (inotify)
+    bpf_game_detector: Option<BpfGameDetector>, // BPF LSM game detection (kernel-level, preferred)
+    game_detector: Option<GameDetector>,        // Fallback inotify detection (if BPF unavailable)
+    ml_collector: Option<MLCollector>,          // ML data collection for per-game tuning
+    ml_autotuner: Option<MLAutotuner>,          // Automated parameter exploration
+    profile_manager: Option<ProfileManager>,    // Per-game config profiles
+    last_detected_game: String,                 // Track game changes for profile loading
+    input_ring_buffer: Option<ring_buffer::InputRingBufferManager>, // Interrupt-driven ring buffer for ultra-low latency input
+    dispatch_event_ringbuf: Option<libbpf_rs::RingBuffer<'a>>, // Event-driven dispatch events for watchdog (eliminates polling)
+    debug_api_state: Option<Arc<debug_api::DebugApiState>>, // Debug API state for external metric access
+    audio_detector: Option<audio_detect::AudioServerDetector>, // Event-driven audio server detection (inotify)
     audio_update_buffer: Vec<(u32, bool)>,
-    #[allow(dead_code)]  // Held for Drop behavior - keeps affinity override thread running
-    affinity_override: Option<affinity_override::AffinityOverride>,  // CPU affinity override system (proactive)
-    #[allow(dead_code)]  // Used by macros (uei_exited!, uei_report!) which use identifier name, not direct access
-    uei: UserExitInfo,  // User exit info for BPF communication
+    #[allow(dead_code)] // Held for Drop behavior - keeps affinity override thread running
+    affinity_override: Option<affinity_override::AffinityOverride>, // CPU affinity override system (proactive)
+    #[allow(dead_code)]
+    // Used by macros (uei_exited!, uei_report!) which use identifier name, not direct access
+    uei: UserExitInfo, // User exit info for BPF communication
     power_monitor: Option<PowerMonitor>,
     gpu_queue_monitor: Option<GpuQueueMonitor>,
-    
+    power_hint_rx: Option<Receiver<PowerHint>>,
+    gpu_busy_rx: Option<Receiver<u32>>,
+    power_monitor_worker: Option<thread::JoinHandle<()>>,
+    gpu_monitor_worker: Option<thread::JoinHandle<()>>,
+
     // AI Analytics: Temporal pattern tracking (rolling windows)
-    migration_history_10s: std::collections::VecDeque<(Instant, u64)>,  // (timestamp, migration_count)
-    migration_history_60s: std::collections::VecDeque<(Instant, u64)>,  // (timestamp, migration_count)
-    cpu_util_history: std::collections::VecDeque<(Instant, u64)>,  // (timestamp, cpu_util)
-    frame_rate_history: std::collections::VecDeque<(Instant, f64)>,  // (timestamp, frame_hz_est)
-    last_migration_count: u64,  // Last migration count for delta calculation
+    migration_history_10s: std::collections::VecDeque<(Instant, u64)>, // (timestamp, migration_count)
+    migration_history_60s: std::collections::VecDeque<(Instant, u64)>, // (timestamp, migration_count)
+    cpu_util_history: std::collections::VecDeque<(Instant, u64)>,      // (timestamp, cpu_util)
+    frame_rate_history: std::collections::VecDeque<(Instant, f64)>,    // (timestamp, frame_hz_est)
+    last_migration_count: u64, // Last migration count for delta calculation
     tracked_game_threads: FxHashSet<u32>,
 }
 
@@ -518,7 +554,6 @@ impl<'a> Scheduler<'a> {
             0
         }
     }
-    
 
     /// Get full game info from active detector
     #[inline]
@@ -567,72 +602,94 @@ impl<'a> Scheduler<'a> {
         // OPTIMIZATION: Direct device lookup instead of scanning all devices
         // This reduces lookup time from O(n) to O(1) for device enumeration
         let device = udev::Device::from_syspath(dev_path)?;
-        
+
         // Check explicit udev classifications first (fastest path)
-        if device.property_value("ID_INPUT_MOUSE").map(|v| v == "1").unwrap_or(false) {
+        if device
+            .property_value("ID_INPUT_MOUSE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             return Ok(DeviceType::Mouse);
         }
-        if device.property_value("ID_INPUT_KEYBOARD").map(|v| v == "1").unwrap_or(false) {
+        if device
+            .property_value("ID_INPUT_KEYBOARD")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             return Ok(DeviceType::Keyboard);
         }
-        
+
         // Check for wireless dongle patterns (medium cost)
         if let Some(usb_interfaces) = device.property_value("ID_USB_INTERFACES") {
             let interfaces = usb_interfaces.to_string_lossy();
             if Self::is_wireless_dongle_pattern(&interfaces) {
                 // For wireless dongles, prefer mouse classification unless explicitly keyboard
-                if device.property_value("ID_INPUT_KEYBOARD").map(|v| v == "1").unwrap_or(false) {
+                if device
+                    .property_value("ID_INPUT_KEYBOARD")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                {
                     return Ok(DeviceType::Keyboard);
                 } else {
                     return Ok(DeviceType::Mouse);
                 }
             }
         }
-        
+
         // Check for device grouping (highest cost - only if needed)
         if let Some(device_group) = device.property_value("LIBINPUT_DEVICE_GROUP") {
             // OPTIMIZATION: Only do expensive group analysis if no other classification found
-            if let Ok(group_device_type) = Self::detect_device_group_primary_type_cached(&device_group.to_string_lossy()) {
+            if let Ok(group_device_type) =
+                Self::detect_device_group_primary_type_cached(&device_group.to_string_lossy())
+            {
                 return Ok(group_device_type);
             }
         }
-        
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Device not found in udev"))
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Device not found in udev",
+        ))
     }
 
     /// Cached version of device group detection to avoid repeated expensive scans
     /// OPTIMIZATION: Use static cache to avoid repeated udev enumeration
-    fn detect_device_group_primary_type_cached(device_group: &str) -> Result<DeviceType, std::io::Error> {
+    fn detect_device_group_primary_type_cached(
+        device_group: &str,
+    ) -> Result<DeviceType, std::io::Error> {
+        use once_cell::sync::Lazy;
         use std::collections::HashMap;
         use std::sync::Mutex;
-        use once_cell::sync::Lazy;
-        
+
         // Static cache for device group analysis (expensive operation)
-        static GROUP_CACHE: Lazy<Mutex<HashMap<String, DeviceType>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-        
+        static GROUP_CACHE: Lazy<Mutex<HashMap<String, DeviceType>>> =
+            Lazy::new(|| Mutex::new(HashMap::new()));
+
         // Check cache first
         if let Ok(cache) = GROUP_CACHE.lock() {
             if let Some(&cached_type) = cache.get(device_group) {
                 return Ok(cached_type);
             }
         }
-        
+
         // Cache miss - perform expensive scan
         let device_type = Self::detect_device_group_primary_type_uncached(device_group)?;
-        
+
         // Cache the result
         if let Ok(mut cache) = GROUP_CACHE.lock() {
             cache.insert(device_group.to_string(), device_type);
         }
-        
+
         Ok(device_type)
     }
 
     /// Uncached device group detection (expensive operation)
-    fn detect_device_group_primary_type_uncached(device_group: &str) -> Result<DeviceType, std::io::Error> {
+    fn detect_device_group_primary_type_uncached(
+        device_group: &str,
+    ) -> Result<DeviceType, std::io::Error> {
         let mut enumerator = udev::Enumerator::new()?;
         enumerator.match_subsystem("input")?;
-        
+
         // Find all devices in the same group
         let mut group_devices = Vec::new();
         for udev_dev in enumerator.scan_devices()? {
@@ -642,24 +699,36 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
-        
+
         // Analyze the group to determine primary device type
         let mut mouse_count = 0;
         let mut keyboard_count = 0;
         let mut controller_count = 0;
-        
+
         for device in &group_devices {
-            if device.property_value("ID_INPUT_MOUSE").map(|v| v == "1").unwrap_or(false) {
+            if device
+                .property_value("ID_INPUT_MOUSE")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
                 mouse_count += 1;
             }
-            if device.property_value("ID_INPUT_KEYBOARD").map(|v| v == "1").unwrap_or(false) {
+            if device
+                .property_value("ID_INPUT_KEYBOARD")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
                 keyboard_count += 1;
             }
-            if device.property_value("ID_INPUT_JOYSTICK").map(|v| v == "1").unwrap_or(false) {
+            if device
+                .property_value("ID_INPUT_JOYSTICK")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
                 controller_count += 1;
             }
         }
-        
+
         // Return the most common device type in the group
         if controller_count > mouse_count && controller_count > keyboard_count {
             Ok(DeviceType::Other) // Controllers are classified as Other in our enum
@@ -675,7 +744,7 @@ impl<'a> Scheduler<'a> {
     fn detect_via_usb_interfaces(dev_path: &Path) -> Result<DeviceType, std::io::Error> {
         // OPTIMIZATION: Direct device lookup instead of scanning all devices
         let device = udev::Device::from_syspath(dev_path)?;
-        
+
         // Check parent USB device for dongle characteristics
         if let Some(parent) = device.parent() {
             if let Some(devtype) = parent.attribute_value("devtype") {
@@ -683,15 +752,19 @@ impl<'a> Scheduler<'a> {
                     // Check for wireless dongle indicators
                     if let Some(product) = parent.attribute_value("product") {
                         let product_str = product.to_string_lossy().to_lowercase();
-                        if product_str.contains("dongle") || 
-                           product_str.contains("receiver") || 
-                           product_str.contains("adapter") {
+                        if product_str.contains("dongle")
+                            || product_str.contains("receiver")
+                            || product_str.contains("adapter")
+                        {
                             // Dongle detected - classify based on interface
-                            if let Some(usb_interfaces) = device.property_value("ID_USB_INTERFACES") {
+                            if let Some(usb_interfaces) = device.property_value("ID_USB_INTERFACES")
+                            {
                                 let interfaces = usb_interfaces.to_string_lossy();
-                                if interfaces.contains("030102") { // HID mouse interface
+                                if interfaces.contains("030102") {
+                                    // HID mouse interface
                                     return Ok(DeviceType::Mouse);
-                                } else if interfaces.contains("030101") { // HID keyboard interface
+                                } else if interfaces.contains("030101") {
+                                    // HID keyboard interface
                                     return Ok(DeviceType::Keyboard);
                                 }
                             }
@@ -700,16 +773,26 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
-        
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "USB interface analysis failed"))
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "USB interface analysis failed",
+        ))
     }
 
     /// Detect device type using event capabilities and name analysis (fallback)
-    fn detect_via_capabilities_and_name(dev: &evdev::Device, has_rel: bool, has_key: bool) -> DeviceType {
+    fn detect_via_capabilities_and_name(
+        dev: &evdev::Device,
+        has_rel: bool,
+        has_key: bool,
+    ) -> DeviceType {
         let name_lc = dev.name().unwrap_or(" ").to_ascii_lowercase();
-        
+
         // Name-based detection with better heuristics
-        if name_lc.contains("mouse") || name_lc.contains("trackball") || name_lc.contains("trackpad") {
+        if name_lc.contains("mouse")
+            || name_lc.contains("trackball")
+            || name_lc.contains("trackpad")
+        {
             DeviceType::Mouse
         } else if name_lc.contains("keyboard") || name_lc.contains("keypad") {
             DeviceType::Keyboard
@@ -743,9 +826,11 @@ impl<'a> Scheduler<'a> {
     fn is_wireless_dongle_pattern(interfaces: &str) -> bool {
         // Common wireless dongle interface patterns:
         // 030102 = HID mouse interface
-        // 030101 = HID keyboard interface  
+        // 030101 = HID keyboard interface
         // 030000 = HID generic interface
-        interfaces.contains("030102") || interfaces.contains("030101") || interfaces.contains("030000")
+        interfaces.contains("030102")
+            || interfaces.contains("030101")
+            || interfaces.contains("030000")
     }
 
     /// Register all threads of the detected game in game_threads_map
@@ -753,7 +838,7 @@ impl<'a> Scheduler<'a> {
     /// PERF: Uses stack-allocated path buffer to avoid heap allocation
     fn register_game_threads(&mut self, tgid: u32) {
         let game_threads_map = &self.skel.maps.game_threads_map;
-        
+
         // PERF: Stack-allocated path buffer (max PID: 10 digits + "/proc//task\0" = 32 bytes)
         // Eliminates heap allocation from format!() (~100-200ns savings)
         // Use manual string building for zero-allocation path construction
@@ -764,7 +849,7 @@ impl<'a> Scheduler<'a> {
             let prefix = b"/proc/";
             path_buf[pos..pos + prefix.len()].copy_from_slice(prefix);
             pos += prefix.len();
-            
+
             // Write TGID as decimal string
             let mut tgid_val = tgid;
             let mut digits = [0u8; 10];
@@ -784,11 +869,11 @@ impl<'a> Scheduler<'a> {
                 path_buf[pos] = digits[i];
                 pos += 1;
             }
-            
+
             let suffix = b"/task";
             path_buf[pos..pos + suffix.len()].copy_from_slice(suffix);
             pos += suffix.len();
-            
+
             std::str::from_utf8(&path_buf[..pos]).unwrap_or("/proc")
         };
 
@@ -826,7 +911,10 @@ impl<'a> Scheduler<'a> {
         self.tracked_game_threads = new_threads;
 
         if thread_count > 0 {
-            info!("Thread tracking: Registered {} game threads for TGID {}", thread_count, tgid);
+            info!(
+                "Thread tracking: Registered {} game threads for TGID {}",
+                thread_count, tgid
+            );
         }
     }
 
@@ -858,7 +946,7 @@ impl<'a> Scheduler<'a> {
         // 4. Fallback to LITTLE/low-capacity cores if no SMT
         // Note: With interrupt-driven epoll, CPU usage is minimal (<5%)
         let topo = Topology::new().ok()?;
-        
+
         // Strategy 1: Find highest-numbered hyperthread core (typically last CPU)
         // This avoids conflicts with GPU threads which prefer physical cores
         if topo.smt_enabled {
@@ -873,19 +961,24 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
-        
+
         // Strategy 2: Prefer a LITTLE/low-capacity CPU as housekeeping, else the lowest-capacity CPU.
         let mut little: Vec<(usize, usize)> = topo
             .all_cpus
             .iter()
             .map(|(id, cpu)| (*id, cpu.cpu_capacity))
-            .filter(|(id, _)| topo.all_cpus.get(id).map(|c| matches!(c.core_type, CoreType::Little)).unwrap_or(false))
+            .filter(|(id, _)| {
+                topo.all_cpus
+                    .get(id)
+                    .map(|c| matches!(c.core_type, CoreType::Little))
+                    .unwrap_or(false)
+            })
             .collect();
         if !little.is_empty() {
             little.sort_by_key(|(_, cap)| *cap);
             return little.first().map(|(id, _)| *id);
         }
-        
+
         // Strategy 3: Fallback to lowest-capacity CPU
         let mut all: Vec<(usize, usize)> = topo
             .all_cpus
@@ -905,12 +998,19 @@ impl<'a> Scheduler<'a> {
         let smt_enabled = !opts.disable_smt && topo.smt_enabled;
 
         // Auto-detect hybrid CPU topology (P+E cores)
-        let has_little = topo.all_cpus.values().any(|c| matches!(c.core_type, CoreType::Little));
-        let has_big = topo.all_cpus.values().any(|c| !matches!(c.core_type, CoreType::Little));
+        let has_little = topo
+            .all_cpus
+            .values()
+            .any(|c| matches!(c.core_type, CoreType::Little));
+        let has_big = topo
+            .all_cpus
+            .values()
+            .any(|c| !matches!(c.core_type, CoreType::Little));
         let is_hybrid = has_little && has_big;
 
         // Auto-enable preferred idle scan for hybrid CPUs unless flat scan is explicitly enabled
-        let preferred_idle_scan = if is_hybrid && !opts.flat_idle_scan && !opts.preferred_idle_scan {
+        let preferred_idle_scan = if is_hybrid && !opts.flat_idle_scan && !opts.preferred_idle_scan
+        {
             info!("Hybrid CPU topology detected, auto-enabling preferred idle scan");
             true
         } else {
@@ -1036,8 +1136,7 @@ impl<'a> Scheduler<'a> {
             if high_perf_count == 0 {
                 high_perf_count = cpus.len();
             }
-            rodata.preferred_high_perf_count =
-                high_perf_count.min(cpus.len()).min(256) as u32;
+            rodata.preferred_high_perf_count = high_perf_count.min(cpus.len()).min(256) as u32;
         } else {
             let nr_ids = (*NR_CPU_IDS as usize).min(256);
             for cpu_id in 0..nr_ids {
@@ -1090,10 +1189,7 @@ impl<'a> Scheduler<'a> {
 
             if metrics.len() >= 2 {
                 let mut by_cache = metrics.clone();
-                by_cache.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                by_cache.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 if by_cache.len() >= 2 {
                     let (top_id, top_cache, _, _) = by_cache[0];
                     let (_, second_cache, _, _) = by_cache[1];
@@ -1113,8 +1209,7 @@ impl<'a> Scheduler<'a> {
                     } else if cluster_count > 2 {
                         let mut by_freq = metrics.clone();
                         by_freq.sort_by(|a, b| {
-                            b.2.partial_cmp(&a.2)
-                                .unwrap_or(std::cmp::Ordering::Equal)
+                            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
                         });
 
                         let mut freq_candidates: Vec<(isize, f64, f64, usize)> = Vec::new();
@@ -1135,10 +1230,7 @@ impl<'a> Scheduler<'a> {
                             } else {
                                 let first = freq_candidates[0];
                                 let second = freq_candidates[1];
-                                if first.2 > 0.0
-                                    && second.2 > 0.0
-                                    && first.2 >= second.2 * 1.08
-                                {
+                                if first.2 > 0.0 && second.2 > 0.0 && first.2 >= second.2 * 1.08 {
                                     Some(first)
                                 } else {
                                     None
@@ -1211,10 +1303,17 @@ impl<'a> Scheduler<'a> {
         rodata.mouse_boost_ns = opts.mouse_boost_us * 1000;
         rodata.prefer_napi_on_input = opts.prefer_napi_on_input;
         rodata.mm_hint_enabled = !opts.disable_mm_hint;
-        rodata.wakeup_timer_ns = if opts.wakeup_timer_us == 0 { 0 } else { opts.wakeup_timer_us.max(250) * 1000 };
+        rodata.wakeup_timer_ns = if opts.wakeup_timer_us == 0 {
+            0
+        } else {
+            opts.wakeup_timer_us.max(250) * 1000
+        };
         rodata.foreground_tgid = opts.foreground_pid;
         // Enable stats collection when any consumer is active (stats, monitor, TUI, or debug API)
-        rodata.no_stats = !(opts.stats.is_some() || opts.monitor.is_some() || opts.tui.is_some() || opts.debug_api.is_some());
+        rodata.no_stats = !(opts.stats.is_some()
+            || opts.monitor.is_some()
+            || opts.tui.is_some()
+            || opts.debug_api.is_some());
 
         // MM hint removed - map configuration no longer needed
         // MM hint map (mm_last_cpu) removed for gaming workloads - low cache locality benefit, high overhead
@@ -1228,9 +1327,9 @@ impl<'a> Scheduler<'a> {
         } else {
             (0..*NR_CPU_IDS).collect()
         };
-        
+
         // Interrupt-driven input doesn't require CPU exclusion
-        
+
         if primary_cpus.len() < *NR_CPU_IDS {
             info!("Primary CPUs: {:?}", primary_cpus);
             rodata.primary_all = false;
@@ -1256,6 +1355,33 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, gamer_ops, uei)?;
 
+        let runtime_trace_enabled = if opts.disable_runtime_trace {
+            false
+        } else {
+            opts.enable_runtime_trace
+        };
+        if let Err(err) = bpf_intf::set_runtime_trace(&mut skel, runtime_trace_enabled) {
+            warn!("Failed to configure runtime trace flag: {}", err);
+        }
+        let detector_trace_enabled = if opts.disable_detectors {
+            false
+        } else {
+            opts.enable_detectors
+        };
+        if let Err(err) = bpf_intf::set_detector_trace(&mut skel, detector_trace_enabled) {
+            warn!("Failed to configure detector trace flag: {}", err);
+        }
+        let dispatch_events_enabled = if opts.disable_dispatch_events {
+            false
+        } else {
+            opts.enable_dispatch_events
+        };
+        if let Err(err) =
+            bpf_intf::set_dispatch_events(&mut skel, dispatch_events_enabled)
+        {
+            warn!("Failed to configure dispatch event flag: {}", err);
+        }
+
         {
             let tail_map = &skel.maps.tailcall_map;
 
@@ -1263,7 +1389,11 @@ impl<'a> Scheduler<'a> {
                 (bpf_intf::tailcall_slot_TAILCALL_SLOT_SELECT_CPU as u32).to_ne_bytes();
             let select_fd = skel.progs.gamer_select_cpu_tail.as_fd().as_raw_fd() as u32;
             tail_map
-                .update(&select_idx, &select_fd.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .update(
+                    &select_idx,
+                    &select_fd.to_ne_bytes(),
+                    libbpf_rs::MapFlags::ANY,
+                )
                 .context("failed to populate select_cpu tailcall slot")?;
 
             // NOTE: gamer_enqueue no longer uses a tail call; it directly invokes
@@ -1287,12 +1417,16 @@ impl<'a> Scheduler<'a> {
 
         // Initialize event-driven audio server detector (inotify-based)
         // This eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
-        let mut audio_detector = audio_detect::AudioServerDetector::new(Arc::new(AtomicBool::new(false))); // shutdown set in run()
-        
+        let mut audio_detector =
+            audio_detect::AudioServerDetector::new(Arc::new(AtomicBool::new(false))); // shutdown set in run()
+
         // Initialize CPU affinity override system (proactive)
         // Detects and resets custom affinities for optimal task placement
         // Performance: ~2-11μs per override, 10-30% latency improvement from better load balancing
-        let affinity_override = match affinity_override::AffinityOverride::new(&mut skel, *NR_CPU_IDS) {
+        let affinity_override = match affinity_override::AffinityOverride::new(
+            &mut skel,
+            *NR_CPU_IDS,
+        ) {
             Ok(override_sys) => {
                 info!("Affinity override system: Enabled (proactive detection + reset)");
                 Some(override_sys)
@@ -1303,17 +1437,15 @@ impl<'a> Scheduler<'a> {
                 None
             }
         };
-        
+
         // Initial scan for already-running audio servers
         audio_detector.initial_scan(|pid, register| {
             let system_audio_tgids_map = &skel.maps.system_audio_tgids_map;
             let marker: u8 = if register { 1 } else { 0 };
             if register {
-                system_audio_tgids_map.update(
-                    &pid.to_ne_bytes(),
-                    &[marker],
-                    libbpf_rs::MapFlags::ANY
-                ).is_ok()
+                system_audio_tgids_map
+                    .update(&pid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY)
+                    .is_ok()
             } else {
                 // DELETE: Remove from map
                 system_audio_tgids_map.delete(&pid.to_ne_bytes()).is_ok()
@@ -1338,9 +1470,13 @@ impl<'a> Scheduler<'a> {
                                         // FD validated >= 0, errors handled gracefully
                                         match fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL) {
                                             Ok(current_flags) => {
-                                                let flags = fcntl::OFlag::from_bits_truncate(current_flags);
+                                                let flags =
+                                                    fcntl::OFlag::from_bits_truncate(current_flags);
                                                 let new_flags = flags | fcntl::OFlag::O_NONBLOCK;
-                                                let _ = fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(new_flags));
+                                                let _ = fcntl::fcntl(
+                                                    fd,
+                                                    fcntl::FcntlArg::F_SETFL(new_flags),
+                                                );
                                             }
                                             Err(_) => {
                                                 // Best-effort: if we can't get flags, skip setting non-blocking
@@ -1361,7 +1497,8 @@ impl<'a> Scheduler<'a> {
                                         if (fd as usize) >= input_fd_info_vec.len() {
                                             input_fd_info_vec.resize(fd as usize + 1, None);
                                         }
-                                        input_fd_info_vec[fd as usize] = Some(DeviceInfo::new(input_devs.len(), lane));
+                                        input_fd_info_vec[fd as usize] =
+                                            Some(DeviceInfo::new(input_devs.len(), lane));
                                         input_devs.push(dev);
                                     }
                                 }
@@ -1371,7 +1508,10 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            info!("Found {} input devices for raw input monitoring", input_devs.len());
+            info!(
+                "Found {} input devices for raw input monitoring",
+                input_devs.len()
+            );
         }
 
         // Initialize ML autotuner if enabled
@@ -1380,9 +1520,10 @@ impl<'a> Scheduler<'a> {
             let trial_duration = Duration::from_secs(opts.ml_autotune_trial_duration);
             let max_duration = Duration::from_secs(opts.ml_autotune_max_duration);
 
-            info!("ML Autotune: Enabled (trial: {}s, max: {}s)",
-                  opts.ml_autotune_trial_duration,
-                  opts.ml_autotune_max_duration);
+            info!(
+                "ML Autotune: Enabled (trial: {}s, max: {}s)",
+                opts.ml_autotune_trial_duration, opts.ml_autotune_max_duration
+            );
 
             if opts.ml_bayesian {
                 info!("ML Autotune: Using Bayesian optimization (faster convergence)");
@@ -1421,7 +1562,10 @@ impl<'a> Scheduler<'a> {
             if opts.ml_autotune {
                 info!("ML: Data collection auto-enabled for autotune mode");
             } else {
-                info!("ML: Data collection enabled (interval: {:.1}s)", opts.ml_sample_interval);
+                info!(
+                    "ML: Data collection enabled (interval: {:.1}s)",
+                    opts.ml_sample_interval
+                );
             }
             info!("ML: CPU detected: {} ({})", CPU_INFO.model_name, cpu_id);
             info!("ML: Training data: {}", ml_dir.display());
@@ -1455,9 +1599,9 @@ impl<'a> Scheduler<'a> {
 
         // Select input trigger function at init time based on prefer_napi_on_input flag
         // This avoids runtime branching on every input event (saves 10-20ns per event)
-        let input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane) = if opts.prefer_napi_on_input {
-            |trig, skel, lane| {
-                match lane {
+        let input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane) =
+            if opts.prefer_napi_on_input {
+                |trig, skel, lane| match lane {
                     InputLane::Mouse => {
                         trig.trigger_input_with_napi_lane(skel, lane);
                     }
@@ -1465,12 +1609,11 @@ impl<'a> Scheduler<'a> {
                         trig.trigger_input_lane(skel, lane);
                     }
                 }
-            }
-        } else {
-            |trig, skel, lane| {
-                trig.trigger_input_lane(skel, lane);
-            }
-        };
+            } else {
+                |trig, skel, lane| {
+                    trig.trigger_input_lane(skel, lane);
+                }
+            };
 
         // Initialize game detection: Try BPF LSM first (kernel-level), fallback to inotify
         // BPF LSM benefits (kernel 6.17+):
@@ -1484,7 +1627,10 @@ impl<'a> Scheduler<'a> {
                 (Some(detector), None)
             }
             Err(e) => {
-                info!("Game detection: BPF LSM unavailable ({}), using inotify fallback", e);
+                info!(
+                    "Game detection: BPF LSM unavailable ({}), using inotify fallback",
+                    e
+                );
                 (None, Some(GameDetector::new()))
             }
         };
@@ -1533,18 +1679,22 @@ impl<'a> Scheduler<'a> {
             profile_manager,
             last_detected_game: String::new(),
             input_ring_buffer,
-            dispatch_event_ringbuf: None,  // Initialized after epoll setup
-            debug_api_state: None,  // Injected from main() if enabled
+            dispatch_event_ringbuf: None, // Initialized after epoll setup
+            debug_api_state: None,        // Injected from main() if enabled
             audio_detector: Some(audio_detector),
             audio_update_buffer: Vec::with_capacity(32),
-            affinity_override,  // CPU affinity override system (proactive)
+            affinity_override, // CPU affinity override system (proactive)
             uei: UserExitInfo::default(),
             power_monitor,
             gpu_queue_monitor,
-            
+            power_hint_rx: None,
+            gpu_busy_rx: None,
+            power_monitor_worker: None,
+            gpu_monitor_worker: None,
+
             // AI Analytics: Initialize temporal pattern tracking
-            migration_history_10s: std::collections::VecDeque::with_capacity(100),  // ~10 samples per second max
-            migration_history_60s: std::collections::VecDeque::with_capacity(600),  // ~600 samples per second max
+            migration_history_10s: std::collections::VecDeque::with_capacity(100), // ~10 samples per second max
+            migration_history_60s: std::collections::VecDeque::with_capacity(600), // ~600 samples per second max
             cpu_util_history: std::collections::VecDeque::with_capacity(100),
             frame_rate_history: std::collections::VecDeque::with_capacity(100),
             last_migration_count: 0,
@@ -1601,7 +1751,8 @@ impl<'a> Scheduler<'a> {
             .expect("BPF rodata missing (scheduler not loaded?)");
 
         // Get detected game name for display in stats
-        let fg_app = self.get_detected_game_info()
+        let fg_app = self
+            .get_detected_game_info()
             .map(|g| g.name)
             .unwrap_or_default();
 
@@ -1611,7 +1762,7 @@ impl<'a> Scheduler<'a> {
         } else {
             ro.foreground_tgid as u64
         };
-        
+
         // Capture current values for temporal tracking (before mutation)
         let current_migrations = bss.nr_migrations;
         let current_cpu_util = bss.cpu_util;
@@ -1623,10 +1774,11 @@ impl<'a> Scheduler<'a> {
             let stats_map = &self.skel.maps.raw_input_stats_map;
             let key = 0u32;
 
-            let per_cpu_stats = match stats_map.lookup_percpu(&key.to_ne_bytes(), libbpf_rs::MapFlags::ANY) {
-                Ok(Some(per_cpu)) => per_cpu,
-                _ => Vec::new(),
-            };
+            let per_cpu_stats =
+                match stats_map.lookup_percpu(&key.to_ne_bytes(), libbpf_rs::MapFlags::ANY) {
+                    Ok(Some(per_cpu)) => per_cpu,
+                    _ => Vec::new(),
+                };
 
             if per_cpu_stats.is_empty() {
                 (0, 0, 0, 0, 0)
@@ -1638,7 +1790,9 @@ impl<'a> Scheduler<'a> {
                 let mut overflow = 0u64;
 
                 for bytes in per_cpu_stats {
-                    if bytes.len() < std::mem::size_of::<RawInputStats>() { continue; }
+                    if bytes.len() < std::mem::size_of::<RawInputStats>() {
+                        continue;
+                    }
                     // SAFETY: Reading RawInputStats from per-CPU BPF array bytes
                     // - Size validated above (bytes.len() >= size_of::<RawInputStats>())
                     // - Uses read_unaligned() to handle potential misalignment
@@ -1668,7 +1822,7 @@ impl<'a> Scheduler<'a> {
             sync_local: bss.nr_sync_local,
             frame_mig_block: bss.nr_frame_mig_block,
             cpu_util_avg: bss.cpu_util_avg,
-            frame_hz_est: 0.0,  // Frame timing removed
+            frame_hz_est: 0.0, // Frame timing removed
             fg_pid,
             fg_app,
             fg_fullscreen: 0,
@@ -1676,8 +1830,12 @@ impl<'a> Scheduler<'a> {
             win_frame_ns: bss.win_frame_ns_total,
             timer_elapsed_ns: bss.timer_elapsed_ns_total,
             idle_pick: bss.nr_idle_cpu_pick,
-            mm_hint_hit: 0,  // MM hint removed
-            fg_cpu_pct: if bss.total_runtime_ns_total > 0 { bss.fg_runtime_ns_total.saturating_mul(100) / bss.total_runtime_ns_total } else { 0 },
+            mm_hint_hit: 0, // MM hint removed
+            fg_cpu_pct: if bss.total_runtime_ns_total > 0 {
+                bss.fg_runtime_ns_total.saturating_mul(100) / bss.total_runtime_ns_total
+            } else {
+                0
+            },
             input_trig: bss.nr_input_trig,
             frame_trig: bss.nr_frame_trig,
             input_force_dispatch: bss.nr_input_force_dispatch,
@@ -1694,7 +1852,11 @@ impl<'a> Scheduler<'a> {
             sync_wake_fast: bss.nr_sync_wake_fast,
             gpu_submit_threads: bss.nr_gpu_submit_threads,
             // Sanitize background_threads to handle underflow/overflow (BPF fix should prevent, but defense in depth)
-            background_threads: if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads },
+            background_threads: if bss.nr_background_threads > 10000 {
+                0
+            } else {
+                bss.nr_background_threads
+            },
             compositor_threads: bss.nr_compositor_threads,
             network_threads: bss.nr_network_threads,
             system_audio_threads: bss.nr_system_audio_threads,
@@ -1703,9 +1865,12 @@ impl<'a> Scheduler<'a> {
             taskgraph_threads: bss.nr_taskgraph_threads,
             input_trigger_rate: bss.input_trigger_rate as u64,
             continuous_input_mode: bss.continuous_input_mode as u64,
-            continuous_input_lane_keyboard: bss.continuous_input_lane_mode[InputLane::Keyboard as usize] as u64,
-            continuous_input_lane_mouse: bss.continuous_input_lane_mode[InputLane::Mouse as usize] as u64,
-            continuous_input_lane_other: bss.continuous_input_lane_mode[InputLane::Other as usize] as u64,
+            continuous_input_lane_keyboard: bss.continuous_input_lane_mode
+                [InputLane::Keyboard as usize] as u64,
+            continuous_input_lane_mouse: bss.continuous_input_lane_mode[InputLane::Mouse as usize]
+                as u64,
+            continuous_input_lane_other: bss.continuous_input_lane_mode[InputLane::Other as usize]
+                as u64,
             frame_phase_cpu_ns: bss.frame_phase_cpu_ns,
             frame_phase_gpu_ns: bss.frame_phase_gpu_ns,
             frame_phase_events: bss.frame_phase_events,
@@ -1714,7 +1879,7 @@ impl<'a> Scheduler<'a> {
             power_hint_level: bss.power_hint_level as u64,
             power_hint_remaining_ns: bss.power_hint_remaining_ns,
             power_hint_updates: bss.nr_power_hint_updates,
-            
+
             // Diagnostic counters for classification debugging
             classification_attempts: bss.nr_classification_attempts,
             first_classification_true: bss.nr_first_classification_true,
@@ -1727,7 +1892,7 @@ impl<'a> Scheduler<'a> {
             runtime_pattern_audio_samples: bss.nr_runtime_pattern_audio_samples,
             input_handler_name_check_attempts: bss.nr_input_handler_name_check_attempts,
             input_handler_name_pattern_match: bss.nr_input_handler_name_pattern_match,
-            
+
             // Diagnostic counters for network/audio/background detection
             network_fentry_checks: bss.nr_network_fentry_checks,
             network_fentry_matches: bss.nr_network_fentry_matches,
@@ -1741,11 +1906,11 @@ impl<'a> Scheduler<'a> {
             background_name_matches: bss.nr_background_name_matches,
             background_pattern_checks: bss.nr_background_pattern_checks,
             background_pattern_samples: bss.nr_background_pattern_samples,
-            
+
             // Fentry hook call counters (from network_detect.bpf.h and audio_detect.bpf.h)
             // Note: These may be 0 if hooks aren't attached or functions don't exist
-            network_detect_send_calls: 0,  // TODO: Expose from BPF if accessible
-            network_detect_recv_calls: 0,  // TODO: Expose from BPF if accessible
+            network_detect_send_calls: 0, // TODO: Expose from BPF if accessible
+            network_detect_recv_calls: 0, // TODO: Expose from BPF if accessible
             audio_detect_alsa_calls: 0,
             audio_detect_usb_calls: 0,
 
@@ -1755,33 +1920,59 @@ impl<'a> Scheduler<'a> {
             fentry_gaming_events: fentry_gaming,
             fentry_filtered_events: fentry_filtered,
             ringbuf_overflow_events: ringbuf_overflow,
-            
+
             // Ring buffer input latency tracking (single percentile computation)
-            ringbuf_latency_avg_ns: self.input_ring_buffer.as_ref().map(|rb| rb.stats().avg_latency_ns as u64).unwrap_or(0),
+            ringbuf_latency_avg_ns: self
+                .input_ring_buffer
+                .as_ref()
+                .map(|rb| rb.stats().avg_latency_ns as u64)
+                .unwrap_or(0),
             ringbuf_latency_p50_ns: {
                 if let Some(rb) = self.input_ring_buffer.as_ref() {
                     let (p50, _, _) = rb.get_latency_percentiles();
                     p50 as u64
-                } else { 0 }
+                } else {
+                    0
+                }
             },
             ringbuf_latency_p95_ns: {
                 if let Some(rb) = self.input_ring_buffer.as_ref() {
                     let (_, p95, _) = rb.get_latency_percentiles();
                     p95 as u64
-                } else { 0 }
+                } else {
+                    0
+                }
             },
             ringbuf_latency_p99_ns: {
                 if let Some(rb) = self.input_ring_buffer.as_ref() {
                     let (_, _, p99) = rb.get_latency_percentiles();
                     p99 as u64
-                } else { 0 }
+                } else {
+                    0
+                }
             },
-            ringbuf_latency_min_ns: self.input_ring_buffer.as_ref().map(|rb| rb.stats().min_latency_ns).unwrap_or(0),
-            ringbuf_latency_max_ns: self.input_ring_buffer.as_ref().map(|rb| rb.stats().max_latency_ns).unwrap_or(0),
+            ringbuf_latency_min_ns: self
+                .input_ring_buffer
+                .as_ref()
+                .map(|rb| rb.stats().min_latency_ns)
+                .unwrap_or(0),
+            ringbuf_latency_max_ns: self
+                .input_ring_buffer
+                .as_ref()
+                .map(|rb| rb.stats().max_latency_ns)
+                .unwrap_or(0),
 
             // Userspace ring buffer queue metrics
-            rb_queue_dropped_total: self.input_ring_buffer.as_ref().map(|rb| rb.stats().queue_dropped_total).unwrap_or(0),
-            rb_queue_high_watermark: self.input_ring_buffer.as_ref().map(|rb| rb.stats().queue_high_watermark).unwrap_or(0),
+            rb_queue_dropped_total: self
+                .input_ring_buffer
+                .as_ref()
+                .map(|rb| rb.stats().queue_dropped_total)
+                .unwrap_or(0),
+            rb_queue_high_watermark: self
+                .input_ring_buffer
+                .as_ref()
+                .map(|rb| rb.stats().queue_high_watermark)
+                .unwrap_or(0),
 
             // Profiling metrics (calculated in delta())
             prof_select_cpu_avg_ns: 0,
@@ -1798,20 +1989,20 @@ impl<'a> Scheduler<'a> {
             prof_dispatch_calls: bss.prof_dispatch_calls,
             prof_deadline_ns: bss.prof_deadline_ns_total,
             prof_deadline_calls: bss.prof_deadline_calls,
-            
+
             // P0: CPU Placement Verification
             gpu_phys_kept: bss.nr_gpu_phys_kept,
             compositor_phys_kept: bss.nr_compositor_phys_kept,
             gpu_pref_fallback: bss.nr_gpu_pref_fallback,
-            
+
             // P0: Deadline Tracking
             deadline_misses: bss.nr_deadline_misses,
             auto_boosts: bss.nr_auto_boosts,
-            
+
             // P0: Scheduler State
             scheduler_generation: bss.scheduler_generation,
             detected_fg_tgid: bss.detected_fg_tgid,
-            
+
             // P0: Window Status - calculate from timestamps
             // Note: BPF uses monotonic time (from boot), we approximate by checking if timestamp is non-zero
             // More accurate detection would require reading BPF monotonic time offset or using a BPF helper
@@ -1824,15 +2015,15 @@ impl<'a> Scheduler<'a> {
                     // BPF monotonic time starts at boot, so compare to approximate boot time
                     // Simplified: if non-zero and recent (within 10s of typical window duration), likely active
                     // Actual check would need: current_monotonic_time < input_until_global
-                    1  // Assume active if non-zero (window was set)
+                    1 // Assume active if non-zero (window was set)
                 } else {
                     0
                 }
             },
-            frame_window_active: 0,  // TODO: Frame window tracking not yet implemented
+            frame_window_active: 0, // TODO: Frame window tracking not yet implemented
             input_window_until_ns: bss.input_until_global,
-            frame_window_until_ns: 0,  // TODO: Frame window tracking not yet implemented
-            
+            frame_window_until_ns: 0, // TODO: Frame window tracking not yet implemented
+
             // P1: Boost Distribution (cumulative assignments, not live counts)
             boost_distribution_0: bss.nr_boost_shift_0,
             boost_distribution_1: bss.nr_boost_shift_1,
@@ -1842,15 +2033,15 @@ impl<'a> Scheduler<'a> {
             boost_distribution_5: bss.nr_boost_shift_5,
             boost_distribution_6: bss.nr_boost_shift_6,
             boost_distribution_7: bss.nr_boost_shift_7,
-            
+
             // P1: Migration Cooldown
             mig_blocked_cooldown: bss.nr_mig_blocked_cooldown,
-            
+
             // P1: Input Lane Status
             input_lane_keyboard_rate: bss.input_lane_trigger_rate[InputLane::Keyboard as usize],
             input_lane_mouse_rate: bss.input_lane_trigger_rate[InputLane::Mouse as usize],
             input_lane_other_rate: bss.input_lane_trigger_rate[InputLane::Other as usize],
-            
+
             // P2: Game Detection Details
             game_detection_method: {
                 // Determine detection method from active detectors
@@ -1867,10 +2058,16 @@ impl<'a> Scheduler<'a> {
             game_detection_score: {
                 // Calculate confidence score based on detection method and game info
                 if let Some(game_info) = self.get_detected_game_info() {
-                    let mut score = 50u8;  // Base score
-                    if game_info.is_wine { score += 20; }  // Wine games are easily detected
-                    if game_info.is_steam { score += 20; }  // Steam games are easily detected
-                    if bss.detected_fg_tgid > 0 { score += 10; }  // Detection confirmed
+                    let mut score = 50u8; // Base score
+                    if game_info.is_wine {
+                        score += 20;
+                    } // Wine games are easily detected
+                    if game_info.is_steam {
+                        score += 20;
+                    } // Steam games are easily detected
+                    if bss.detected_fg_tgid > 0 {
+                        score += 10;
+                    } // Detection confirmed
                     score.min(100)
                 } else {
                     0
@@ -1883,12 +2080,12 @@ impl<'a> Scheduler<'a> {
                     .unwrap_or_default()
                     .as_secs()
             },
-            
+
             // P2: Frame Timing
             frame_interval_ns: bss.frame_interval_ns,
             frame_count: bss.frame_count,
             last_page_flip_ns: bss.last_page_flip_ns,
-            
+
             // AI Analytics: Latency Percentiles (from histograms)
             select_cpu_latency_p10: Metrics::histogram_percentile(&bss.hist_select_cpu, 10.0),
             select_cpu_latency_p25: Metrics::histogram_percentile(&bss.hist_select_cpu, 25.0),
@@ -1914,54 +2111,75 @@ impl<'a> Scheduler<'a> {
             dispatch_latency_p95: Metrics::histogram_percentile(&bss.hist_dispatch, 95.0),
             dispatch_latency_p99: Metrics::histogram_percentile(&bss.hist_dispatch, 99.0),
             dispatch_latency_p999: Metrics::histogram_percentile(&bss.hist_dispatch, 99.9),
-            
+
             // AI Analytics: Temporal Patterns (rolling windows)
             migrations_last_10s: {
                 let now = Instant::now();
                 let cutoff_10s = now - Duration::from_secs(10);
                 let cutoff_60s = now - Duration::from_secs(60);
-                
+
                 // Update migration history
                 let migration_delta = current_migrations.saturating_sub(self.last_migration_count);
                 self.last_migration_count = current_migrations;
-                
+
                 if migration_delta > 0 {
                     self.migration_history_10s.push_back((now, migration_delta));
                     self.migration_history_60s.push_back((now, migration_delta));
                 }
-                
+
                 // Clean old entries
-                while self.migration_history_10s.front().map(|(t, _)| *t < cutoff_10s).unwrap_or(false) {
+                while self
+                    .migration_history_10s
+                    .front()
+                    .map(|(t, _)| *t < cutoff_10s)
+                    .unwrap_or(false)
+                {
                     self.migration_history_10s.pop_front();
                 }
-                while self.migration_history_60s.front().map(|(t, _)| *t < cutoff_60s).unwrap_or(false) {
+                while self
+                    .migration_history_60s
+                    .front()
+                    .map(|(t, _)| *t < cutoff_60s)
+                    .unwrap_or(false)
+                {
                     self.migration_history_60s.pop_front();
                 }
-                
+
                 // Sum migrations in last 10s
-                self.migration_history_10s.iter().map(|(_, count)| count).sum()
+                self.migration_history_10s
+                    .iter()
+                    .map(|(_, count)| count)
+                    .sum()
             },
             migrations_last_60s: {
                 // Already calculated above, sum migrations in last 60s
-                self.migration_history_60s.iter().map(|(_, count)| count).sum()
+                self.migration_history_60s
+                    .iter()
+                    .map(|(_, count)| count)
+                    .sum()
             },
             cpu_util_trend: {
                 let now = Instant::now();
-                
+
                 // Update history
                 self.cpu_util_history.push_back((now, current_cpu_util));
                 let cutoff = now - Duration::from_secs(10);
-                while self.cpu_util_history.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+                while self
+                    .cpu_util_history
+                    .front()
+                    .map(|(t, _)| *t < cutoff)
+                    .unwrap_or(false)
+                {
                     self.cpu_util_history.pop_front();
                 }
-                
+
                 // Calculate trend (simple linear regression over last 10s)
                 if self.cpu_util_history.len() >= 3 {
                     let first = self.cpu_util_history.front().unwrap().1;
                     let last = self.cpu_util_history.back().unwrap().1;
                     let delta = last as i64 - first as i64;
-                    let threshold = (first * 5) / 100;  // 5% threshold
-                    
+                    let threshold = (first * 5) / 100; // 5% threshold
+
                     if delta > threshold as i64 {
                         "increasing".to_string()
                     } else if delta < -(threshold as i64) {
@@ -1980,21 +2198,26 @@ impl<'a> Scheduler<'a> {
                 } else {
                     0.0
                 };
-                
+
                 let now = Instant::now();
                 self.frame_rate_history.push_back((now, current_rate));
                 let cutoff = now - Duration::from_secs(10);
-                while self.frame_rate_history.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+                while self
+                    .frame_rate_history
+                    .front()
+                    .map(|(t, _)| *t < cutoff)
+                    .unwrap_or(false)
+                {
                     self.frame_rate_history.pop_front();
                 }
-                
+
                 // Calculate trend
                 if self.frame_rate_history.len() >= 3 {
                     let first = self.frame_rate_history.front().unwrap().1;
                     let last = self.frame_rate_history.back().unwrap().1;
                     let delta = last - first;
-                    let threshold = first * 0.05;  // 5% threshold
-                    
+                    let threshold = first * 0.05; // 5% threshold
+
                     if delta > threshold {
                         "increasing".to_string()
                     } else if delta < -threshold {
@@ -2006,14 +2229,14 @@ impl<'a> Scheduler<'a> {
                     "stable".to_string()
                 }
             },
-            
+
             // AI Analytics: Classification Confidence Scores
             input_handler_confidence: {
                 let detected = bss.nr_input_handler_threads;
                 let name_matches = bss.nr_input_handler_name_match;
                 let name_checks = bss.nr_input_handler_name_check_attempts;
                 let main_matches = bss.nr_main_thread_match;
-                
+
                 if detected == 0 {
                     0
                 } else {
@@ -2021,7 +2244,7 @@ impl<'a> Scheduler<'a> {
                     // - Name match = 70% confidence
                     // - Main thread = 80% confidence
                     // - Behavioral (no name/main) = 60% confidence
-                    let mut confidence = 60u8;  // Base confidence for behavioral detection
+                    let mut confidence = 60u8; // Base confidence for behavioral detection
                     if name_matches > 0 {
                         confidence = 70;
                     }
@@ -2039,7 +2262,7 @@ impl<'a> Scheduler<'a> {
                 let detected = bss.nr_gpu_submit_threads;
                 let fentry_matches = bss.nr_gpu_submit_fentry_match;
                 let name_matches = bss.nr_gpu_submit_name_match;
-                
+
                 if detected == 0 {
                     0
                 } else {
@@ -2050,14 +2273,14 @@ impl<'a> Scheduler<'a> {
                     } else if name_matches > 0 {
                         70
                     } else {
-                        60  // Runtime pattern detection
+                        60 // Runtime pattern detection
                     }
                 }
             },
             game_audio_confidence: {
                 let detected = bss.nr_game_audio_threads;
                 let runtime_samples = bss.nr_runtime_pattern_audio_samples;
-                
+
                 if detected == 0 {
                     0
                 } else {
@@ -2066,7 +2289,7 @@ impl<'a> Scheduler<'a> {
                     if runtime_samples > 20 {
                         75
                     } else {
-                        60  // Low sample count = lower confidence
+                        60 // Low sample count = lower confidence
                     }
                 }
             },
@@ -2074,7 +2297,7 @@ impl<'a> Scheduler<'a> {
                 let detected = bss.nr_system_audio_threads;
                 let fentry_matches = bss.nr_system_audio_fentry_matches;
                 let name_matches = bss.nr_system_audio_name_matches;
-                
+
                 if detected == 0 {
                     0
                 } else {
@@ -2093,7 +2316,7 @@ impl<'a> Scheduler<'a> {
                 let detected = bss.nr_network_threads;
                 let fentry_matches = bss.nr_network_fentry_matches;
                 let name_matches = bss.nr_network_name_matches;
-                
+
                 if detected == 0 {
                     0
                 } else {
@@ -2112,7 +2335,7 @@ impl<'a> Scheduler<'a> {
                 let detected = bss.nr_background_threads;
                 let name_matches = bss.nr_background_name_matches;
                 let pattern_samples = bss.nr_background_pattern_samples;
-                
+
                 if detected == 0 {
                     0
                 } else {
@@ -2127,25 +2350,33 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             },
-            
+
             // AI Analytics: Thread Type Distribution Percentages
             total_classified_threads: {
-                bss.nr_input_handler_threads +
-                bss.nr_gpu_submit_threads +
-                bss.nr_game_audio_threads +
-                bss.nr_system_audio_threads +
-                bss.nr_compositor_threads +
-                bss.nr_network_threads +
-                (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads })
+                bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    })
             },
             input_handler_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
                 if total > 0 {
                     (bss.nr_input_handler_threads as f64 * 100.0) / total as f64
                 } else {
@@ -2153,13 +2384,17 @@ impl<'a> Scheduler<'a> {
                 }
             },
             gpu_submit_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
                 if total > 0 {
                     (bss.nr_gpu_submit_threads as f64 * 100.0) / total as f64
                 } else {
@@ -2167,13 +2402,17 @@ impl<'a> Scheduler<'a> {
                 }
             },
             game_audio_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
                 if total > 0 {
                     (bss.nr_game_audio_threads as f64 * 100.0) / total as f64
                 } else {
@@ -2181,13 +2420,17 @@ impl<'a> Scheduler<'a> {
                 }
             },
             system_audio_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
                 if total > 0 {
                     (bss.nr_system_audio_threads as f64 * 100.0) / total as f64
                 } else {
@@ -2195,13 +2438,17 @@ impl<'a> Scheduler<'a> {
                 }
             },
             compositor_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
                 if total > 0 {
                     (bss.nr_compositor_threads as f64 * 100.0) / total as f64
                 } else {
@@ -2209,13 +2456,17 @@ impl<'a> Scheduler<'a> {
                 }
             },
             network_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
                 if total > 0 {
                     (bss.nr_network_threads as f64 * 100.0) / total as f64
                 } else {
@@ -2223,14 +2474,22 @@ impl<'a> Scheduler<'a> {
                 }
             },
             background_pct: {
-                let total = bss.nr_input_handler_threads +
-                    bss.nr_gpu_submit_threads +
-                    bss.nr_game_audio_threads +
-                    bss.nr_system_audio_threads +
-                    bss.nr_compositor_threads +
-                    bss.nr_network_threads +
-                    (if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads });
-                let bg = if bss.nr_background_threads > 10000 { 0 } else { bss.nr_background_threads };
+                let total = bss.nr_input_handler_threads
+                    + bss.nr_gpu_submit_threads
+                    + bss.nr_game_audio_threads
+                    + bss.nr_system_audio_threads
+                    + bss.nr_compositor_threads
+                    + bss.nr_network_threads
+                    + (if bss.nr_background_threads > 10000 {
+                        0
+                    } else {
+                        bss.nr_background_threads
+                    });
+                let bg = if bss.nr_background_threads > 10000 {
+                    0
+                } else {
+                    bss.nr_background_threads
+                };
                 if total > 0 {
                     (bg as f64 * 100.0) / total as f64
                 } else {
@@ -2262,7 +2521,11 @@ impl<'a> Scheduler<'a> {
             } else if let Err(e) = sched_setaffinity(Pid::from_raw(0), &set) {
                 warn!("failed to pin event loop to CPU {}: {}", cpu, e);
             }
-            let auto_msg = if self.opts.event_loop_cpu == Some(cpu) { "" } else { " (auto-selected)" };
+            let auto_msg = if self.opts.event_loop_cpu == Some(cpu) {
+                ""
+            } else {
+                " (auto-selected)"
+            };
             println!("🎯 Event loop pinned to CPU {}{}", cpu, auto_msg);
             info!("🎯 Event loop pinned to CPU {}{}", cpu, auto_msg);
         }
@@ -2273,7 +2536,7 @@ impl<'a> Scheduler<'a> {
             let param = sched_param {
                 sched_priority: rt_priority as i32,
             };
-            
+
             // SAFETY: sched_setscheduler syscall - required for SCHED_FIFO
             // - Priority clamped to [1, 99] above (valid range)
             // - Error checked and handled below
@@ -2283,10 +2546,16 @@ impl<'a> Scheduler<'a> {
             unsafe {
                 let result = sched_setscheduler(0, SCHED_FIFO, &param);
                 if result != 0 {
-                    warn!("failed to set real-time scheduling (SCHED_FIFO): {}", std::io::Error::last_os_error());
+                    warn!(
+                        "failed to set real-time scheduling (SCHED_FIFO): {}",
+                        std::io::Error::last_os_error()
+                    );
                     warn!("Note: Real-time scheduling requires root privileges and can lock up the system if misused");
                 } else {
-                    info!("real-time scheduling enabled (SCHED_FIFO, priority: {})", rt_priority);
+                    info!(
+                        "real-time scheduling enabled (SCHED_FIFO, priority: {})",
+                        rt_priority
+                    );
                     info!("WARNING: Real-time processes can lock up the system if they misbehave");
                 }
             }
@@ -2297,7 +2566,7 @@ impl<'a> Scheduler<'a> {
             let runtime = self.opts.deadline_runtime_us * 1000; // Convert to nanoseconds
             let deadline = self.opts.deadline_deadline_us * 1000;
             let period = self.opts.deadline_period_us * 1000;
-            
+
             // SAFETY: sched_setattr syscall via libc::syscall - required for SCHED_DEADLINE
             // - Struct zeroed with std::mem::zeroed() (safe initialization)
             // - All fields set explicitly (size, policy, flags, runtime, deadline, period)
@@ -2315,17 +2584,20 @@ impl<'a> Scheduler<'a> {
                 attr.sched_runtime = runtime;
                 attr.sched_deadline = deadline;
                 attr.sched_period = period;
-                
+
                 // Use sched_setattr for SCHED_DEADLINE (more modern API)
                 let result = libc::syscall(
                     libc::SYS_sched_setattr,
                     0, // pid (0 = current process)
                     &attr as *const sched_attr,
-                    0 // flags
+                    0, // flags
                 );
-                
+
                 if result != 0 {
-                    warn!("failed to set SCHED_DEADLINE scheduling: {}", std::io::Error::last_os_error());
+                    warn!(
+                        "failed to set SCHED_DEADLINE scheduling: {}",
+                        std::io::Error::last_os_error()
+                    );
                     warn!("Note: SCHED_DEADLINE requires root privileges and CONFIG_SCHED_DEADLINE kernel support");
                 } else {
                     info!("SCHED_DEADLINE scheduling enabled (runtime: {}µs, deadline: {}µs, period: {}µs)", 
@@ -2338,15 +2610,59 @@ impl<'a> Scheduler<'a> {
         // Ultra-low latency optimizations enabled
         info!("INTERRUPT-DRIVEN INPUT: Ring buffer with epoll notification");
         info!("Provides 1-5µs latency with 95-98% CPU savings vs busy polling");
-        
+
         if self.opts.realtime_scheduling {
             info!("REAL-TIME SCHEDULING ENABLED: Maximum priority scheduling");
             info!("WARNING: Real-time processes can lock up the system if they misbehave");
         }
-        
+
         if self.opts.deadline_scheduling {
             info!("SCHED_DEADLINE ENABLED: Hard real-time guarantees with time bounds");
             info!("Provides ultra-low latency without starvation risk");
+        }
+
+        if self.power_monitor.is_some() && self.power_hint_rx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            if let Some(mut monitor) = self.power_monitor.take() {
+                let shutdown_clone = Arc::clone(&shutdown);
+                let handle = thread::Builder::new()
+                    .name("scx-power-monitor".into())
+                    .spawn(move || {
+                        while !shutdown_clone.load(Ordering::Relaxed) {
+                            if let Some(hint) = monitor.poll() {
+                                if tx.send(hint).is_err() {
+                                    break;
+                                }
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    })
+                    .ok();
+                self.power_hint_rx = Some(rx);
+                self.power_monitor_worker = handle;
+            }
+        }
+
+        if self.gpu_queue_monitor.is_some() && self.gpu_busy_rx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            if let Some(mut monitor) = self.gpu_queue_monitor.take() {
+                let shutdown_clone = Arc::clone(&shutdown);
+                let handle = thread::Builder::new()
+                    .name("scx-gpu-monitor".into())
+                    .spawn(move || {
+                        while !shutdown_clone.load(Ordering::Relaxed) {
+                            if let Some(busy) = monitor.poll() {
+                                if tx.send(busy).is_err() {
+                                    break;
+                                }
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    })
+                    .ok();
+                self.gpu_busy_rx = Some(rx);
+                self.gpu_monitor_worker = handle;
+            }
         }
 
         // Create epoll and event/timer fds
@@ -2371,20 +2687,29 @@ impl<'a> Scheduler<'a> {
             // PERF: Edge-triggered mode for high-frequency input events
             // Reduces wakeups by only waking when new events arrive (not when events are still pending)
             // Benefit: Fewer wakeups, better CPU efficiency (~5-10% improvement)
-            epfd.add(bfd, EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, fd as u64)).map_err(|e| anyhow::anyhow!(e))?;
+            epfd.add(
+                bfd,
+                EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, fd as u64),
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
             self.registered_epoll_fds.insert(fd);
         }
 
         // Register ring buffer FD with epoll for interrupt-driven waking
         // This provides ~1-5µs latency with 95-98% CPU savings vs busy polling
-        const RING_BUFFER_TAG: u64 = u64::MAX - 1;  // Special tag for ring buffer events
-        const DISPATCH_EVENT_TAG: u64 = u64::MAX - 3;  // Special tag for dispatch events
-        const AUDIO_DETECTOR_TAG: u64 = u64::MAX - 2;  // Special tag for audio detector events
-        
+        const RING_BUFFER_TAG: u64 = u64::MAX - 1; // Special tag for ring buffer events
+        const DISPATCH_EVENT_TAG: u64 = u64::MAX - 3; // Special tag for dispatch events
+        const AUDIO_DETECTOR_TAG: u64 = u64::MAX - 2; // Special tag for audio detector events
+
         // Watchdog state (default to 5s when RT scheduling enabled and unset by user)
-        let effective_watchdog_secs: u64 = if self.opts.watchdog_secs == 0 && self.opts.realtime_scheduling { 5 } else { self.opts.watchdog_secs };
+        let effective_watchdog_secs: u64 =
+            if self.opts.watchdog_secs == 0 && self.opts.realtime_scheduling {
+                5
+            } else {
+                self.opts.watchdog_secs
+            };
         let watchdog_enabled = effective_watchdog_secs > 0;
-        
+
         if let Some(ref rb) = self.input_ring_buffer {
             let rb_fd = rb.ring_buffer_fd();
             if rb_fd >= 0 {
@@ -2392,8 +2717,11 @@ impl<'a> Scheduler<'a> {
                 let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(rb_fd) };
                 // PERF: Edge-triggered mode for ring buffer (high-frequency events)
                 // Ensures we wake only when new events arrive, not when events are still pending
-                epfd.add(bfd, EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, RING_BUFFER_TAG))
-                    .map_err(|e| anyhow::anyhow!("Failed to register ring buffer with epoll: {}", e))?;
+                epfd.add(
+                    bfd,
+                    EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, RING_BUFFER_TAG),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to register ring buffer with epoll: {}", e))?;
                 info!("Ring buffer registered with epoll for interrupt-driven input");
             }
         }
@@ -2402,35 +2730,48 @@ impl<'a> Scheduler<'a> {
         // This eliminates 10Hz polling of BPF map (~500-1000ns/sec overhead reduction)
         let dispatch_progress = Arc::new(AtomicU64::new(0));
         let dispatch_progress_clone = Arc::clone(&dispatch_progress);
-        
+
         let dispatch_event_ringbuf = if watchdog_enabled {
             use libbpf_rs::RingBufferBuilder;
-            
+
             let mut builder = RingBufferBuilder::new();
-            
+
             // Add dispatch event ring buffer
             let map = &self.skel.maps.dispatch_event_ringbuf;
-            builder.add(map, move |data: &[u8]| -> i32 {
-                // Process dispatch event - just increment counter to track progress
-                // Event structure: timestamp (u64), dispatch_type (u8), cpu (u32)
-                // We only care that a dispatch occurred, not the details
-                if data.len() >= std::mem::size_of::<u64>() {
-                    dispatch_progress_clone.fetch_add(1, Ordering::Relaxed);
-                }
-                0
-            }).map_err(|e| {
-                warn!("Failed to add dispatch event ring buffer to builder: {}", e);
-                e
-            })?;
-            
+            builder
+                .add(map, move |data: &[u8]| -> i32 {
+                    // Process dispatch event - just increment counter to track progress
+                    // Event structure: timestamp (u64), dispatch_type (u8), cpu (u32)
+                    // We only care that a dispatch occurred, not the details
+                    if data.len() >= std::mem::size_of::<u64>() {
+                        dispatch_progress_clone.fetch_add(1, Ordering::Relaxed);
+                    }
+                    0
+                })
+                .map_err(|e| {
+                    warn!("Failed to add dispatch event ring buffer to builder: {}", e);
+                    e
+                })?;
+
             match builder.build() {
                 Ok(rb) => {
                     let rb_fd = rb.epoll_fd();
                     if rb_fd >= 0 {
                         // SAFETY: Ring buffer FD is valid for the lifetime of the manager
                         let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(rb_fd) };
-                        epfd.add(bfd, EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, DISPATCH_EVENT_TAG))
-                            .map_err(|e| anyhow::anyhow!("Failed to register dispatch event ring buffer with epoll: {}", e))?;
+                        epfd.add(
+                            bfd,
+                            EpollEvent::new(
+                                EpollFlags::EPOLLIN | EpollFlags::EPOLLET,
+                                DISPATCH_EVENT_TAG,
+                            ),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to register dispatch event ring buffer with epoll: {}",
+                                e
+                            )
+                        })?;
                         info!("Dispatch event ring buffer registered with epoll for event-driven watchdog");
                         Some(rb)
                     } else {
@@ -2445,9 +2786,9 @@ impl<'a> Scheduler<'a> {
         } else {
             None
         };
-        
+
         self.dispatch_event_ringbuf = dispatch_event_ringbuf;
-        
+
         // Register audio detector inotify FD with epoll for event-driven audio server detection
         // This eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
         if let Some(ref mut audio_det) = self.audio_detector {
@@ -2456,8 +2797,13 @@ impl<'a> Scheduler<'a> {
                 audio_det.shutdown = shutdown.clone();
                 // SAFETY: Audio detector FD is valid for the lifetime of the detector
                 let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(audio_fd) };
-                epfd.add(bfd, EpollEvent::new(EpollFlags::EPOLLIN, AUDIO_DETECTOR_TAG))
-                    .map_err(|e| anyhow::anyhow!("Failed to register audio detector with epoll: {}", e))?;
+                epfd.add(
+                    bfd,
+                    EpollEvent::new(EpollFlags::EPOLLIN, AUDIO_DETECTOR_TAG),
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to register audio detector with epoll: {}", e)
+                })?;
                 info!("Audio detector registered with epoll for event-driven detection");
             }
         }
@@ -2476,7 +2822,7 @@ impl<'a> Scheduler<'a> {
         let mut last_performance_log = Instant::now();
         let mut last_overflow_check = Instant::now();
         let mut prev_overflow_count: u64 = 0;
-        
+
         // OPTIMIZATION: Ring buffer processing counters
         // Track ring buffer usage to demonstrate functionality
         let mut ring_buffer_processing_count = 0u64;
@@ -2486,12 +2832,12 @@ impl<'a> Scheduler<'a> {
         // PERF: Event-driven watchdog - track dispatch events instead of polling BPF map
         // Dispatch events are emitted from BPF when dispatches occur (direct or shared)
         // This eliminates 10Hz polling completely
-        let dispatch_event_count = dispatch_progress;  // Use the Arc from ring buffer setup
-        
+        let dispatch_event_count = dispatch_progress; // Use the Arc from ring buffer setup
+
         let mut last_progress_t = Instant::now();
-        let mut last_dispatch_total: u64 = 0;  // Will be initialized from dispatch_event_count
+        let mut last_dispatch_total: u64 = 0; // Will be initialized from dispatch_event_count
         let mut rt_demoted = false;
-        let mut last_watchdog_check = Instant::now();  // For legacy RT demote check only
+        let mut last_watchdog_check = Instant::now(); // For legacy RT demote check only
 
         // Monitoring state
         let mut last_metrics_log = Instant::now();
@@ -2508,8 +2854,8 @@ impl<'a> Scheduler<'a> {
         // Every mouse/keyboard event triggers fanout_set_input_window() synchronously
         // BPF input window (default 2ms) provides natural priority boost coalescing
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            if let Some(ref mut pm) = self.power_monitor {
-                if let Some(hint) = pm.poll() {
+            if let Some(ref rx) = self.power_hint_rx {
+                while let Ok(hint) = rx.try_recv() {
                     if let Err(err) =
                         bpf_intf::set_power_hint(&mut self.skel, hint.level, hint.duration_ms)
                     {
@@ -2518,20 +2864,19 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            if let Some(ref mut monitor) = self.gpu_queue_monitor {
-                if let Some(busy_percent) = monitor.poll() {
+            if let Some(ref rx) = self.gpu_busy_rx {
+                while let Ok(busy_percent) = rx.try_recv() {
                     if let Some(bss) = self.skel.maps.bss_data.as_mut() {
                         if busy_percent < 10 {
                             if bss.gpu_queue_busy_until != 0 {
                                 bss.gpu_queue_busy_until = 0;
                             }
                         } else {
-                            let guard_ns = monitor.guard_ns(busy_percent);
+                            let guard_ns = GpuQueueMonitor::guard_ns(busy_percent);
                             if guard_ns > 0 {
                                 let now_ns = monotonic_nanos();
                                 if now_ns != 0 {
-                                    bss.gpu_queue_busy_until =
-                                        now_ns.saturating_add(guard_ns);
+                                    bss.gpu_queue_busy_until = now_ns.saturating_add(guard_ns);
                                 }
                             }
                         }
@@ -2594,9 +2939,20 @@ impl<'a> Scheduler<'a> {
             while stats_request_rx.try_recv().is_ok() {
                 let metrics = self.get_metrics();
 
-                let game_info = self.get_detected_game_info()
-                    .map(|g| ml_collect::GameInfo { tgid: g.tgid, name: g.name, is_wine: g.is_wine, is_steam: g.is_steam })
-                    .unwrap_or_else(|| ml_collect::GameInfo { tgid: 0, name: "system".to_string(), is_wine: false, is_steam: false });
+                let game_info = self
+                    .get_detected_game_info()
+                    .map(|g| ml_collect::GameInfo {
+                        tgid: g.tgid,
+                        name: g.name,
+                        is_wine: g.is_wine,
+                        is_steam: g.is_steam,
+                    })
+                    .unwrap_or_else(|| ml_collect::GameInfo {
+                        tgid: 0,
+                        name: "system".to_string(),
+                        is_wine: false,
+                        is_steam: false,
+                    });
 
                 if let Some(ref mut autotuner) = self.ml_autotuner {
                     let sample = ml_collect::PerformanceSample {
@@ -2623,7 +2979,7 @@ impl<'a> Scheduler<'a> {
                 if let Some(ref api_state) = self.debug_api_state {
                     api_state.update_metrics(&metrics);
                 }
-                
+
                 stats_response_tx.send(metrics)?;
             }
             // Interrupt-driven input processing with epoll (replaces busy polling)
@@ -2633,7 +2989,9 @@ impl<'a> Scheduler<'a> {
             // Current: 100ms timeout (higher overhead, faster shutdown)
             const EPOLL_TIMEOUT_MS: u16 = 100;
             let epoll_start = Instant::now();
-            let epfd = self.epoll_fd.as_ref()
+            let epfd = self
+                .epoll_fd
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("epoll_fd not initialized in event loop"))?;
             match epfd.wait(&mut events, Some(EPOLL_TIMEOUT_MS)) {
                 Ok(n) => {
@@ -2645,8 +3003,8 @@ impl<'a> Scheduler<'a> {
                         continue;
                     }
                     // Events available, process them below
-                },
-                Err(e) if e == nix::errno::Errno::EINTR => continue,  // Interrupted by signal
+                }
+                Err(e) if e == nix::errno::Errno::EINTR => continue, // Interrupted by signal
                 Err(e) => {
                     warn!("epoll_wait failed: {}", e);
                     break;
@@ -2663,7 +3021,11 @@ impl<'a> Scheduler<'a> {
                 let detected_tgid = self.get_detected_game_tgid();
                 if cached_game_tgid != detected_tgid {
                     cached_game_tgid = detected_tgid;
-                    let bss = self.skel.maps.bss_data.as_mut()
+                    let bss = self
+                        .skel
+                        .maps
+                        .bss_data
+                        .as_mut()
                         .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                     // SAFETY: Write to staging area, BPF will copy atomically via get_fg_tgid()
                     // This double-buffering prevents torn reads during hot-path classification
@@ -2678,8 +3040,10 @@ impl<'a> Scheduler<'a> {
 
                     // Update ML collector with new game
                     let game_info_for_ml = self.get_detected_game_info().map(|g| {
-                        info!("ML: Detected game '{}' (tgid: {}, wine: {}, steam: {})",
-                              g.name, g.tgid, g.is_wine, g.is_steam);
+                        info!(
+                            "ML: Detected game '{}' (tgid: {}, wine: {}, steam: {})",
+                            g.name, g.tgid, g.is_wine, g.is_steam
+                        );
                         ml_collect::GameInfo {
                             tgid: g.tgid,
                             name: g.name.clone(),
@@ -2700,31 +3064,37 @@ impl<'a> Scheduler<'a> {
                                 if let Some(profile) = manager.get_profile(&game_info.name) {
                                     info!(
                                         "Profile: Auto-loading '{}' (score: {:.2}, FPS: {:.1})",
-                                        game_info.name,
-                                        profile.best_score,
-                                        profile.avg_fps
+                                        game_info.name, profile.best_score, profile.avg_fps
                                     );
 
                                     // Apply the saved config
-                                    if let Err(e) = ml_autotune::apply_config_hot(&mut self.skel, &profile.best_config) {
+                                    if let Err(e) = ml_autotune::apply_config_hot(
+                                        &mut self.skel,
+                                        &profile.best_config,
+                                    ) {
                                         warn!("Profile: Failed to apply config: {}", e);
                                     }
                                 } else {
-                                    info!("Profile: No saved config for '{}', using defaults", game_info.name);
+                                    info!(
+                                        "Profile: No saved config for '{}', using defaults",
+                                        game_info.name
+                                    );
                                 }
                             }
                         }
                     }
                 }
-            }  // End of rate-limited game detection block
-            
+            } // End of rate-limited game detection block
+
             // Track if ring buffer handled input this cycle (see ring_buffer.rs module docs)
             let mut ring_buffer_handled_input_this_cycle = false;
-            
+
             for (i, ev) in events.iter().enumerate() {
                 let tag = ev.data();
-                if tag == 0 { continue; }
-                
+                if tag == 0 {
+                    continue;
+                }
+
                 // Handle dispatch event ring buffer (event-driven watchdog monitoring)
                 if tag == DISPATCH_EVENT_TAG {
                     // PERF: Edge-triggered mode requires draining ALL events before returning
@@ -2735,9 +3105,9 @@ impl<'a> Scheduler<'a> {
                             // Loop terminates when poll returns Err (buffer empty)
                         }
                     }
-                    continue;  // Move to next epoll event
+                    continue; // Move to next epoll event
                 }
-                
+
                 // Handle ring buffer events (interrupt-driven input notification)
                 if tag == RING_BUFFER_TAG {
                     // Ring buffer has input events available
@@ -2761,7 +3131,7 @@ impl<'a> Scheduler<'a> {
                             }
                         }
                     }
-                    continue;  // Move to next epoll event
+                    continue; // Move to next epoll event
                 }
 
                 // Handle audio detector events (event-driven audio server detection)
@@ -2775,15 +3145,15 @@ impl<'a> Scheduler<'a> {
                                 true
                             });
                         }
-                    let mut updates = Vec::new();
-                    std::mem::swap(&mut updates, &mut self.audio_update_buffer);
-                    for (pid, register) in updates.drain(..) {
+                        let mut updates = Vec::new();
+                        std::mem::swap(&mut updates, &mut self.audio_update_buffer);
+                        for (pid, register) in updates.drain(..) {
                             let _ = self.apply_system_audio_update(pid, register);
                         }
-                    self.audio_update_buffer = updates;
+                        self.audio_update_buffer = updates;
                         self.audio_detector = Some(audio_det);
                     }
-                    continue;  // Move to next epoll event
+                    continue; // Move to next epoll event
                 }
 
                 // OPTIMIZATION: Memory prefetching for better cache performance
@@ -2801,7 +3171,9 @@ impl<'a> Scheduler<'a> {
                 let flags = ev.events();
 
                 if flags.contains(EpollFlags::EPOLLHUP) || flags.contains(EpollFlags::EPOLLERR) {
-                    if (fd as usize) < self.input_fd_info_vec.len() && self.input_fd_info_vec[fd as usize].is_some() {
+                    if (fd as usize) < self.input_fd_info_vec.len()
+                        && self.input_fd_info_vec[fd as usize].is_some()
+                    {
                         self.input_fd_info_vec[fd as usize] = None;
                         // Device disconnected - remove from tracking
                         self.registered_epoll_fds.remove(&fd);
@@ -2832,7 +3204,7 @@ impl<'a> Scheduler<'a> {
                         }
                     }
                 }
-                
+
                 // HOT PATH OPTIMIZATION: Direct array access instead of hash map (saves ~40-70ns per event)
                 if let Some(Some(device_info)) = self.input_fd_info_vec.get(fd as usize) {
                     let idx = device_info.idx();
@@ -2851,14 +3223,16 @@ impl<'a> Scheduler<'a> {
                             let mut event_count = 0;
                             let mut has_input_activity = false;
                             const MAX_EVENTS_PER_FD: usize = 512;
-                            
+
                             // OPTIMIZATION: Event batching - collect all events first, then trigger once
                             // Reduces syscall overhead by batching multiple events into single BPF call
                             // Saves 10-25ns per event by avoiding repeated syscall overhead
                             for event in iter {
                                 event_count += 1;
-                                if event_count > MAX_EVENTS_PER_FD { break; }
-                                
+                                if event_count > MAX_EVENTS_PER_FD {
+                                    break;
+                                }
+
                                 // Only trigger on actual input activity, not SYN or zero-delta events
                                 if !matches!(lane, InputLane::Other) {
                                     match event.event_type() {
@@ -2882,13 +3256,13 @@ impl<'a> Scheduler<'a> {
                                 }
                                 // Note: avoid servicing stats here to prevent borrow conflicts with dev iterator
                             }
-                            
+
                             // OPTIMIZATION: Single BPF trigger for all events in this batch
                             // Reduces syscall overhead from N calls to 1 call per epoll wake
                             if has_input_activity {
                                 (self.input_trigger_fn)(&self.trig, &mut self.skel, lane);
                             }
-                            
+
                             // OPTIMIZATION: Performance monitoring - track event processing times
                             let event_duration = event_start.elapsed();
                             if event_processing_times.len() < 1000 {
@@ -2905,7 +3279,8 @@ impl<'a> Scheduler<'a> {
                 if autotuner.should_switch_trial() {
                     if let Some(next_config) = autotuner.next_trial() {
                         // Apply new configuration hot (without restart!)
-                        if let Err(e) = ml_autotune::apply_config_hot(&mut self.skel, &next_config) {
+                        if let Err(e) = ml_autotune::apply_config_hot(&mut self.skel, &next_config)
+                        {
                             warn!("ML Autotune: Failed to apply config: {}", e);
                         }
 
@@ -2919,7 +3294,9 @@ impl<'a> Scheduler<'a> {
                         // Optionally: Apply best config and continue running
                         if let Some((best_config, score)) = autotuner.get_best_config() {
                             info!("ML Autotune: Applying best config (score: {:.2})", score);
-                            if let Err(e) = ml_autotune::apply_config_hot(&mut self.skel, &best_config) {
+                            if let Err(e) =
+                                ml_autotune::apply_config_hot(&mut self.skel, &best_config)
+                            {
                                 warn!("ML Autotune: Failed to apply best config: {}", e);
                             }
                         }
@@ -2936,7 +3313,8 @@ impl<'a> Scheduler<'a> {
 
                 // Record ML sample for autotune trial
                 // Get game info before mutable borrow (borrow checker)
-                let game_info = self.get_detected_game_info()
+                let game_info = self
+                    .get_detected_game_info()
                     .map(|g| ml_collect::GameInfo {
                         tgid: g.tgid,
                         name: g.name,
@@ -2951,7 +3329,6 @@ impl<'a> Scheduler<'a> {
                     });
 
                 if let Some(ref mut autotuner) = self.ml_autotuner {
-
                     let sample = ml_collect::PerformanceSample {
                         timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -2978,7 +3355,7 @@ impl<'a> Scheduler<'a> {
                 if let Some(ref api_state) = self.debug_api_state {
                     api_state.update_metrics(&metrics);
                 }
-                
+
                 stats_response_tx.send(metrics)?;
             }
 
@@ -2986,26 +3363,27 @@ impl<'a> Scheduler<'a> {
             // Logs latency statistics every 10 seconds to track optimization effectiveness
             if last_performance_log.elapsed() >= Duration::from_secs(10) {
                 last_performance_log = Instant::now();
-                
+
                 if !epoll_wait_times.is_empty() && !event_processing_times.is_empty() {
                     // Calculate statistics for epoll wait times
                     epoll_wait_times.sort();
                     let epoll_p50 = epoll_wait_times[epoll_wait_times.len() / 2];
                     let epoll_p99 = epoll_wait_times[(epoll_wait_times.len() * 99) / 100];
-                    
+
                     // Calculate statistics for event processing times
                     event_processing_times.sort();
                     let event_p50 = event_processing_times[event_processing_times.len() / 2];
-                    let event_p99 = event_processing_times[(event_processing_times.len() * 99) / 100];
-                    
+                    let event_p99 =
+                        event_processing_times[(event_processing_times.len() * 99) / 100];
+
                     info!("PERF: Busy polling optimizations - epoll_wait: p50={}ns p99={}ns, event_processing: p50={}ns p99={}ns", 
                           epoll_p50, epoll_p99, event_p50, event_p99);
-                    
+
                     // Clear samples to prevent memory growth
                     epoll_wait_times.clear();
                     event_processing_times.clear();
                 }
-                
+
                 // OPTIMIZATION: Ring buffer performance monitoring
                 // Log ring buffer statistics to demonstrate usage and track performance
                 if let Some(ref mut input_rb) = self.input_ring_buffer {
@@ -3024,22 +3402,30 @@ impl<'a> Scheduler<'a> {
                           p50, p95, p99);
                 }
             }
-            
-            info!("RING_BUFFER: Total processing cycles: {}", ring_buffer_processing_count);
-            
+
+            info!(
+                "RING_BUFFER: Total processing cycles: {}",
+                ring_buffer_processing_count
+            );
+
             // PERF: Event-driven watchdog - check dispatch events instead of polling BPF map
             // Dispatch events are emitted from BPF when dispatches occur (direct or shared)
             // This eliminates 10Hz polling completely
             if watchdog_enabled {
                 let current_dispatch_count = dispatch_event_count.load(Ordering::Relaxed);
-                
+
                 if current_dispatch_count > last_dispatch_total {
                     // Dispatch progress detected - reset timer
                     last_dispatch_total = current_dispatch_count;
                     last_progress_t = Instant::now();
-                } else if last_progress_t.elapsed() >= Duration::from_secs(effective_watchdog_secs) {
+                } else if last_progress_t.elapsed() >= Duration::from_secs(effective_watchdog_secs)
+                {
                     // Check if system is genuinely deadlocked or just fully idle
-                    let bss = self.skel.maps.bss_data.as_ref()
+                    let bss = self
+                        .skel
+                        .maps
+                        .bss_data
+                        .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                     let cpu_util = bss.cpu_util;
                     let is_system_idle = cpu_util == 0;
@@ -3063,7 +3449,11 @@ impl<'a> Scheduler<'a> {
             // Log migration and hint metrics every 10 seconds
             if last_metrics_log.elapsed() >= Duration::from_secs(10) {
                 last_metrics_log = Instant::now();
-                let bss = self.skel.maps.bss_data.as_ref()
+                let bss = self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("BPF BSS map not initialized"))?;
                 let mig_blocked = bss.nr_mig_blocked;
                 let frame_mig_block = bss.nr_frame_mig_block;
@@ -3094,12 +3484,12 @@ impl<'a> Scheduler<'a> {
             // Zero overhead - pure userspace monitoring, not in hot path
             if last_overflow_check.elapsed() >= Duration::from_secs(1) {
                 last_overflow_check = Instant::now();
-                
+
                 // Read overflow count from BPF stats
                 let current_overflow = {
                     let stats_map = &self.skel.maps.raw_input_stats_map;
                     let key = 0u32;
-                    
+
                     match stats_map.lookup_percpu(&key.to_ne_bytes(), libbpf_rs::MapFlags::ANY) {
                         Ok(Some(per_cpu)) if !per_cpu.is_empty() => {
                             let mut overflow = 0u64;
@@ -3109,7 +3499,9 @@ impl<'a> Scheduler<'a> {
                                     // - Size validated above
                                     // - Uses read_unaligned() to handle potential misalignment
                                     // - RawInputStats is #[repr(C)] and matches BPF layout exactly
-                                    let ris = unsafe { (bytes.as_ptr() as *const RawInputStats).read_unaligned() };
+                                    let ris = unsafe {
+                                        (bytes.as_ptr() as *const RawInputStats).read_unaligned()
+                                    };
                                     overflow = overflow.saturating_add(ris.ringbuf_overflow_events);
                                 }
                             }
@@ -3118,7 +3510,7 @@ impl<'a> Scheduler<'a> {
                         _ => 0,
                     }
                 };
-                
+
                 // Detect rapid overflow increase (>10 events in 1 second)
                 if current_overflow > prev_overflow_count {
                     let delta = current_overflow.saturating_sub(prev_overflow_count);
@@ -3139,12 +3531,18 @@ impl<'a> Scheduler<'a> {
                         );
                     }
                 }
-                
+
                 prev_overflow_count = current_overflow;
             }
         }
 
         info!("Scheduler main loop exited, cleaning up...");
+        if let Some(handle) = self.power_monitor_worker.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.gpu_monitor_worker.take() {
+            let _ = handle.join();
+        }
         if let Some(link) = self.struct_ops.take() {
             drop(link);
         }
@@ -3265,30 +3663,48 @@ fn main() -> Result<()> {
             for game in &games {
                 if let Some(profile) = manager.get_profile(game) {
                     println!("{}", game);
-                    println!("  Score: {:.2}  FPS: {:.1}  Jitter: {:.2}ms  Latency: {}ns",
-                             profile.best_score, profile.avg_fps, profile.avg_jitter_ms, profile.avg_latency_ns);
-                    println!("  Config: --slice-us {} --input-window-us {} --mig-max {}",
-                             profile.best_config.slice_us, profile.best_config.input_window_us, profile.best_config.mig_max);
-                    if profile.best_config.mm_affinity { println!("    --mm-affinity"); }
-                    if profile.best_config.avoid_smt { println!("    --avoid-smt"); }
+                    println!(
+                        "  Score: {:.2}  FPS: {:.1}  Jitter: {:.2}ms  Latency: {}ns",
+                        profile.best_score,
+                        profile.avg_fps,
+                        profile.avg_jitter_ms,
+                        profile.avg_latency_ns
+                    );
+                    println!(
+                        "  Config: --slice-us {} --input-window-us {} --mig-max {}",
+                        profile.best_config.slice_us,
+                        profile.best_config.input_window_us,
+                        profile.best_config.mig_max
+                    );
+                    if profile.best_config.mm_affinity {
+                        println!("    --mm-affinity");
+                    }
+                    if profile.best_config.avoid_smt {
+                        println!("    --avoid-smt");
+                    }
                     println!();
                 }
             }
 
             let summary = manager.get_summary();
             println!("═══════════════════════════════════════════════════════════");
-            println!("Total games: {}  Avg score: {:.2}  Avg FPS: {:.1}",
-                     summary.total_games, summary.avg_score, summary.avg_fps);
+            println!(
+                "Total games: {}  Avg score: {:.2}  Avg FPS: {:.1}",
+                summary.total_games, summary.avg_score, summary.avg_fps
+            );
         }
         return Ok(());
     }
-
 
     // ML export command: export all collected data to CSV for training
     if let Some(ref csv_path) = opts.ml_export_csv {
         let ml_dir = get_ml_data_dir()?;
         let config = opts_to_ml_config(&opts);
-        let collector = MLCollector::new(ml_dir.clone(), config, Duration::from_secs_f64(opts.ml_sample_interval))?;
+        let collector = MLCollector::new(
+            ml_dir.clone(),
+            config,
+            Duration::from_secs_f64(opts.ml_sample_interval),
+        )?;
         collector.export_training_csv(csv_path)?;
         println!("ML training data exported to: {}", csv_path);
         println!("Training data from: {}", ml_dir.display());
@@ -3299,26 +3715,47 @@ fn main() -> Result<()> {
     if let Some(ref game_name) = opts.ml_show_best {
         let ml_dir = get_ml_data_dir()?;
         let config = opts_to_ml_config(&opts);
-        let collector = MLCollector::new(ml_dir.clone(), config, Duration::from_secs_f64(opts.ml_sample_interval))?;
+        let collector = MLCollector::new(
+            ml_dir.clone(),
+            config,
+            Duration::from_secs_f64(opts.ml_sample_interval),
+        )?;
         let summary = collector.get_game_summary(game_name)?;
 
         println!("ML Summary for '{}':", game_name);
         println!("  Samples collected: {}", summary.sample_count);
         println!("  Avg CPU util: {:.1}%", summary.avg_cpu_util);
-        println!("  Avg select_cpu latency: {:.0}ns", summary.avg_select_cpu_latency_ns);
-        println!("  Avg enqueue latency: {:.0}ns", summary.avg_enqueue_latency_ns);
+        println!(
+            "  Avg select_cpu latency: {:.0}ns",
+            summary.avg_select_cpu_latency_ns
+        );
+        println!(
+            "  Avg enqueue latency: {:.0}ns",
+            summary.avg_enqueue_latency_ns
+        );
 
         if let Some(best_cfg) = summary.best_config {
-            println!("\nBest Configuration (score: {:.2}):", summary.best_score.unwrap_or(0.0));
+            println!(
+                "\nBest Configuration (score: {:.2}):",
+                summary.best_score.unwrap_or(0.0)
+            );
             println!("  --slice-us {}", best_cfg.slice_us);
             println!("  --slice-lag-us {}", best_cfg.slice_lag_us);
             println!("  --input-window-us {}", best_cfg.input_window_us);
             println!("  --mig-window-ms {}", best_cfg.mig_window_ms);
             println!("  --mig-max {}", best_cfg.mig_max);
-            if best_cfg.mm_affinity { println!("  --mm-affinity"); }
-            if best_cfg.avoid_smt { println!("  --avoid-smt"); }
-            if best_cfg.preferred_idle_scan { println!("  --preferred-idle-scan"); }
-            if best_cfg.enable_numa { println!("  --enable-numa"); }
+            if best_cfg.mm_affinity {
+                println!("  --mm-affinity");
+            }
+            if best_cfg.avoid_smt {
+                println!("  --avoid-smt");
+            }
+            if best_cfg.preferred_idle_scan {
+                println!("  --preferred-idle-scan");
+            }
+            if best_cfg.enable_numa {
+                println!("  --enable-numa");
+            }
             println!("  --wakeup-timer-us {}", best_cfg.wakeup_timer_us);
         } else {
             println!("\nNo configuration data available yet.");
@@ -3361,7 +3798,8 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    let input_device_names = opts.tui
+    let input_device_names = opts
+        .tui
         .map(|_| collect_input_devices(&opts))
         .unwrap_or_else(Vec::new);
 
@@ -3386,25 +3824,23 @@ fn main() -> Result<()> {
     };
 
     let stats_thread = match opts.monitor.or(opts.stats) {
-        Some(raw_intv) => {
-            match stats_interval_from_secs(raw_intv) {
-                Some(stats_interval) => {
-                    let shutdown_copy = shutdown.clone();
-                    Some(std::thread::spawn(move || {
-                        match stats::monitor(stats_interval, shutdown_copy) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                log::warn!("stats monitor thread finished because of an error {}", e)
-                            }
+        Some(raw_intv) => match stats_interval_from_secs(raw_intv) {
+            Some(stats_interval) => {
+                let shutdown_copy = shutdown.clone();
+                Some(std::thread::spawn(move || {
+                    match stats::monitor(stats_interval, shutdown_copy) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("stats monitor thread finished because of an error {}", e)
                         }
-                    }))
-                }
-                None => {
-                    log::info!("Stats monitoring disabled (interval {}s)", raw_intv);
-                    None
-                }
+                    }
+                }))
             }
-        }
+            None => {
+                log::info!("Stats monitoring disabled (interval {}s)", raw_intv);
+                None
+            }
+        },
         None => None,
     };
 
@@ -3437,31 +3873,31 @@ fn main() -> Result<()> {
     let debug_api_thread = if let Some(port) = opts.debug_api {
         let api_state = Arc::new(debug_api::DebugApiState::new());
         let shutdown_for_api = shutdown.clone();
-        
-                // Spawn periodic stats collection thread (5s interval) to keep metrics updated
-                // This ensures the debug API always has fresh data even without other consumers
-                // PERF: Increased interval from 1s to 5s for 80% reduction in polling frequency
-                let shutdown_for_stats = shutdown.clone();
-                let stats_collector_thread = std::thread::Builder::new()
-                    .name("debug-api-stats".into())
-                    .spawn(move || {
-                        let stats_interval = Duration::from_secs(5); // 5 second updates (was 1s)
-                        let _ = scx_utils::monitor_stats::<Metrics>(
-                            &[],
-                            stats_interval,
-                            || shutdown_for_stats.load(Ordering::Relaxed),
-                            |_metrics| {
-                                // Metrics are updated in the scheduler's stats request handler
-                                // This thread just triggers periodic requests
-                                Ok(())
-                            },
-                        );
-                    });
-        
+
+        // Spawn periodic stats collection thread (5s interval) to keep metrics updated
+        // This ensures the debug API always has fresh data even without other consumers
+        // PERF: Increased interval from 1s to 5s for 80% reduction in polling frequency
+        let shutdown_for_stats = shutdown.clone();
+        let stats_collector_thread = std::thread::Builder::new()
+            .name("debug-api-stats".into())
+            .spawn(move || {
+                let stats_interval = Duration::from_secs(5); // 5 second updates (was 1s)
+                let _ = scx_utils::monitor_stats::<Metrics>(
+                    &[],
+                    stats_interval,
+                    || shutdown_for_stats.load(Ordering::Relaxed),
+                    |_metrics| {
+                        // Metrics are updated in the scheduler's stats request handler
+                        // This thread just triggers periodic requests
+                        Ok(())
+                    },
+                );
+            });
+
         if let Err(e) = stats_collector_thread {
             warn!("Failed to start debug API stats collector thread: {}", e);
         }
-        
+
         match debug_api::start_debug_api(port, Arc::clone(&api_state), shutdown_for_api) {
             Ok(handle) => Some((handle, api_state)),
             Err(e) => {
@@ -3564,4 +4000,3 @@ mod tests {
         assert!(stats_interval_from_secs(f64::NAN).is_none());
     }
 }
-

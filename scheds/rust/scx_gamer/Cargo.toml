@@ -57,3 +57,4 @@ enable_backtrace = []
 full_tui = []
 monitor-nvidia = []
 proc_monitor = ["monitor-nvidia"]
+

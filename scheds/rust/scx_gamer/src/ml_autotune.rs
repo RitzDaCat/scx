@@ -10,14 +10,14 @@ use anyhow::Result;
 use log::{info, warn};
 use std::time::{Duration, Instant};
 
-use crate::ml_collect::{SchedulerConfig, PerformanceSample};
+use crate::ml_collect::{PerformanceSample, SchedulerConfig};
 
 /// Parameter combination to test
 #[derive(Debug, Clone)]
 pub struct ConfigTrial {
     pub config: SchedulerConfig,
     pub duration: Duration,
-    pub label: String,  // Human-readable description
+    pub label: String, // Human-readable description
 }
 
 /// Result of a single trial
@@ -38,7 +38,6 @@ pub struct TrialResult {
 pub struct MLAutotuner {
     // mode field removed - determined by which constructor (new_grid_search vs new_bayesian) is called
     // AutotuneMode enum preserved for potential future use
-
     /// Trials to run (populated at start, only used for GridSearch)
     trials: Vec<ConfigTrial>,
 
@@ -69,7 +68,6 @@ pub struct MLAutotuner {
 
     /// Baseline config for Bayesian mode
     baseline_config: SchedulerConfig,
-
     // trial_duration removed - stored in trials instead
 }
 
@@ -82,10 +80,12 @@ impl MLAutotuner {
     ) -> Self {
         let trials = Self::generate_grid_trials(baseline_config.clone(), trial_duration);
 
-        info!("ML Autotune: Grid search with {} trials ({:.0}s each, {:.0}s total)",
-              trials.len(),
-              trial_duration.as_secs_f64(),
-              trials.len() as f64 * trial_duration.as_secs_f64());
+        info!(
+            "ML Autotune: Grid search with {} trials ({:.0}s each, {:.0}s total)",
+            trials.len(),
+            trial_duration.as_secs_f64(),
+            trials.len() as f64 * trial_duration.as_secs_f64()
+        );
 
         Self {
             trials,
@@ -115,12 +115,14 @@ impl MLAutotuner {
             n_iterations,
         ));
 
-        info!("ML Autotune: Bayesian optimization with {} iterations ({:.0}s each)",
-              n_iterations,
-              trial_duration.as_secs_f64());
+        info!(
+            "ML Autotune: Bayesian optimization with {} iterations ({:.0}s each)",
+            n_iterations,
+            trial_duration.as_secs_f64()
+        );
 
         Self {
-            trials: Vec::new(),  // Not used in Bayesian mode (trials generated dynamically)
+            trials: Vec::new(), // Not used in Bayesian mode (trials generated dynamically)
             current_trial: 0,
             trial_start_time: None,
             results: Vec::new(),
@@ -177,13 +179,13 @@ impl MLAutotuner {
     pub fn should_switch_trial(&self) -> bool {
         if let Some(start) = self.trial_start_time {
             if self.current_trial >= self.trials.len() {
-                return false;  // All trials complete
+                return false; // All trials complete
             }
 
             let trial = &self.trials[self.current_trial];
             start.elapsed() >= trial.duration
         } else {
-            true  // No trial running, should start first one
+            true // No trial running, should start first one
         }
     }
 
@@ -231,10 +233,12 @@ impl MLAutotuner {
         self.trial_start_time = Some(Instant::now());
         self.current_samples.clear();
 
-        info!("ML Autotune: Starting trial {}/{}: {}",
-              self.current_trial + 1,
-              self.trials.len(),
-              trial.label);
+        info!(
+            "ML Autotune: Starting trial {}/{}: {}",
+            self.current_trial + 1,
+            self.trials.len(),
+            trial.label
+        );
 
         Some(trial.config.clone())
     }
@@ -247,7 +251,10 @@ impl MLAutotuner {
     /// Finalize current trial and compute score
     fn finalize_current_trial(&mut self) {
         if self.current_samples.is_empty() {
-            warn!("ML Autotune: Trial {} had no samples, skipping", self.current_trial);
+            warn!(
+                "ML Autotune: Trial {} had no samples, skipping",
+                self.current_trial
+            );
             self.current_trial += 1;
             return;
         }
@@ -255,9 +262,12 @@ impl MLAutotuner {
         let trial = &self.trials[self.current_trial];
 
         // Calculate aggregate metrics
-        let avg_latency = self.current_samples.iter()
+        let avg_latency = self
+            .current_samples
+            .iter()
             .map(|s| s.metrics.latency_select_cpu_avg_ns)
-            .sum::<u64>() / self.current_samples.len() as u64;
+            .sum::<u64>()
+            / self.current_samples.len() as u64;
 
         // Calculate performance score (scheduler metrics only)
         let score = Self::calculate_trial_score(&self.current_samples);
@@ -265,8 +275,8 @@ impl MLAutotuner {
         let result = TrialResult {
             config: trial.config.clone(),
             score,
-            avg_fps: 0.0,  // Unused (frame timing removed)
-            avg_jitter_ms: 0.0,  // Unused (frame timing removed)
+            avg_fps: 0.0,       // Unused (frame timing removed)
+            avg_jitter_ms: 0.0, // Unused (frame timing removed)
             avg_latency_ns: avg_latency,
         };
 
@@ -303,7 +313,9 @@ impl MLAutotuner {
 
     /// Get the best configuration found
     pub fn get_best_config(&self) -> Option<(SchedulerConfig, f64)> {
-        self.best_config.as_ref().map(|c| (c.clone(), self.best_score))
+        self.best_config
+            .as_ref()
+            .map(|c| (c.clone(), self.best_score))
     }
 
     // is_complete() and progress_pct() removed - use should_switch_trial() and generate_report() instead
@@ -316,10 +328,7 @@ impl MLAutotuner {
         report.push_str("║        ML AUTOTUNE SESSION COMPLETE                       ║\n");
         report.push_str("╚═══════════════════════════════════════════════════════════╝\n\n");
 
-        report.push_str(&format!(
-            "Total trials: {}\n",
-            self.results.len()
-        ));
+        report.push_str(&format!("Total trials: {}\n", self.results.len()));
         report.push_str(&format!(
             "Session duration: {:.1}s\n\n",
             self.session_start.elapsed().as_secs_f64()
@@ -343,12 +352,14 @@ impl MLAutotuner {
             ));
             report.push_str(&format!(
                 "   --slice-us {} --input-window-us {} --mig-max {}\n",
-                result.config.slice_us,
-                result.config.input_window_us,
-                result.config.mig_max
+                result.config.slice_us, result.config.input_window_us, result.config.mig_max
             ));
-            if result.config.mm_affinity { report.push_str("   --mm-affinity\n"); }
-            if result.config.avoid_smt { report.push_str("   --avoid-smt\n"); }
+            if result.config.mm_affinity {
+                report.push_str("   --mm-affinity\n");
+            }
+            if result.config.avoid_smt {
+                report.push_str("   --avoid-smt\n");
+            }
             report.push('\n');
         }
 
@@ -365,8 +376,12 @@ impl MLAutotuner {
                 best.input_window_us,
                 best.mig_max
             ));
-            if best.mm_affinity { report.push_str(" \\\n  --mm-affinity"); }
-            if best.avoid_smt { report.push_str(" \\\n  --avoid-smt"); }
+            if best.mm_affinity {
+                report.push_str(" \\\n  --mm-affinity");
+            }
+            if best.avoid_smt {
+                report.push_str(" \\\n  --avoid-smt");
+            }
             report.push_str("\n\n");
         }
 
@@ -383,17 +398,12 @@ impl MLAutotuner {
 /// 1. Signal scheduler to exit (via return value)
 /// 2. Main loop restarts scheduler with new CLI args
 /// 3. New config takes effect on next iteration
-pub fn apply_config_hot(
-    _skel: &mut crate::BpfSkel,
-    config: &SchedulerConfig,
-) -> Result<()> {
+pub fn apply_config_hot(_skel: &mut crate::BpfSkel, config: &SchedulerConfig) -> Result<()> {
     // Just log the config - actual application happens via scheduler restart
     // The autotune system will need to update CLI opts and restart
     info!(
         "ML Autotune: Next config - slice={}µs, input_win={}µs, mig_max={} (will restart)",
-        config.slice_us,
-        config.input_window_us,
-        config.mig_max
+        config.slice_us, config.input_window_us, config.mig_max
     );
 
     Ok(())

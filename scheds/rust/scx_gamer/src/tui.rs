@@ -6,12 +6,13 @@
 // Interactive terminal dashboard for real-time scheduler monitoring.
 
 use anyhow::Result;
+use chrono::{DateTime, Local};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use chrono::{DateTime, Local};
+use ratatui::symbols;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -20,7 +21,6 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table},
     Frame, Terminal,
 };
-use ratatui::symbols;
 use std::collections::VecDeque;
 
 /* OPTIMIZATION: Circular buffer for efficient historical data management
@@ -53,7 +53,7 @@ impl<T: Clone> CircularBuffer<T> {
             self.data[self.tail] = value;
             self.tail = (self.tail + 1) % self.capacity;
         }
-        
+
         if self.count < self.capacity {
             self.count += 1;
         } else {
@@ -64,8 +64,6 @@ impl<T: Clone> CircularBuffer<T> {
     fn len(&self) -> usize {
         self.count
     }
-
-
 
     fn get(&self, index: usize) -> Option<&T> {
         if index >= self.count {
@@ -82,14 +80,14 @@ impl<T: Clone> CircularBuffer<T> {
     }
 }
 
-use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
-use std::sync::mpsc;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
-use scx_utils::{Topology, CoreType};
+use scx_utils::{CoreType, Topology};
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 /// Terminal guard to ensure terminal is restored even on panic
 /// Follows Ratatui best practice: use Drop guard for terminal restoration
@@ -111,9 +109,9 @@ impl Drop for TerminalGuard {
     }
 }
 
+use crate::process_monitor::find_obs_pid;
 use crate::stats::Metrics;
 use crate::Opts;
-use crate::process_monitor::find_obs_pid;
 
 /// Active tab selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,16 +143,15 @@ impl ActiveTab {
             ActiveTab::Help => ActiveTab::Events,
         }
     }
-
 }
 
 /// Update rate configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateRate {
-    RealTime,   // 1s
-    Fast,       // 5s
-    Medium,     // 30s
-    Slow,       // 60s
+    RealTime, // 1s
+    Fast,     // 5s
+    Medium,   // 30s
+    Slow,     // 60s
 }
 
 impl UpdateRate {
@@ -246,12 +243,16 @@ impl HistoricalData {
         let total_enq = metrics.rr_enq + metrics.edf_enq;
         let edf_pct = if total_enq > 0 {
             (metrics.edf_enq as f64 * 100.0) / total_enq as f64
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let direct_total = metrics.rr_enq + metrics.direct;
         let direct_pct = if direct_total > 0 {
             (metrics.direct as f64 * 100.0) / direct_total as f64
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         /* OPTIMIZATION: Use circular buffer push for O(1) operations
          * Replaces macro with direct circular buffer operations */
@@ -261,9 +262,12 @@ impl HistoricalData {
         self.latency_select.push(metrics.prof_select_cpu_avg_ns);
         self.latency_enqueue.push(metrics.prof_enqueue_avg_ns);
         self.latency_dispatch.push(metrics.prof_dispatch_avg_ns);
-        self.latency_ringbuf_p50.push(metrics.ringbuf_latency_p50_ns);
-        self.latency_ringbuf_p95.push(metrics.ringbuf_latency_p95_ns);
-        self.latency_ringbuf_p99.push(metrics.ringbuf_latency_p99_ns);
+        self.latency_ringbuf_p50
+            .push(metrics.ringbuf_latency_p50_ns);
+        self.latency_ringbuf_p95
+            .push(metrics.ringbuf_latency_p95_ns);
+        self.latency_ringbuf_p99
+            .push(metrics.ringbuf_latency_p99_ns);
         self.migrations.push(metrics.migrations);
         self.mig_blocked.push(metrics.mig_blocked);
         self.input_rate.push(metrics.input_trigger_rate);
@@ -333,11 +337,26 @@ impl HistoricalData {
         /* OPTIMIZATION: Use circular buffer get for latest value
          * Get the most recent value from the circular buffer */
         match field {
-            "cpu_util" => self.cpu_util.get(self.cpu_util.len().saturating_sub(1)).copied(),
-            "cpu_avg" => self.cpu_avg.get(self.cpu_avg.len().saturating_sub(1)).copied(),
-            "fg_cpu_pct" => self.fg_cpu_pct.get(self.fg_cpu_pct.len().saturating_sub(1)).copied(),
-            "direct_pct" => self.direct_pct.get(self.direct_pct.len().saturating_sub(1)).copied(),
-            "edf_pct" => self.edf_pct.get(self.edf_pct.len().saturating_sub(1)).copied(),
+            "cpu_util" => self
+                .cpu_util
+                .get(self.cpu_util.len().saturating_sub(1))
+                .copied(),
+            "cpu_avg" => self
+                .cpu_avg
+                .get(self.cpu_avg.len().saturating_sub(1))
+                .copied(),
+            "fg_cpu_pct" => self
+                .fg_cpu_pct
+                .get(self.fg_cpu_pct.len().saturating_sub(1))
+                .copied(),
+            "direct_pct" => self
+                .direct_pct
+                .get(self.direct_pct.len().saturating_sub(1))
+                .copied(),
+            "edf_pct" => self
+                .edf_pct
+                .get(self.edf_pct.len().saturating_sub(1))
+                .copied(),
             _ => None,
         }
     }
@@ -345,15 +364,42 @@ impl HistoricalData {
     pub fn latest_u64(&self, field: &str) -> Option<u64> {
         /* OPTIMIZATION: Use circular buffer get for latest value */
         match field {
-            "input_rate" => self.input_rate.get(self.input_rate.len().saturating_sub(1)).copied(),
-            "migrations" => self.migrations.get(self.migrations.len().saturating_sub(1)).copied(),
-            "mig_blocked" => self.mig_blocked.get(self.mig_blocked.len().saturating_sub(1)).copied(),
-            "latency_select" => self.latency_select.get(self.latency_select.len().saturating_sub(1)).copied(),
-            "latency_enqueue" => self.latency_enqueue.get(self.latency_enqueue.len().saturating_sub(1)).copied(),
-            "latency_dispatch" => self.latency_dispatch.get(self.latency_dispatch.len().saturating_sub(1)).copied(),
-            "latency_ringbuf_p50" => self.latency_ringbuf_p50.get(self.latency_ringbuf_p50.len().saturating_sub(1)).copied(),
-            "latency_ringbuf_p95" => self.latency_ringbuf_p95.get(self.latency_ringbuf_p95.len().saturating_sub(1)).copied(),
-            "latency_ringbuf_p99" => self.latency_ringbuf_p99.get(self.latency_ringbuf_p99.len().saturating_sub(1)).copied(),
+            "input_rate" => self
+                .input_rate
+                .get(self.input_rate.len().saturating_sub(1))
+                .copied(),
+            "migrations" => self
+                .migrations
+                .get(self.migrations.len().saturating_sub(1))
+                .copied(),
+            "mig_blocked" => self
+                .mig_blocked
+                .get(self.mig_blocked.len().saturating_sub(1))
+                .copied(),
+            "latency_select" => self
+                .latency_select
+                .get(self.latency_select.len().saturating_sub(1))
+                .copied(),
+            "latency_enqueue" => self
+                .latency_enqueue
+                .get(self.latency_enqueue.len().saturating_sub(1))
+                .copied(),
+            "latency_dispatch" => self
+                .latency_dispatch
+                .get(self.latency_dispatch.len().saturating_sub(1))
+                .copied(),
+            "latency_ringbuf_p50" => self
+                .latency_ringbuf_p50
+                .get(self.latency_ringbuf_p50.len().saturating_sub(1))
+                .copied(),
+            "latency_ringbuf_p95" => self
+                .latency_ringbuf_p95
+                .get(self.latency_ringbuf_p95.len().saturating_sub(1))
+                .copied(),
+            "latency_ringbuf_p99" => self
+                .latency_ringbuf_p99
+                .get(self.latency_ringbuf_p99.len().saturating_sub(1))
+                .copied(),
             _ => None,
         }
     }
@@ -449,7 +495,7 @@ pub struct TuiState {
     pub history: HistoricalData,
     pub event_log: EventLog,
     pub obs_pid: Option<u32>,
-    pub game_pid: u32,  // Will be updated with detected game
+    pub game_pid: u32, // Will be updated with detected game
     pub scheduler_status: SchedulerStatus,
     pub last_successful_update: Instant,
     pub prev_metrics: Option<Metrics>,
@@ -510,7 +556,7 @@ impl TuiState {
             history: HistoricalData::new(history_len), // 5 minutes at 1s intervals
             event_log: EventLog::new(event_capacity),
             obs_pid,
-            game_pid: 0,  // Will be updated with detected game
+            game_pid: 0, // Will be updated with detected game
             scheduler_status: SchedulerStatus::Initializing,
             last_successful_update: Instant::now(),
             prev_metrics: None,
@@ -542,7 +588,7 @@ impl TuiState {
         self.update_rate = self.update_rate.next();
         self.event_log.push(
             EventLevel::Info,
-            format!("Update rate changed to {}", self.update_rate.label())
+            format!("Update rate changed to {}", self.update_rate.label()),
         );
     }
 
@@ -555,7 +601,8 @@ impl TuiState {
         self.latency_alert = false;
         self.fentry_idle_alert = false;
         self.stale_alert = false;
-        self.event_log.push(EventLevel::Info, "Statistics reset".to_string());
+        self.event_log
+            .push(EventLevel::Info, "Statistics reset".to_string());
     }
 }
 
@@ -589,16 +636,24 @@ fn format_number(n: u64) -> String {
 }
 
 fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiState) {
-    let bpf_running = true;  // Placeholder status
+    let bpf_running = true; // Placeholder status
     let game_detected = metrics.fg_pid != 0;
     let fentry_active = metrics.fentry_total_events > 0;
     let rb_ok = metrics.ringbuf_overflow_events == 0;
 
     let status_icon = |ok: bool| {
         if ok {
-            Span::styled(" ✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            Span::styled(
+                " ✓ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            Span::styled(" ✗ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            Span::styled(
+                " ✗ ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
         }
     };
 
@@ -606,7 +661,8 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &Tu
     let game_display = if game_detected {
         if !metrics.fg_app.is_empty() {
             // Extract basename (handle both / and \ for Wine paths)
-            let name = metrics.fg_app
+            let name = metrics
+                .fg_app
                 .rsplit('/')
                 .next()
                 .or_else(|| metrics.fg_app.rsplit('\\').next())
@@ -625,22 +681,41 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &Tu
             Span::raw("Scheduler:  "),
             Span::styled(
                 if bpf_running { "Active" } else { "Stopped" },
-                if bpf_running { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
+                if bpf_running {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
             ),
             Span::raw("    │    "),
             status_icon(game_detected),
             Span::raw("Game Detection:  "),
             Span::styled(
                 if game_detected { "Active" } else { "Inactive" },
-                if game_detected { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
+                if game_detected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
             ),
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Detected Game: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Detected Game: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 game_display.clone(),
-                if game_detected { Style::default().fg(Color::Green).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }
+                if game_detected {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
             ),
         ]),
         Line::from(vec![
@@ -648,26 +723,41 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &Tu
             Span::raw("Fentry Hook:  "),
             Span::styled(
                 if fentry_active { "Enabled" } else { "Disabled" },
-                if fentry_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
+                if fentry_active {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
             ),
             Span::raw("    │    "),
             status_icon(rb_ok),
             Span::raw("RB Overflow:  "),
             Span::styled(
                 if rb_ok { "OK" } else { "Not OK" },
-                if rb_ok { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
+                if rb_ok {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
             ),
         ]),
     ];
 
-    let health_block = Paragraph::new(health_info)
-        .block(Block::default()
+    let health_block = Paragraph::new(health_info).block(
+        Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(if bpf_running && game_detected { Color::Green } else { Color::Yellow }))
+            .border_style(Style::default().fg(if bpf_running && game_detected {
+                Color::Green
+            } else {
+                Color::Yellow
+            }))
             .title(Span::styled(
                 " SCHEDULER HEALTH CHECK ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            )));
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
 
     f.render_widget(health_block, area);
 }
@@ -675,7 +765,8 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &Tu
 fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
     let game_name = if !metrics.fg_app.is_empty() {
         // Extract basename (handle both / and \ for Wine paths)
-        let name = metrics.fg_app
+        let name = metrics
+            .fg_app
             .rsplit('/')
             .next()
             .or_else(|| metrics.fg_app.rsplit('\\').next())
@@ -690,7 +781,10 @@ fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state
     // Show full path if available (useful for testing/diagnostics)
     let full_path_display = if !metrics.fg_app.is_empty() && metrics.fg_app.len() > 50 {
         // Truncate very long paths
-        format!("...{}", &metrics.fg_app[metrics.fg_app.len().saturating_sub(47)..])
+        format!(
+            "...{}",
+            &metrics.fg_app[metrics.fg_app.len().saturating_sub(47)..]
+        )
     } else if !metrics.fg_app.is_empty() {
         metrics.fg_app.clone()
     } else {
@@ -698,20 +792,35 @@ fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state
     };
 
     // Simplified comparison display without proc monitor stats
-    let mut comparison_text = vec![
-        Line::from(vec![
-            Span::styled("Game: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("{:<30}", game_name),
-                if metrics.fg_pid != 0 { Style::default().fg(Color::Green).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }
-            ),
-            Span::raw("  PID: "),
-            Span::styled(format!("{:>5}", metrics.fg_pid), Style::default().fg(Color::Yellow)),
-            Span::raw("  CPU: "),
-            Span::styled(format!("{:>5.1}%", metrics.fg_cpu_pct as f64), Style::default().fg(Color::Green)),
-        ]),
-    ];
-    
+    let mut comparison_text = vec![Line::from(vec![
+        Span::styled(
+            "Game: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<30}", game_name),
+            if metrics.fg_pid != 0 {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+        Span::raw("  PID: "),
+        Span::styled(
+            format!("{:>5}", metrics.fg_pid),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw("  CPU: "),
+        Span::styled(
+            format!("{:>5.1}%", metrics.fg_cpu_pct as f64),
+            Style::default().fg(Color::Green),
+        ),
+    ])];
+
     // Show full path for testing/diagnostics (helpful for Wine games and new game testing)
     if !full_path_display.is_empty() {
         comparison_text.push(Line::from(vec![
@@ -719,24 +828,35 @@ fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state
             Span::styled(full_path_display, Style::default().fg(Color::DarkGray)),
         ]));
     }
-    
+
     comparison_text.push(Line::from(vec![
-        Span::styled("OBS:  ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "OBS:  ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("{:<20}", "Not detected")),
         Span::raw("  PID: "),
-        Span::styled(format!("{:>5}", state.obs_pid.unwrap_or(0)), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("{:>5}", state.obs_pid.unwrap_or(0)),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw("  CPU: "),
         Span::styled(format!("{:>5.1}%", 0.0), Style::default().fg(Color::Yellow)),
     ]));
 
-    let comparison_block = Paragraph::new(comparison_text)
-        .block(Block::default()
+    let comparison_block = Paragraph::new(comparison_text).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow))
             .title(Span::styled(
                 " PROCESS COMPARISON (Game vs OBS) ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            )));
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
 
     f.render_widget(comparison_block, area);
 }
@@ -744,26 +864,36 @@ fn render_process_comparison(f: &mut Frame, area: Rect, metrics: &Metrics, state
 fn render_config(f: &mut Frame, area: Rect, state: &TuiState) {
     let cfg = &state.config;
     // Build configuration display
-    let config_text = vec![
-        Line::from(vec![
-            Span::raw("Slice: "),
-            Span::styled(format!("{}µs", cfg.slice_us), Style::default().fg(Color::Yellow)),
-            Span::raw("  │  Lag: "),
-            Span::styled(format!("{}µs", 0), Style::default().fg(Color::Yellow)),
-            Span::raw("  │  Input Win: "),
-            Span::styled(format!("{}µs", cfg.input_window_us), Style::default().fg(Color::Yellow)),
-            Span::raw("  │  Wake Timer: "),
-            Span::styled(format!("{}µs", cfg.wakeup_timer_us), Style::default().fg(Color::Yellow)),
-        ]),
-    ];
-    let config_block = Paragraph::new(config_text)
-        .block(Block::default()
+    let config_text = vec![Line::from(vec![
+        Span::raw("Slice: "),
+        Span::styled(
+            format!("{}µs", cfg.slice_us),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw("  │  Lag: "),
+        Span::styled(format!("{}µs", 0), Style::default().fg(Color::Yellow)),
+        Span::raw("  │  Input Win: "),
+        Span::styled(
+            format!("{}µs", cfg.input_window_us),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw("  │  Wake Timer: "),
+        Span::styled(
+            format!("{}µs", cfg.wakeup_timer_us),
+            Style::default().fg(Color::Yellow),
+        ),
+    ])];
+    let config_block = Paragraph::new(config_text).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta))
             .title(Span::styled(
                 " SCHEDULER CONFIGURATION ",
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-            )));
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
 
     f.render_widget(config_block, area);
 }
@@ -801,9 +931,19 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
     };
 
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("scx_gamer", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "scx_gamer",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  │  "),
-        Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            status_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(&stale_text, Style::default().fg(Color::Red)),
         Span::raw("  │  "),
         Span::styled(
@@ -821,15 +961,22 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
             format!(" Update: {}", state.update_rate.label()),
             Style::default().fg(Color::Magenta),
         ),
-        Span::styled(pause_status, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            pause_status,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
     ]))
-    .block(Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            " Gaming Scheduler Monitor ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-        )));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                " Gaming Scheduler Monitor ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
 
     f.render_widget(header, area);
 }
@@ -851,12 +998,17 @@ fn render_row1(f: &mut Frame, area: Rect, metrics: &Metrics) {
     // Game Info
     let game_info = if !metrics.fg_app.is_empty() {
         // Extract basename for cleaner display (handle / and \ for Wine)
-        let game_basename = metrics.fg_app
+        let game_basename = metrics
+            .fg_app
             .rsplit('/')
             .next()
             .or_else(|| metrics.fg_app.rsplit('\\').next())
             .unwrap_or(&metrics.fg_app);
-        let fullscreen = if metrics.fg_fullscreen != 0 { " [FULLSCREEN]" } else { "" };
+        let fullscreen = if metrics.fg_fullscreen != 0 {
+            " [FULLSCREEN]"
+        } else {
+            ""
+        };
         let pid_display = if metrics.fg_pid > 0 {
             format!("PID: {}", metrics.fg_pid)
         } else {
@@ -864,7 +1016,12 @@ fn render_row1(f: &mut Frame, area: Rect, metrics: &Metrics) {
         };
         vec![
             Line::from(vec![
-                Span::styled(game_basename, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    game_basename,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(fullscreen, Style::default().fg(Color::Blue)),
             ]),
             Line::from(pid_display),
@@ -881,17 +1038,26 @@ fn render_row1(f: &mut Frame, area: Rect, metrics: &Metrics) {
         ]
     } else {
         vec![
-            Line::from(Span::styled("No foreground game", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "No foreground game",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::from(""),
             Line::from(""),
         ]
     };
 
-    let game_block = Paragraph::new(game_info)
-        .block(Block::default()
+    let game_block = Paragraph::new(game_info).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" GAME ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            .title(Span::styled(
+                " GAME ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(game_block, chunks[0]);
 
     // CPU Info
@@ -931,21 +1097,24 @@ fn render_row1(f: &mut Frame, area: Rect, metrics: &Metrics) {
         ]),
     ];
 
-    let cpu_block = Paragraph::new(cpu_info)
-        .block(Block::default()
+    let cpu_block = Paragraph::new(cpu_info).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" CPU ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            .title(Span::styled(
+                " CPU ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(cpu_block, chunks[1]);
 }
 
 fn render_row2(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiState) {
     let layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
     render_input_mode(f, layout[0], metrics, _state);
@@ -958,7 +1127,9 @@ fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiS
     let continuous_mode = metrics.continuous_input_mode != 0;
 
     let status_style = if input_active {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Yellow)
     };
@@ -1016,8 +1187,16 @@ fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiS
             Span::styled("Fentry Hook", Style::default().fg(Color::Cyan)),
             Span::raw(": "),
             Span::styled(
-                if fentry_active { "ENABLED".to_string() } else { "DISABLED".to_string() },
-                if fentry_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }
+                if fentry_active {
+                    "ENABLED".to_string()
+                } else {
+                    "DISABLED".to_string()
+                },
+                if fentry_active {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
             ),
             Span::raw("  "),
             Span::raw(format!("({:.1}% gaming)", gaming_pct)),
@@ -1026,8 +1205,16 @@ fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiS
             Span::styled("Continuous", Style::default().fg(Color::Cyan)),
             Span::raw(": "),
             Span::styled(
-                if continuous_mode { "ACTIVE".to_string() } else { "INACTIVE".to_string() },
-                if continuous_mode { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Yellow) }
+                if continuous_mode {
+                    "ACTIVE".to_string()
+                } else {
+                    "INACTIVE".to_string()
+                },
+                if continuous_mode {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                },
             ),
             Span::raw("  "),
             Span::styled(
@@ -1038,7 +1225,11 @@ fn render_input_mode(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &TuiS
     ];
 
     let block = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" INPUT STATUS "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" INPUT STATUS "),
+        )
         .style(Style::default().fg(Color::White));
     f.render_widget(block, area);
 }
@@ -1048,7 +1239,7 @@ fn render_queue_status(f: &mut Frame, area: Rect, metrics: &Metrics, state: &Tui
     let cumulative_overflow = state.history.total_ringbuf_overflow;
     let current_overflow = metrics.ringbuf_overflow_events;
     let userspace_drops = metrics.rb_queue_dropped_total;
-    
+
     // Color coding: red if any overflow, yellow if userspace drops, green if OK
     let overflow_color = if cumulative_overflow > 0 || current_overflow > 0 {
         Color::Red
@@ -1057,7 +1248,7 @@ fn render_queue_status(f: &mut Frame, area: Rect, metrics: &Metrics, state: &Tui
     } else {
         Color::Green
     };
-    
+
     let lines = vec![
         Line::from(vec![
             Span::styled("BPF Overflow", Style::default().fg(Color::Cyan)),
@@ -1073,7 +1264,11 @@ fn render_queue_status(f: &mut Frame, area: Rect, metrics: &Metrics, state: &Tui
             Span::raw(": "),
             Span::styled(
                 format!("{}", userspace_drops),
-                if userspace_drops > 0 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Green) },
+                if userspace_drops > 0 {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Green)
+                },
             ),
         ]),
         Line::from(vec![
@@ -1086,7 +1281,11 @@ fn render_queue_status(f: &mut Frame, area: Rect, metrics: &Metrics, state: &Tui
         ]),
     ];
     let block = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" INPUT QUEUE "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" INPUT QUEUE "),
+        )
         .style(Style::default().fg(Color::White));
     f.render_widget(block, area);
 }
@@ -1100,40 +1299,71 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
     // Threads
     // Helper: Sanitize u64 counter to prevent underflow display issues
     let sanitize = |val: u64| -> u64 {
-        if val > 10000 { 0 } else { val }  // Underflow protection (u64::MAX shows as 0)
+        if val > 10000 {
+            0
+        } else {
+            val
+        } // Underflow protection (u64::MAX shows as 0)
     };
 
     let thread_info = vec![
         Line::from(vec![
             Span::raw("Input:   "),
-            Span::styled(format!("{:>2}", sanitize(metrics.input_handler_threads)), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.input_handler_threads)),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("   GPU:       "),
-            Span::styled(format!("{:>2}", sanitize(metrics.gpu_submit_threads)), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.gpu_submit_threads)),
+                Style::default().fg(Color::Magenta),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Sys Aud: "),
-            Span::styled(format!("{:>2}", sanitize(metrics.system_audio_threads)), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.system_audio_threads)),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw("   Game Aud:  "),
-            Span::styled(format!("{:>2}", sanitize(metrics.game_audio_threads)), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.game_audio_threads)),
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Comp:    "),
-            Span::styled(format!("{:>2}", sanitize(metrics.compositor_threads)), Style::default().fg(Color::Blue)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.compositor_threads)),
+                Style::default().fg(Color::Blue),
+            ),
             Span::raw("   Network:   "),
-            Span::styled(format!("{:>2}", sanitize(metrics.network_threads)), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.network_threads)),
+                Style::default().fg(Color::Yellow),
+            ),
         ]),
         Line::from(vec![
             Span::raw("TaskGraph:"),
-            Span::styled(format!("{:>2}", sanitize(metrics.taskgraph_threads)), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>2}", sanitize(metrics.taskgraph_threads)),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("  (UE5.6 DX12)"),
         ]),
     ];
 
-    let thread_block = Paragraph::new(thread_info)
-        .block(Block::default()
+    let thread_block = Paragraph::new(thread_info).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" THREADS ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            .title(Span::styled(
+                " THREADS ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(thread_block, chunks[0]);
 
     // Windows
@@ -1166,11 +1396,17 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
             ),
             Span::raw(" rem "),
             Span::styled(
-                format!("{:>4.1}ms", metrics.power_hint_remaining_ns as f64 / 1_000_000.0),
+                format!(
+                    "{:>4.1}ms",
+                    metrics.power_hint_remaining_ns as f64 / 1_000_000.0
+                ),
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" upd "),
-            Span::styled(format_number(metrics.power_hint_updates), Style::default().fg(Color::Green)),
+            Span::styled(
+                format_number(metrics.power_hint_updates),
+                Style::default().fg(Color::Green),
+            ),
         ]
     } else {
         vec![Span::raw("Power: none")]
@@ -1180,76 +1416,134 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
         Line::from(vec![
             Span::raw("Input:  "),
             Span::styled(
-                format!("{} {:>3.0}%  {} trigs", create_bar(in_pct, 5), in_pct, format_number(metrics.input_trig)),
+                format!(
+                    "{} {:>3.0}%  {} trigs",
+                    create_bar(in_pct, 5),
+                    in_pct,
+                    format_number(metrics.input_trig)
+                ),
                 Style::default().fg(Color::Cyan),
             ),
         ]),
         Line::from(vec![
             Span::raw("Frame:  "),
             Span::styled(
-                format!("{} {:>3.0}%  {} trigs", create_bar(fr_pct, 5), fr_pct, format_number(metrics.frame_trig)),
+                format!(
+                    "{} {:>3.0}%  {} trigs",
+                    create_bar(fr_pct, 5),
+                    fr_pct,
+                    format_number(metrics.frame_trig)
+                ),
                 Style::default().fg(Color::Magenta),
             ),
         ]),
         Line::from(vec![
             Span::raw("Window: "),
             Span::styled(
-                format!("{:>5.1}ms", metrics.input_window_dynamic_ns as f64 / 1_000_000.0),
+                format!(
+                    "{:>5.1}ms",
+                    metrics.input_window_dynamic_ns as f64 / 1_000_000.0
+                ),
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw("  kb "),
             Span::styled(
-                format!("{:>4.1}ms", metrics.keyboard_lane_dynamic_ns as f64 / 1_000_000.0),
+                format!(
+                    "{:>4.1}ms",
+                    metrics.keyboard_lane_dynamic_ns as f64 / 1_000_000.0
+                ),
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw("  ms "),
             Span::styled(
-                format!("{:>4.1}ms", metrics.mouse_lane_dynamic_ns as f64 / 1_000_000.0),
+                format!(
+                    "{:>4.1}ms",
+                    metrics.mouse_lane_dynamic_ns as f64 / 1_000_000.0
+                ),
                 Style::default().fg(Color::Yellow),
             ),
         ]),
         Line::from(vec![
             Span::raw("Disp:   "),
-            Span::styled(format_number(metrics.input_force_dispatch), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format_number(metrics.input_force_dispatch),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(" late "),
-            Span::styled(format_number(metrics.input_force_dispatch_late), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format_number(metrics.input_force_dispatch_late),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" avg "),
             Span::styled(
-                format!("{:>4.1}µs", metrics.input_dispatch_latency_ns as f64 / 1_000.0),
+                format!(
+                    "{:>4.1}µs",
+                    metrics.input_dispatch_latency_ns as f64 / 1_000.0
+                ),
                 Style::default().fg(Color::Green),
             ),
             Span::raw(" max "),
             Span::styled(
-                format!("{:>4.1}µs", metrics.input_dispatch_latency_max_ns as f64 / 1_000.0),
+                format!(
+                    "{:>4.1}µs",
+                    metrics.input_dispatch_latency_max_ns as f64 / 1_000.0
+                ),
                 Style::default().fg(Color::Red),
             ),
         ]),
         Line::from(vec![
             Span::raw("Frame FB: esc "),
-            Span::styled(format_number(metrics.frame_feedback_escalations), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format_number(metrics.frame_feedback_escalations),
+                Style::default().fg(Color::Magenta),
+            ),
             Span::raw("  rec "),
-            Span::styled(format_number(metrics.frame_feedback_recoveries), Style::default().fg(Color::Green)),
+            Span::styled(
+                format_number(metrics.frame_feedback_recoveries),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw("  miss "),
-            Span::styled(format_number(metrics.frame_feedback_miss_events), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format_number(metrics.frame_feedback_miss_events),
+                Style::default().fg(Color::Yellow),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Borrow: "),
-            Span::styled(format_number(metrics.taskgraph_borrow_grants), Style::default().fg(Color::Green)),
+            Span::styled(
+                format_number(metrics.taskgraph_borrow_grants),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw("  idle grants"),
         ]),
         Line::from(vec![
             Span::raw("Phase: cpu "),
-            Span::styled(format!("{:>4.1}ms", phase_cpu_avg), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("{:>4.1}ms", phase_cpu_avg),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw("  gpu "),
-            Span::styled(format!("{:>4.1}ms", phase_gpu_avg), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("{:>4.1}ms", phase_gpu_avg),
+                Style::default().fg(Color::Magenta),
+            ),
             Span::raw("  events "),
-            Span::styled(format_number(metrics.frame_phase_events), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format_number(metrics.frame_phase_events),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Dominance: cpu "),
-            Span::styled(format_number(metrics.frame_phase_cpu_dominant), Style::default().fg(Color::Green)),
+            Span::styled(
+                format_number(metrics.frame_phase_cpu_dominant),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw("  gpu "),
-            Span::styled(format_number(metrics.frame_phase_gpu_dominant), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format_number(metrics.frame_phase_gpu_dominant),
+                Style::default().fg(Color::Magenta),
+            ),
         ]),
         Line::from(power_line),
         Line::from(vec![
@@ -1260,11 +1554,17 @@ fn render_row3(f: &mut Frame, area: Rect, metrics: &Metrics) {
         ]),
     ];
 
-    let window_block = Paragraph::new(window_info)
-        .block(Block::default()
+    let window_block = Paragraph::new(window_info).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" WINDOWS ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            .title(Span::styled(
+                " WINDOWS ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(window_block, chunks[1]);
 }
 
@@ -1294,8 +1594,16 @@ fn render_row4(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
     // Per-interval migration blocked percentage
     let interval_block_rate = if metrics.migrations > 0 {
         (metrics.mig_blocked as f64 * 100.0) / metrics.migrations as f64
-    } else { 0.0 };
-    let interval_color = if interval_block_rate > 50.0 { Color::Red } else if interval_block_rate > 25.0 { Color::Yellow } else { Color::Green };
+    } else {
+        0.0
+    };
+    let interval_color = if interval_block_rate > 50.0 {
+        Color::Red
+    } else if interval_block_rate > 25.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
 
     let mig_info = vec![
         Line::from(vec![
@@ -1305,14 +1613,22 @@ fn render_row4(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
         Line::from(vec![
             Span::raw("Blocked:   "),
             Span::styled(
-                format!("{}  ({:>3.0}% blocked)", format_number(total_mig_blocked), block_rate),
+                format!(
+                    "{}  ({:>3.0}% blocked)",
+                    format_number(total_mig_blocked),
+                    block_rate
+                ),
                 Style::default().fg(block_color),
             ),
         ]),
         Line::from(vec![
             Span::raw("Now:       "),
             Span::styled(
-                format!("{:>6} mig  {:>3.0}% blocked", format_number(metrics.migrations), interval_block_rate),
+                format!(
+                    "{:>6} mig  {:>3.0}% blocked",
+                    format_number(metrics.migrations),
+                    interval_block_rate
+                ),
                 Style::default().fg(interval_color),
             ),
         ]),
@@ -1324,87 +1640,177 @@ fn render_row4(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
         ]),
     ];
 
-    let mig_block = Paragraph::new(mig_info)
-        .block(Block::default()
+    let mig_block = Paragraph::new(mig_info).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" MIGRATIONS ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            .title(Span::styled(
+                " MIGRATIONS ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(mig_block, chunks[0]);
 
     // BPF Latency + Ring Buffer Latency
     let mut lat_info = Vec::new();
-    
+
     // BPF Latency section
     if metrics.prof_select_cpu_avg_ns > 0 || metrics.prof_enqueue_avg_ns > 0 {
-        lat_info.push(Line::from(vec![
-            Span::styled("BPF:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]));
+        lat_info.push(Line::from(vec![Span::styled(
+            "BPF:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
         lat_info.push(Line::from(vec![
             Span::raw("  select_cpu: "),
-            Span::styled(format!("{:>4}ns", metrics.prof_select_cpu_avg_ns), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>4}ns", metrics.prof_select_cpu_avg_ns),
+                Style::default().fg(Color::Cyan),
+            ),
         ]));
         lat_info.push(Line::from(vec![
             Span::raw("  enqueue:    "),
-            Span::styled(format!("{:>4}ns", metrics.prof_enqueue_avg_ns), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>4}ns", metrics.prof_enqueue_avg_ns),
+                Style::default().fg(Color::Cyan),
+            ),
         ]));
         lat_info.push(Line::from(vec![
             Span::raw("  dispatch:   "),
-            Span::styled(format!("{:>4}ns", metrics.prof_dispatch_avg_ns), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>4}ns", metrics.prof_dispatch_avg_ns),
+                Style::default().fg(Color::Cyan),
+            ),
         ]));
     } else {
-        lat_info.push(Line::from(Span::styled("BPF: Profiling disabled", Style::default().fg(Color::DarkGray))));
+        lat_info.push(Line::from(Span::styled(
+            "BPF: Profiling disabled",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
-    
+
     // Ring Buffer Latency section
     if metrics.ringbuf_latency_p50_ns > 0 {
         lat_info.push(Line::from(""));
-        lat_info.push(Line::from(vec![
-            Span::styled("Ring Buffer:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]));
-        
+        lat_info.push(Line::from(vec![Span::styled(
+            "Ring Buffer:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
+
         // Color code based on latency thresholds
-        let p50_color = if metrics.ringbuf_latency_p50_ns > 5000 { Color::Red } else if metrics.ringbuf_latency_p50_ns > 1000 { Color::Yellow } else { Color::Green };
-        let p95_color = if metrics.ringbuf_latency_p95_ns > 10000 { Color::Red } else if metrics.ringbuf_latency_p95_ns > 5000 { Color::Yellow } else { Color::Green };
-        let p99_color = if metrics.ringbuf_latency_p99_ns > 20000 { Color::Red } else if metrics.ringbuf_latency_p99_ns > 10000 { Color::Yellow } else { Color::Green };
-        
+        let p50_color = if metrics.ringbuf_latency_p50_ns > 5000 {
+            Color::Red
+        } else if metrics.ringbuf_latency_p50_ns > 1000 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        let p95_color = if metrics.ringbuf_latency_p95_ns > 10000 {
+            Color::Red
+        } else if metrics.ringbuf_latency_p95_ns > 5000 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        let p99_color = if metrics.ringbuf_latency_p99_ns > 20000 {
+            Color::Red
+        } else if metrics.ringbuf_latency_p99_ns > 10000 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
         lat_info.push(Line::from(vec![
             Span::raw("  p50:        "),
-            Span::styled(format!("{:>4}ns", metrics.ringbuf_latency_p50_ns), Style::default().fg(p50_color)),
+            Span::styled(
+                format!("{:>4}ns", metrics.ringbuf_latency_p50_ns),
+                Style::default().fg(p50_color),
+            ),
         ]));
         lat_info.push(Line::from(vec![
             Span::raw("  p95:        "),
-            Span::styled(format!("{:>4}ns", metrics.ringbuf_latency_p95_ns), Style::default().fg(p95_color)),
+            Span::styled(
+                format!("{:>4}ns", metrics.ringbuf_latency_p95_ns),
+                Style::default().fg(p95_color),
+            ),
         ]));
         lat_info.push(Line::from(vec![
             Span::raw("  p99:        "),
-            Span::styled(format!("{:>4}ns", metrics.ringbuf_latency_p99_ns), Style::default().fg(p99_color)),
+            Span::styled(
+                format!("{:>4}ns", metrics.ringbuf_latency_p99_ns),
+                Style::default().fg(p99_color),
+            ),
         ]));
     } else {
         lat_info.push(Line::from(""));
-        lat_info.push(Line::from(Span::styled("Ring Buffer: No data", Style::default().fg(Color::DarkGray))));
+        lat_info.push(Line::from(Span::styled(
+            "Ring Buffer: No data",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
-    let lat_block = Paragraph::new(lat_info)
-        .block(Block::default()
+    let lat_block = Paragraph::new(lat_info).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(Span::styled(" LATENCY (avg/percentiles) ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            .title(Span::styled(
+                " LATENCY (avg/percentiles) ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(lat_block, chunks[1]);
 }
 
 fn render_footer(f: &mut Frame, area: Rect) {
     let footer = Line::from(vec![
-        Span::styled("[1-5]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[1-5]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Tabs  "),
-        Span::styled("[←/→]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[←/→]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Nav  "),
-        Span::styled("[u]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[u]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Rate  "),
-        Span::styled("[r]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[r]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Reset  "),
-        Span::styled("[p]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[p]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Pause  "),
-        Span::styled("[q]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[q]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Quit"),
     ]);
 
@@ -1445,14 +1851,16 @@ fn render_cpu_trends(f: &mut Frame, area: Rect, state: &TuiState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" CPU Utilization ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " CPU Utilization ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
         .border_style(Style::default().fg(Color::Yellow));
 
-    let (x_bounds, y_bounds) = calc_bounds(
-        &[&load_samples, &avg_samples, &fg_samples],
-        120.0,
-        100.0,
-    );
+    let (x_bounds, y_bounds) =
+        calc_bounds(&[&load_samples, &avg_samples, &fg_samples], 120.0, 100.0);
 
     let x_labels = vec![Span::raw("-120s"), Span::raw("now")];
     let y_labels = vec![Span::raw("0%"), Span::raw("50%"), Span::raw("100%")];
@@ -1490,14 +1898,15 @@ fn render_queue_trends(f: &mut Frame, area: Rect, state: &TuiState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" Queue Mix ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Queue Mix ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
         .border_style(Style::default().fg(Color::Yellow));
 
-    let (x_bounds, y_bounds) = calc_bounds(
-        &[&edf_samples, &direct_samples],
-        120.0,
-        100.0,
-    );
+    let (x_bounds, y_bounds) = calc_bounds(&[&edf_samples, &direct_samples], 120.0, 100.0);
 
     let x_labels = vec![Span::raw("-120s"), Span::raw("now")];
     let y_labels = vec![Span::raw("0%"), Span::raw("50%"), Span::raw("100%")];
@@ -1543,7 +1952,12 @@ fn render_latency_chart(f: &mut Frame, area: Rect, state: &TuiState, metrics: &M
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" BPF Latency (ns) ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " BPF Latency (ns) ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
         .border_style(Style::default().fg(Color::Yellow));
 
     let default_max = state
@@ -1552,12 +1966,14 @@ fn render_latency_chart(f: &mut Frame, area: Rect, state: &TuiState, metrics: &M
         .or_else(|| state.history.latest_u64("latency_enqueue"))
         .or_else(|| state.history.latest_u64("latency_select"))
         .map(|v| v as f64 * 1.5 + 100.0)
-        .unwrap_or(metrics
-            .prof_select_cpu_avg_ns
-            .max(metrics.prof_enqueue_avg_ns)
-            .max(metrics.prof_dispatch_avg_ns) as f64
-            * 1.5
-            + 100.0);
+        .unwrap_or(
+            metrics
+                .prof_select_cpu_avg_ns
+                .max(metrics.prof_enqueue_avg_ns)
+                .max(metrics.prof_dispatch_avg_ns) as f64
+                * 1.5
+                + 100.0,
+        );
 
     let (x_bounds, y_bounds) = calc_bounds_u64(
         &[&select_samples, &enqueue_samples, &dispatch_samples],
@@ -1616,7 +2032,12 @@ fn render_ringbuf_latency_chart(f: &mut Frame, area: Rect, state: &TuiState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" Ring Buffer Latency (ns) ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Ring Buffer Latency (ns) ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
         .border_style(Style::default().fg(Color::Yellow));
 
     let default_max = state
@@ -1675,7 +2096,10 @@ fn calc_bounds(series: &[&[f64]], width: f64, default_max: f64) -> ([f64; 2], [f
         .fold(0.0_f64, f64::max)
         .max(default_max);
 
-    ([0.0_f64.max(max_len - width), max_len], [0.0, max_val.max(1.0)])
+    (
+        [0.0_f64.max(max_len - width), max_len],
+        [0.0, max_val.max(1.0)],
+    )
 }
 
 fn calc_bounds_u64(series: &[&[u64]], width: f64, default_max: f64) -> ([f64; 2], [f64; 2]) {
@@ -1685,24 +2109,31 @@ fn calc_bounds_u64(series: &[&[u64]], width: f64, default_max: f64) -> ([f64; 2]
         .flat_map(|s| s.iter().copied())
         .fold(0_u64, u64::max) as f64;
 
-    ([0.0_f64.max(max_len - width), max_len], [0.0, max_val.max(default_max).max(1.0)])
+    (
+        [0.0_f64.max(max_len - width), max_len],
+        [0.0, max_val.max(default_max).max(1.0)],
+    )
 }
 
 fn render_thread_breakdown(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
-    let headers = Row::new(vec!["Class", "Live", "FG%", "Notes"]).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let headers = Row::new(vec!["Class", "Live", "FG%", "Notes"]).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let direct_pct = state.history.latest_f64("direct_pct").unwrap_or(0.0);
 
     // Sanitize function: If value > 10000, it's likely an underflow/overflow artifact (u64::MAX wraparound)
     // Display as 0 to avoid confusion, but log raw value for debugging
-    let sanitize = |val: u64| -> u64 { 
-        if val > 10000 { 
-            0  // Likely underflow artifact (should never have >10000 threads)
-        } else { 
-            val 
-        } 
+    let sanitize = |val: u64| -> u64 {
+        if val > 10000 {
+            0 // Likely underflow artifact (should never have >10000 threads)
+        } else {
+            val
+        }
     };
-    
+
     // Get raw values for display (show actual counts, even if 0)
     let input_count = sanitize(metrics.input_handler_threads);
     let gpu_count = sanitize(metrics.gpu_submit_threads);
@@ -1711,73 +2142,126 @@ fn render_thread_breakdown(f: &mut Frame, area: Rect, metrics: &Metrics, state: 
     let compositor_count = sanitize(metrics.compositor_threads);
     let network_count = sanitize(metrics.network_threads);
     let background_count = sanitize(metrics.background_threads);
-    
+
     // Color code based on detection status
     let count_color = |count: u64| -> Color {
-        if count > 0 { Color::Green } else { Color::DarkGray }
+        if count > 0 {
+            Color::Green
+        } else {
+            Color::DarkGray
+        }
     };
-    
+
     // Calculate FG% for each thread type (percentage of foreground CPU time)
     // Note: fg_cpu_pct is overall foreground CPU%, not per-thread-type
     // For now, show "-" for types without specific metrics, but could calculate if needed
     let rows = vec![
         Row::new(vec![
-            Span::raw("Input"), 
-            Span::styled(input_count.to_string(), Style::default().fg(count_color(input_count))), 
-            Span::raw(format!("{:.1}", metrics.fg_cpu_pct as f64)), 
-            Span::raw("Classifier: input threads")
+            Span::raw("Input"),
+            Span::styled(
+                input_count.to_string(),
+                Style::default().fg(count_color(input_count)),
+            ),
+            Span::raw(format!("{:.1}", metrics.fg_cpu_pct as f64)),
+            Span::raw("Classifier: input threads"),
         ]),
         Row::new(vec![
-            Span::raw("GPU Submit"), 
-            Span::styled(gpu_count.to_string(), Style::default().fg(count_color(gpu_count))), 
-            Span::raw(format!("{:.1}", direct_pct)), 
-            Span::raw("Direct dispatch share")
+            Span::raw("GPU Submit"),
+            Span::styled(
+                gpu_count.to_string(),
+                Style::default().fg(count_color(gpu_count)),
+            ),
+            Span::raw(format!("{:.1}", direct_pct)),
+            Span::raw("Direct dispatch share"),
         ]),
         Row::new(vec![
-            Span::raw("Game Audio"), 
-            Span::styled(game_audio_count.to_string(), Style::default().fg(count_color(game_audio_count))), 
-            Span::raw("-"), 
-            Span::raw(if game_audio_count == 0 { "Runtime pattern: 300-1200Hz, <500µs" } else { "Audio priority boost" })
+            Span::raw("Game Audio"),
+            Span::styled(
+                game_audio_count.to_string(),
+                Style::default().fg(count_color(game_audio_count)),
+            ),
+            Span::raw("-"),
+            Span::raw(if game_audio_count == 0 {
+                "Runtime pattern: 300-1200Hz, <500µs"
+            } else {
+                "Audio priority boost"
+            }),
         ]),
         Row::new(vec![
-            Span::raw("System Audio"), 
-            Span::styled(system_audio_count.to_string(), Style::default().fg(count_color(system_audio_count))), 
-            Span::raw("-"), 
-            Span::raw(if system_audio_count == 0 { "Fentry: ALSA/PipeWire hooks" } else { "Mixer rate" })
+            Span::raw("System Audio"),
+            Span::styled(
+                system_audio_count.to_string(),
+                Style::default().fg(count_color(system_audio_count)),
+            ),
+            Span::raw("-"),
+            Span::raw(if system_audio_count == 0 {
+                "Fentry: ALSA/PipeWire hooks"
+            } else {
+                "Mixer rate"
+            }),
         ]),
         Row::new(vec![
-            Span::raw("Compositor"), 
-            Span::styled(compositor_count.to_string(), Style::default().fg(count_color(compositor_count))), 
-            Span::raw("-"), 
-            Span::raw(if compositor_count == 0 { "Fentry: DRM operations" } else { "Frame pacing" })
+            Span::raw("Compositor"),
+            Span::styled(
+                compositor_count.to_string(),
+                Style::default().fg(count_color(compositor_count)),
+            ),
+            Span::raw("-"),
+            Span::raw(if compositor_count == 0 {
+                "Fentry: DRM operations"
+            } else {
+                "Frame pacing"
+            }),
         ]),
         Row::new(vec![
-            Span::raw("Network"), 
-            Span::styled(network_count.to_string(), Style::default().fg(count_color(network_count))), 
-            Span::raw("-"), 
-            Span::raw(if network_count == 0 { "Fentry: Socket operations" } else { "Netcode priority" })
+            Span::raw("Network"),
+            Span::styled(
+                network_count.to_string(),
+                Style::default().fg(count_color(network_count)),
+            ),
+            Span::raw("-"),
+            Span::raw(if network_count == 0 {
+                "Fentry: Socket operations"
+            } else {
+                "Netcode priority"
+            }),
         ]),
         Row::new(vec![
-            Span::raw("Background"), 
-            Span::styled(background_count.to_string(), Style::default().fg(count_color(background_count))), 
-            Span::raw("-"), 
-            Span::raw(if background_count == 0 { "Runtime: <10Hz, >5ms exec" } else { "Rate limited" })
+            Span::raw("Background"),
+            Span::styled(
+                background_count.to_string(),
+                Style::default().fg(count_color(background_count)),
+            ),
+            Span::raw("-"),
+            Span::raw(if background_count == 0 {
+                "Runtime: <10Hz, >5ms exec"
+            } else {
+                "Rate limited"
+            }),
         ]),
     ];
 
-    let table = Table::new(rows, [
-        Constraint::Percentage(25),
-        Constraint::Length(6),
-        Constraint::Length(7),
-        Constraint::Percentage(50),
-    ])
-        .header(headers)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Thread Classes ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(25),
+            Constraint::Length(6),
+            Constraint::Length(7),
+            Constraint::Percentage(50),
+        ],
+    )
+    .header(headers)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Thread Classes ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
 
     f.render_widget(table, area);
 }
@@ -1794,17 +2278,27 @@ fn render_thread_totals(f: &mut Frame, area: Rect, metrics: &Metrics) {
                 + metrics.network_threads
                 + metrics.background_threads
         )),
-        Line::from(format!("Sync fast hits: {}", format_number(metrics.sync_wake_fast))),
-        Line::from(format!("Sync keep-local: {}", format_number(metrics.sync_local))),
+        Line::from(format!(
+            "Sync fast hits: {}",
+            format_number(metrics.sync_wake_fast)
+        )),
+        Line::from(format!(
+            "Sync keep-local: {}",
+            format_number(metrics.sync_local)
+        )),
     ];
 
-    let block = Paragraph::new(totals)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Thread Counters ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
+    let block = Paragraph::new(totals).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Thread Counters ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
     f.render_widget(block, area);
 }
 
@@ -1813,7 +2307,7 @@ fn render_fentry_breakdown(f: &mut Frame, area: Rect, metrics: &Metrics) {
     let gaming = metrics.fentry_gaming_events;
     let filtered = metrics.fentry_filtered_events;
     let triggers = metrics.fentry_boost_triggers;
-    
+
     let gaming_pct = if total > 0 {
         (gaming as f64 * 100.0) / total as f64
     } else {
@@ -1824,12 +2318,24 @@ fn render_fentry_breakdown(f: &mut Frame, area: Rect, metrics: &Metrics) {
     } else {
         0.0
     };
-    
+
     // Color coding: green if mostly gaming events, yellow if high filtering
-    let total_color = if total > 0 { Color::Cyan } else { Color::DarkGray };
-    let gaming_color = if gaming_pct > 50.0 { Color::Green } else { Color::Yellow };
-    let filtered_color = if filtered_pct > 50.0 { Color::Yellow } else { Color::Green };
-    
+    let total_color = if total > 0 {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let gaming_color = if gaming_pct > 50.0 {
+        Color::Green
+    } else {
+        Color::Yellow
+    };
+    let filtered_color = if filtered_pct > 50.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
     let lines = vec![
         Line::from(vec![
             Span::styled("Total Events", Style::default().fg(Color::Cyan)),
@@ -1864,31 +2370,42 @@ fn render_fentry_breakdown(f: &mut Frame, area: Rect, metrics: &Metrics) {
             ),
         ]),
     ];
-    
-    let block = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Fentry Event Breakdown ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
+
+    let block = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Fentry Event Breakdown ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
     f.render_widget(block, area);
 }
 
 fn render_thread_notes(f: &mut Frame, area: Rect, state: &TuiState) {
-    let total_classified = state.last_metrics.as_ref().map(|m| {
-        m.input_handler_threads
-            + m.gpu_submit_threads
-            + m.game_audio_threads
-            + m.system_audio_threads
-            + m.compositor_threads
-            + m.network_threads
-            + m.background_threads
-    }).unwrap_or(0);
-    
+    let total_classified = state
+        .last_metrics
+        .as_ref()
+        .map(|m| {
+            m.input_handler_threads
+                + m.gpu_submit_threads
+                + m.game_audio_threads
+                + m.system_audio_threads
+                + m.compositor_threads
+                + m.network_threads
+                + m.background_threads
+        })
+        .unwrap_or(0);
+
     let mut lines = vec![
         Line::from(if state.mig_block_alert {
-            Span::styled("High migration blocking detected", Style::default().fg(Color::Yellow))
+            Span::styled(
+                "High migration blocking detected",
+                Style::default().fg(Color::Yellow),
+            )
         } else {
             Span::raw("Migration limiter nominal")
         }),
@@ -1903,7 +2420,7 @@ fn render_thread_notes(f: &mut Frame, area: Rect, state: &TuiState) {
             Span::raw("Metrics stream healthy")
         }),
     ];
-    
+
     // Add thread detection diagnostics with detailed breakdown
     if let Some(metrics) = &state.last_metrics {
         if metrics.fg_pid > 0 {
@@ -1911,7 +2428,7 @@ fn render_thread_notes(f: &mut Frame, area: Rect, state: &TuiState) {
                 "Total classified: {} threads",
                 total_classified
             )));
-            
+
             // Show raw counter values for debugging (helps identify if counters are actually 0 or sanitized)
             // OPTIMIZATION: Format directly inline to avoid intermediate String allocation
             lines.push(Line::from(Span::styled(
@@ -1925,58 +2442,64 @@ fn render_thread_notes(f: &mut Frame, area: Rect, state: &TuiState) {
                     metrics.network_threads,
                     metrics.background_threads
                 ),
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::DarkGray),
             )));
-            
+
             if total_classified == 0 {
                 lines.push(Line::from(Span::styled(
                     "⚠️  No threads classified yet",
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(Color::Yellow),
                 )));
                 lines.push(Line::from(Span::styled(
                     "  • Counters reset when game changes",
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(Span::styled(
                     "  • Runtime patterns need 20+ samples",
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(Span::styled(
                     "  • Fentry hooks require kernel support",
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::DarkGray),
                 )));
             } else if total_classified < 3 {
                 lines.push(Line::from(Span::styled(
                     "Tip: More threads may appear as patterns stabilize",
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 )));
             }
-            
+
             // Add detection method hints
             if metrics.game_audio_threads == 0 && metrics.fg_pid > 0 {
                 lines.push(Line::from(Span::styled(
                     "Game Audio: Check runtime pattern (300-1200Hz, <500µs) or fentry hooks",
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::DarkGray),
                 )));
             }
             if metrics.network_threads == 0 && metrics.fg_pid > 0 {
                 lines.push(Line::from(Span::styled(
                     "Network: Requires fentry hooks (socket ops) or name match",
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::DarkGray),
                 )));
             }
         }
     }
-    
-    lines.push(Line::from("Use [r] to reset counters after thread adjustments"));
 
-    let block = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Notes ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
+    lines.push(Line::from(
+        "Use [r] to reset counters after thread adjustments",
+    ));
+
+    let block = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Notes ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
     f.render_widget(block, area);
 }
 
@@ -1991,7 +2514,10 @@ fn evaluate_alerts(state: &mut TuiState, metrics: &Metrics) {
     let new_idle = avg_input < 1.0 && metrics.input_trigger_rate == 0;
 
     if new_idle && !state.input_idle_alert {
-        state.event_log.push(EventLevel::Warn, "Input triggers idle; check input hooks".into());
+        state.event_log.push(
+            EventLevel::Warn,
+            "Input triggers idle; check input hooks".into(),
+        );
     }
     state.input_idle_alert = new_idle;
 
@@ -2002,30 +2528,52 @@ fn evaluate_alerts(state: &mut TuiState, metrics: &Metrics) {
     };
     let new_mig_block = blocked_rate > 40.0;
     if new_mig_block && !state.mig_block_alert {
-        state.event_log.push(EventLevel::Warn, format!("High migration blocking {:.0}%", blocked_rate));
+        state.event_log.push(
+            EventLevel::Warn,
+            format!("High migration blocking {:.0}%", blocked_rate),
+        );
     }
     state.mig_block_alert = new_mig_block;
 
     let latency_high = metrics.prof_enqueue_avg_ns > 500 || metrics.prof_dispatch_avg_ns > 500;
     if latency_high && !state.latency_alert {
         if metrics.prof_enqueue_avg_ns > 1500 || metrics.prof_dispatch_avg_ns > 1500 {
-            state.event_log.push(EventLevel::Error, format!("Critical BPF latency enq {}ns dsp {}ns", metrics.prof_enqueue_avg_ns, metrics.prof_dispatch_avg_ns));
+            state.event_log.push(
+                EventLevel::Error,
+                format!(
+                    "Critical BPF latency enq {}ns dsp {}ns",
+                    metrics.prof_enqueue_avg_ns, metrics.prof_dispatch_avg_ns
+                ),
+            );
         } else {
-            state.event_log.push(EventLevel::Warn, format!("BPF latency high enq {}ns dsp {}ns", metrics.prof_enqueue_avg_ns, metrics.prof_dispatch_avg_ns));
+            state.event_log.push(
+                EventLevel::Warn,
+                format!(
+                    "BPF latency high enq {}ns dsp {}ns",
+                    metrics.prof_enqueue_avg_ns, metrics.prof_dispatch_avg_ns
+                ),
+            );
         }
     }
     state.latency_alert = latency_high;
 
     // fentry idle if per-interval delta is zero while input is active
     let fentry_delta = if let Some(prev) = state.prev_metrics.as_ref() {
-        metrics.fentry_boost_triggers.saturating_sub(prev.fentry_boost_triggers)
-    } else { 0 };
+        metrics
+            .fentry_boost_triggers
+            .saturating_sub(prev.fentry_boost_triggers)
+    } else {
+        0
+    };
     let fentry_idle = fentry_delta == 0 && metrics.input_trigger_rate > 0;
     if fentry_idle && !state.fentry_idle_alert {
-        state.event_log.push(EventLevel::Warn, "Fentry hooks not triggering while inputs active".into());
+        state.event_log.push(
+            EventLevel::Warn,
+            "Fentry hooks not triggering while inputs active".into(),
+        );
     }
     state.fentry_idle_alert = fentry_idle;
-    
+
     // Ring buffer overflow alert (fire once when overflow detected)
     if metrics.ringbuf_overflow_events > 0 && !state.overflow_alert_fired {
         state.event_log.push(
@@ -2040,7 +2588,7 @@ fn evaluate_alerts(state: &mut TuiState, metrics: &Metrics) {
         // Reset alert flag if overflow cleared (shouldn't happen, but handle gracefully)
         state.overflow_alert_fired = false;
     }
-    
+
     // Userspace queue drops alert (fire once when drops detected)
     if metrics.rb_queue_dropped_total > 0 && !state.queue_drop_alert_fired {
         state.event_log.push(
@@ -2055,7 +2603,7 @@ fn evaluate_alerts(state: &mut TuiState, metrics: &Metrics) {
         // Reset alert flag if drops cleared
         state.queue_drop_alert_fired = false;
     }
-    
+
     // Ring buffer latency alerts (fire once when threshold crossed)
     if metrics.ringbuf_latency_p95_ns > 10000 && !state.latency_p95_high_alert_fired {
         state.event_log.push(
@@ -2069,8 +2617,11 @@ fn evaluate_alerts(state: &mut TuiState, metrics: &Metrics) {
     } else if metrics.ringbuf_latency_p95_ns <= 10000 {
         state.latency_p95_high_alert_fired = false;
     }
-    
-    if metrics.ringbuf_latency_p95_ns > 5000 && metrics.ringbuf_latency_p95_ns <= 10000 && !state.latency_p95_elevated_alert_fired {
+
+    if metrics.ringbuf_latency_p95_ns > 5000
+        && metrics.ringbuf_latency_p95_ns <= 10000
+        && !state.latency_p95_elevated_alert_fired
+    {
         state.event_log.push(
             EventLevel::Warn,
             format!(
@@ -2082,10 +2633,11 @@ fn evaluate_alerts(state: &mut TuiState, metrics: &Metrics) {
     } else if metrics.ringbuf_latency_p95_ns <= 5000 {
         state.latency_p95_elevated_alert_fired = false;
     }
-    
+
     // Fentry filtering alert (if filtering too much, might indicate misconfiguration)
     if metrics.fentry_total_events > 100 {
-        let filtered_pct = (metrics.fentry_filtered_events as f64 * 100.0) / metrics.fentry_total_events as f64;
+        let filtered_pct =
+            (metrics.fentry_filtered_events as f64 * 100.0) / metrics.fentry_total_events as f64;
         if filtered_pct > 80.0 && !state.fentry_filter_alert_fired {
             state.event_log.push(
                 EventLevel::Warn,
@@ -2279,24 +2831,28 @@ pub fn monitor_tui(
                     // NOTE: Must clone here to break the immutable borrow before mutating `st`.
                     // While this allocates, it's necessary to satisfy Rust's borrowing rules.
                     // We clone once here instead of cloning in multiple places later.
-                    let current_game_app = st.last_metrics.as_ref().map_or(String::new(), |m| m.fg_app.clone());
-                    
+                    let current_game_app = st
+                        .last_metrics
+                        .as_ref()
+                        .map_or(String::new(), |m| m.fg_app.clone());
+
                     if let Some(last) = st.last_metrics.take() {
                         st.prev_metrics = Some(last);
                     }
                     st.last_metrics = Some(metrics.clone());
                     st.history.push(&metrics);
-                    
+
                     // Detect game swap - only log when there's a REAL change
                     // Conditions for a swap:
                     // 1. PID changed AND we had a previous game (PID > 0)
                     // 2. OR app name changed AND we had both old and new app names AND PID matches
-                    let pid_changed = current_game_pid != metrics.fg_pid as u32 && current_game_pid > 0;
-                    let app_changed = !current_game_app.is_empty() 
-                        && !metrics.fg_app.is_empty() 
+                    let pid_changed =
+                        current_game_pid != metrics.fg_pid as u32 && current_game_pid > 0;
+                    let app_changed = !current_game_app.is_empty()
+                        && !metrics.fg_app.is_empty()
                         && current_game_app != metrics.fg_app
                         && current_game_pid == metrics.fg_pid as u32; // Same PID, different app
-                    
+
                     if metrics.fg_pid > 0 {
                         if pid_changed {
                             // PID changed - definitely a swap
@@ -2305,18 +2861,18 @@ pub fn monitor_tui(
                             } else {
                                 format!("PID: {}", current_game_pid)
                             };
-                            
+
                             let new_game = if !metrics.fg_app.is_empty() {
                                 format!("{} (PID: {})", metrics.fg_app, metrics.fg_pid)
                             } else {
                                 format!("PID: {}", metrics.fg_pid)
                             };
-                            
+
                             st.event_log.push(
                                 EventLevel::Info,
                                 format!("Game swapped: {} → {}", old_game, new_game),
                             );
-                            
+
                             // Save previous game info
                             st.prev_game_pid = current_game_pid;
                             // Clone the already-owned String (we cloned once above to break borrow)
@@ -2351,7 +2907,7 @@ pub fn monitor_tui(
                             st.game_pid = 0;
                         }
                     }
-                    
+
                     evaluate_alerts(&mut st, &metrics);
                     (st.game_pid, st.obs_pid)
                 };
@@ -2373,7 +2929,9 @@ pub fn monitor_tui(
         intv,
         || shutdown.load(Ordering::Relaxed),
         move |metrics| {
-            metrics_tx.send(metrics).map_err(|_| anyhow::anyhow!("metrics channel closed"))
+            metrics_tx
+                .send(metrics)
+                .map_err(|_| anyhow::anyhow!("metrics channel closed"))
         },
     );
 
@@ -2393,7 +2951,11 @@ fn pick_housekeeping_cpu() -> Option<usize> {
         .all_cpus
         .iter()
         .filter_map(|(id, cpu)| {
-            if matches!(cpu.core_type, CoreType::Little) { Some((*id, cpu.cpu_capacity)) } else { None }
+            if matches!(cpu.core_type, CoreType::Little) {
+                Some((*id, cpu.cpu_capacity))
+            } else {
+                None
+            }
         })
         .collect();
     if !little.is_empty() {
@@ -2418,7 +2980,9 @@ fn configure_low_prio_thread() {
     }
     // Best-effort: lower priority (may require CAP_SYS_NICE)
     // Best-effort: lower priority (may require CAP_SYS_NICE)
-    unsafe { let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 19); }
+    unsafe {
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+    }
 }
 
 /// Main UI rendering dispatcher based on active tab
@@ -2426,9 +2990,9 @@ fn render_main_ui(f: &mut Frame, metrics: &Metrics, state: &TuiState) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(0),     // Content
-            Constraint::Length(1),  // Footer
+            Constraint::Length(3), // Header
+            Constraint::Min(0),    // Content
+            Constraint::Length(1), // Footer
         ])
         .split(f.area());
 
@@ -2441,10 +3005,10 @@ fn render_main_ui(f: &mut Frame, metrics: &Metrics, state: &TuiState) {
             let content_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(6),  // Health check (increased for game display)
-                    Constraint::Length(6),  // Process comparison (increased for path display)
-                    Constraint::Length(3),  // Config
-                    Constraint::Min(0),     // Remaining rows
+                    Constraint::Length(6), // Health check (increased for game display)
+                    Constraint::Length(6), // Process comparison (increased for path display)
+                    Constraint::Length(3), // Config
+                    Constraint::Min(0),    // Remaining rows
                 ])
                 .split(main_chunks[1]);
 
@@ -2491,7 +3055,7 @@ fn render_main_ui(f: &mut Frame, metrics: &Metrics, state: &TuiState) {
                     Constraint::Percentage(45),
                     Constraint::Percentage(15),
                     Constraint::Percentage(15),
-                    Constraint::Percentage(25),  // Increased for diagnostics
+                    Constraint::Percentage(25), // Increased for diagnostics
                 ])
                 .split(main_chunks[1]);
 
@@ -2527,73 +3091,131 @@ fn render_event_log(f: &mut Frame, area: Rect, state: &TuiState) {
             Line::from(vec![
                 Span::styled(timestamp, Style::default().fg(Color::DarkGray)),
                 Span::raw("  "),
-                Span::styled(level_str, Style::default().fg(level_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    level_str,
+                    Style::default()
+                        .fg(level_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::raw(&entry.message),
             ])
         })
         .collect();
 
-    let block = Paragraph::new(events)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Event Log ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
+    let block = Paragraph::new(events).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Event Log ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
     f.render_widget(block, area);
 }
 
 /// Render help screen
 fn render_help(f: &mut Frame, area: Rect) {
     let help_text = vec![
-        Line::from(Span::styled("scx_gamer TUI Help", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "scx_gamer TUI Help",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("[1-5]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[1-5]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" - Switch tabs (Overview, Performance, Threads, Events, Help)"),
         ]),
         Line::from(vec![
-            Span::styled("[←/→]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[←/→]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" - Navigate between tabs"),
         ]),
         Line::from(vec![
-            Span::styled("[u]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[u]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" - Cycle update rate (1s, 5s, 30s, 60s)"),
         ]),
         Line::from(vec![
-            Span::styled("[r]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[r]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" - Reset statistics and counters"),
         ]),
         Line::from(vec![
-            Span::styled("[p]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[p]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" - Pause/unpause updates"),
         ]),
         Line::from(vec![
-            Span::styled("[q]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[q]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" - Quit TUI and stop scheduler"),
         ]),
         Line::from(""),
-        Line::from(Span::styled("Tabs:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Tabs:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from("  Overview    - Real-time scheduler status and metrics"),
         Line::from("  Performance - CPU, queue, and latency trends"),
         Line::from("  Threads     - Thread classification and breakdown"),
         Line::from("  Events      - Event log with warnings and errors"),
         Line::from("  Help        - This help screen"),
         Line::from(""),
-        Line::from(Span::styled("Alerts:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Alerts:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from("  Yellow warnings appear for recoverable issues"),
         Line::from("  Red errors indicate critical problems"),
         Line::from(""),
         Line::from("Press [q] to exit"),
     ];
 
-    let block = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Help ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(Color::Green)),
-        );
+    let block = Paragraph::new(help_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Help ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Green)),
+    );
     f.render_widget(block, area);
 }
