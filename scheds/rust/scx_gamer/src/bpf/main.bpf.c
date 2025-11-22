@@ -1152,10 +1152,12 @@ static __always_inline void aggregate_classification_stats(void);
 
 #define CLASS_STAT_INC(stats_ptr, field, global_var)				\
 	do {									\
-		if (stats_ptr)							\
-			(stats_ptr)->field++;					\
-		else								\
-			__atomic_fetch_add(&(global_var), 1, __ATOMIC_RELAXED);	\
+		if (likely(!no_stats)) {					\
+			if (stats_ptr)						\
+				(stats_ptr)->field++;				\
+			else							\
+				__atomic_fetch_add(&(global_var), 1, __ATOMIC_RELAXED); \
+		}								\
 	} while (0)
 
 static inline void wakeup_cpu(s32 cpu);
@@ -4812,7 +4814,10 @@ void BPF_STRUCT_OPS(gamer_runnable, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
     s32 cpu = scx_bpf_task_cpu(p);
     struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
-	struct gamer_class_stats *class_stats = local_class_stats();
+	/* OPTIMIZATION: Skip class stats lookup when stats disabled.
+	 * Saves ~20-50ns per call × ~79k calls/sec = 1.58-3.95M ns/sec = 0.16-0.40% CPU.
+	 * Classification stats are diagnostic only, not required for scheduling. */
+	struct gamer_class_stats *class_stats = likely(!no_stats) ? local_class_stats() : NULL;
 
 	/* PERF: Always create task_ctx on first wake to guarantee non-NULL in hot paths.
 	 * This eliminates NULL checks and string comparison fallbacks in select_cpu/enqueue.
@@ -5773,7 +5778,9 @@ void BPF_STRUCT_OPS(gamer_stopping, struct task_struct *p, bool runnable)
 		 * This ensures threads are classified even if they don't wake up through gamer_runnable() first. */
 		if (!tctx->is_input_handler && is_exact_game_thread && is_input_handler_name(p->comm)) {
 			tctx->is_input_handler = 1;
-			CLASS_STAT_INC(local_class_stats(), input_handler_threads,
+			/* OPTIMIZATION: Conditional stats lookup (only when stats enabled) */
+			struct gamer_class_stats *stats = likely(!no_stats) ? local_class_stats() : NULL;
+			CLASS_STAT_INC(stats, input_handler_threads,
 				       nr_input_handler_threads);
 			recompute_boost_shift(tctx);  /* Ensure input handler priority (7) over GPU submit (6) */
 			/* HYBRID FLAG CACHING: Update cached flags after classification change */
