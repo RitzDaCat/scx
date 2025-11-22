@@ -155,6 +155,13 @@ struct CACHE_ALIGNED task_ctx {
 	u64 utilization_pct;		/* (Ci / Pi) * 100 (fixed-point, 100 = 1%) */
 	u64 worst_case_exec_ns;		/* Worst-case execution time (Ci) */
 	u64 worst_case_response_ns;	/* Worst-case response time (Ri) */
+	
+	/* CACHE LINE ALIGNMENT: Pad to 384 bytes (6 full cache lines)
+	 * Prevents this struct from straddling an extra cache line boundary.
+	 * Without this padding, task_ctx would be ~352 bytes, causing the last
+	 * fields to potentially share a cache line with adjacent data, leading
+	 * to false sharing and memory bus contention. */
+	u8 _cache_line_padding[32];	/* Pad to 384 bytes (6 × 64-byte cache lines) */
 };
 
 /* LMAX DISRUPTOR: Verify cache-line alignment at compile time
@@ -203,6 +210,13 @@ struct CACHE_ALIGNED cpu_ctx {
 	u64 local_rr_enq;		/* Round-robin enqueue counter */
 	u64 local_edf_enq;		/* EDF enqueue counter */
 	u64 local_nr_shared_dispatches;	/* Shared DSQ dispatch counter */
+	
+	/* CACHE LINE ALIGNMENT: Pad to 128 bytes (2 full cache lines)
+	 * Prevents this struct from straddling an extra cache line boundary.
+	 * Without this padding, cpu_ctx would be ~112 bytes, causing the last
+	 * fields to potentially share a cache line with adjacent data, leading
+	 * to false sharing and memory bus contention. */
+	u8 _cache_line_padding[16];	/* Pad to 128 bytes (2 × 64-byte cache lines) */
 };
 
 /* LMAX DISRUPTOR: Verify cache-line alignment at compile time
