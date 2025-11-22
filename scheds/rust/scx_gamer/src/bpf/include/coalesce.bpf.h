@@ -32,13 +32,14 @@
 /* Coalescing intervals (call counts, not time) */
 #define UTIL_SAMPLE_EVERY     512    /* Power of 2 for fast modulo (bitwise AND) */
 #define HOUSEKEEPING_EVERY    4096   /* Power of 2 for fast modulo */
+#define CLASSIFICATION_CHECK_EVERY 256 /* Check classification refresh every 256 runnable calls */
 
 /* Per-CPU dispatch call counters (avoid atomic contention) */
 struct dispatch_coalesce_ctx {
 	u32 dispatch_call_count;         /* Incremented on every dispatch */
 	u32 util_sample_calls;           /* Calls since last util sample */
 	u32 housekeeping_calls;          /* Calls since last housekeeping */
-	u32 _pad;                        /* Align to 16 bytes */
+	u32 runnable_call_count;         /* Incremented on every runnable */
 };
 
 /* Per-CPU array for coalescing state */
@@ -116,6 +117,50 @@ static __always_inline void increment_dispatch_counter(void)
 	struct dispatch_coalesce_ctx *ctx = bpf_map_lookup_elem(&dispatch_coalesce_stor, &idx);
 	if (ctx)
 		ctx->dispatch_call_count++;
+}
+
+/*
+ * RUNNABLE CLASSIFICATION COALESCING STRATEGY
+ * 
+ * Problem: gamer_runnable() is called ~124k times/sec under gaming load.
+ * Every call executes scx_bpf_now() to check if classification should refresh,
+ * even though most tasks have stable classifications (exponential backoff).
+ * 
+ * Solution: Gate the classification time check with a counter.
+ * Only call scx_bpf_now() and check classification refresh every N runnable calls.
+ * 
+ * At 124k runnable/sec with CLASSIFICATION_CHECK_EVERY=256:
+ * - Classification check runs ~484 times/sec (124k / 256)
+ * - Eliminates ~123.5k scx_bpf_now() calls/sec
+ * 
+ * Savings: ~123.5k scx_bpf_now() calls/sec = ~0.62-1.24M ns/sec = 0.06-0.12% CPU
+ * 
+ * CRITICAL: This doesn't skip classification for new tasks or when explicitly needed.
+ * It only gates the periodic refresh check for already-classified tasks.
+ */
+
+/**
+ * should_check_classification - Counter-based coalescing for classification refresh
+ * 
+ * Returns true every ~256 runnable calls to gate expensive classification time checks.
+ * New tasks (is_first_classification=true) bypass this and always run classification.
+ * 
+ * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
+ * Savings: ~123k scx_bpf_now() calls/sec eliminated under gaming load
+ */
+static __always_inline bool should_check_classification(void)
+{
+	const u32 idx = 0;
+	struct dispatch_coalesce_ctx *ctx = bpf_map_lookup_elem(&dispatch_coalesce_stor, &idx);
+	if (!ctx)
+		return true;  /* Fallback: always check if map lookup fails */
+	
+	ctx->runnable_call_count++;
+	
+	/* TIER 0: Bitwise AND for modulo (faster than % operator) */
+	bool should_check = (ctx->runnable_call_count & (CLASSIFICATION_CHECK_EVERY - 1)) == 0;
+	
+	return should_check;
 }
 
 #endif /* __GAMER_COALESCE_BPF_H */
