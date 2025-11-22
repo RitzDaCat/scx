@@ -250,6 +250,7 @@ PROFILE
                 echo "  --mig-max 4                    (Migration rate limiting)"
                 echo "  --preferred-idle-scan          (Smart CPU placement)"
                 echo "  --avoid-smt                    (Prevents SMT contention)"
+                echo "  --no-stats                     (Disables stats collection for <1% overhead)"
                 echo "  Instrumentation: Detectors, runtime trace, and dispatch events are OFF"
                 echo
                 launch_scx "Esports" \
@@ -271,7 +272,8 @@ PROFILE
                     --arg "--avoid-smt" \
                     --arg "--disable-runtime-trace" \
                     --arg "--disable-detectors" \
-                    --arg "--disable-dispatch-events"
+                    --arg "--disable-dispatch-events" \
+                    --arg "--no-stats"
                 return
                 ;;
             4)
@@ -323,6 +325,7 @@ PROFILE
                 echo "  --avoid-smt                    (Avoids hyperthread contention)"
                 echo "  --mig-max 2                    (Minimal migrations)"
                 echo "  --preferred-idle-scan          (Smart CPU selection)"
+                echo "  --no-stats                     (Disables stats collection for <1% overhead)"
                 echo
                 echo "Best For:"
                 echo "  - Aim trainers (Kovaak's, Aimlab)"
@@ -360,7 +363,8 @@ PROFILE
                         --arg "--preferred-idle-scan" \
                         --arg "--disable-runtime-trace" \
                         --arg "--disable-detectors" \
-                        --arg "--disable-dispatch-events"
+                        --arg "--disable-dispatch-events" \
+                        --arg "--no-stats"
                 else
                     echo
                     echo "Ultra-Latency mode cancelled."
@@ -395,6 +399,7 @@ PROFILE
                 echo "  --wakeup-timer-us 250          (250us BPF timer)"
                 echo "  --avoid-smt                    (Avoids hyperthread contention)"
                 echo "  --mig-max 4                    (Migration rate limiting)"
+                echo "  --no-stats                     (Disables stats collection for <1% overhead)"
                 echo
                 echo "Best For:"
                 echo "  - Maximum latency consistency and stability"
@@ -432,7 +437,8 @@ PROFILE
                         --arg "4" \
                         --arg "--disable-runtime-trace" \
                         --arg "--disable-detectors" \
-                        --arg "--disable-dispatch-events"
+                        --arg "--disable-dispatch-events" \
+                        --arg "--no-stats"
                 else
                     echo
                     echo "SCHED_DEADLINE mode cancelled."

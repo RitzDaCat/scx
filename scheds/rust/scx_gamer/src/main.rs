@@ -487,6 +487,11 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     ml_list_profiles: bool,
 
+    /// Disable BPF stats collection (reduces overhead by ~0.6-1.2%)
+    /// When enabled, per-CPU classification stats are not collected
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_stats: bool,
+
     /// Enable debug API server for external metric access (MCP integration, debugging)
     /// Exposes HTTP endpoint on localhost with current scheduler metrics as JSON
     #[clap(long)]
@@ -1303,6 +1308,7 @@ impl<'a> Scheduler<'a> {
         rodata.mouse_boost_ns = opts.mouse_boost_us * 1000;
         rodata.prefer_napi_on_input = opts.prefer_napi_on_input;
         rodata.mm_hint_enabled = !opts.disable_mm_hint;
+        rodata.no_stats = opts.no_stats;
         rodata.wakeup_timer_ns = if opts.wakeup_timer_us == 0 {
             0
         } else {
