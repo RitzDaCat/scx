@@ -30,9 +30,9 @@
  */
 
 /* Coalescing intervals (call counts, not time) */
-#define UTIL_SAMPLE_EVERY     1024   /* Power of 2 for fast modulo (bitwise AND) */
-#define HOUSEKEEPING_EVERY    8192   /* Power of 2 for fast modulo */
-#define CLASSIFICATION_CHECK_EVERY 512 /* Check classification refresh every 512 runnable calls */
+#define UTIL_SAMPLE_EVERY     2048   /* Power of 2 for fast modulo (bitwise AND) */
+#define HOUSEKEEPING_EVERY    16384  /* Power of 2 for fast modulo */
+#define CLASSIFICATION_CHECK_EVERY 1024 /* Check classification refresh every 1024 runnable calls */
 
 /* Per-CPU dispatch call counters (avoid atomic contention) */
 struct dispatch_coalesce_ctx {
@@ -53,8 +53,8 @@ struct {
 /**
  * should_sample_cpu_util - Counter-based coalescing for CPU util sampling
  * 
- * Returns true every ~1024 dispatch calls (adaptive to actual dispatch rate).
- * This maintains ~1ms sampling rate at 940k dispatch/sec without calling scx_bpf_now().
+ * Returns true every ~2048 dispatch calls (adaptive to actual dispatch rate).
+ * This maintains ~2ms sampling rate at 940k dispatch/sec without calling scx_bpf_now().
  * 
  * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
  * Savings: ~940k scx_bpf_now() calls/sec eliminated = ~4.7-9.4 million ns/sec
@@ -81,8 +81,8 @@ static __always_inline bool should_sample_cpu_util(void)
 /**
  * should_run_housekeeping - Counter-based coalescing for housekeeping tasks
  * 
- * Returns true every ~8192 dispatch calls (adaptive to actual dispatch rate).
- * This maintains ~10ms housekeeping rate at 940k dispatch/sec without calling scx_bpf_now().
+ * Returns true every ~16384 dispatch calls (adaptive to actual dispatch rate).
+ * This maintains ~20ms housekeeping rate at 940k dispatch/sec without calling scx_bpf_now().
  * 
  * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
  * Savings: ~940k scx_bpf_now() calls/sec eliminated = ~4.7-9.4 million ns/sec
@@ -129,11 +129,11 @@ static __always_inline void increment_dispatch_counter(void)
  * Solution: Gate the classification time check with a counter.
  * Only call scx_bpf_now() and check classification refresh every N runnable calls.
  * 
- * At 124k runnable/sec with CLASSIFICATION_CHECK_EVERY=512:
- * - Classification check runs ~242 times/sec (124k / 512)
- * - Eliminates ~123.7k scx_bpf_now() calls/sec
+ * At 124k runnable/sec with CLASSIFICATION_CHECK_EVERY=1024:
+ * - Classification check runs ~121 times/sec (124k / 1024)
+ * - Eliminates ~123.9k scx_bpf_now() calls/sec
  * 
- * Savings: ~123.7k scx_bpf_now() calls/sec = ~0.62-1.24M ns/sec = 0.06-0.12% CPU
+ * Savings: ~123.9k scx_bpf_now() calls/sec = ~0.62-1.24M ns/sec = 0.06-0.12% CPU
  * 
  * CRITICAL: This doesn't skip classification for new tasks or when explicitly needed.
  * It only gates the periodic refresh check for already-classified tasks.
@@ -142,7 +142,7 @@ static __always_inline void increment_dispatch_counter(void)
 /**
  * should_check_classification - Counter-based coalescing for classification refresh
  * 
- * Returns true every ~512 runnable calls to gate expensive classification time checks.
+ * Returns true every ~1024 runnable calls to gate expensive classification time checks.
  * New tasks (is_first_classification=true) bypass this and always run classification.
  * 
  * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
