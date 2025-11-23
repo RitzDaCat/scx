@@ -32,7 +32,7 @@
 /* Coalescing intervals (call counts, not time) */
 #define UTIL_SAMPLE_EVERY     2048   /* Power of 2 for fast modulo (bitwise AND) */
 #define INPUT_DECAY_EVERY     1024   /* Input window decay (CRITICAL for input responsiveness) */
-#define HOUSEKEEPING_EVERY    16384  /* Non-input housekeeping (stats, fg sync, etc.) */
+#define HOUSEKEEPING_EVERY    65536  /* Non-input housekeeping (16x: stats, fg sync, etc.) */
 #define CLASSIFICATION_CHECK_EVERY 1024 /* Check classification refresh every 1024 runnable calls */
 
 /* Per-CPU dispatch call counters (avoid atomic contention) */
@@ -116,17 +116,20 @@ static __always_inline bool should_decay_input_windows(void)
 /**
  * should_run_housekeeping - Counter-based coalescing for non-input housekeeping
  * 
- * Returns true every ~16384 dispatch calls (adaptive to actual dispatch rate).
- * This maintains ~20ms housekeeping rate at 940k dispatch/sec without calling scx_bpf_now().
+ * Returns true every ~65536 dispatch calls (16x from baseline, adaptive to actual dispatch rate).
+ * This maintains ~84ms housekeeping rate at 779k dispatch/sec without calling scx_bpf_now().
  * 
- * Handles non-critical background tasks:
- * - Window activity accumulation (for stats)
- * - Keyboard lane refresh (300ms window, 20ms check is fine)
+ * Handles non-critical background tasks (ZERO input latency impact):
+ * - Window activity accumulation (for stats/analytics)
  * - Foreground process sync (not latency-critical)
  * - Stats aggregation (diagnostic only)
  * 
+ * All input-critical work is on the FAST path (INPUT_DECAY_EVERY = 1024 = ~1.3ms):
+ * - Input window decay (mouse/keyboard boost expiry)
+ * - Keyboard lane refresh (held key boost extension)
+ * 
  * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
- * Savings: ~940k scx_bpf_now() calls/sec eliminated = ~4.7-9.4 million ns/sec
+ * Savings: ~779k scx_bpf_now() calls/sec eliminated = ~3.9-7.8 million ns/sec
  */
 static __always_inline bool should_run_housekeeping(void)
 {
