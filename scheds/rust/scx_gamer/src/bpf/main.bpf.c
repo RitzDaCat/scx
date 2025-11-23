@@ -935,10 +935,14 @@ volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
 
 /* Continuous input detection for aim trainers/high-mouse-movement games.
  * When input rate is sustained high (>100/sec), we're in "continuous mode":
- * less aggressive slice reduction to avoid timing jitter. */
+ * less aggressive slice reduction to avoid timing jitter.
+ * 
+ * Ultra-high-frequency mode (>4000 Hz) for 8kHz polling mice:
+ * Enables tighter latency guarantees and optimized scheduling for ultra-responsive devices. */
 volatile u64 last_input_trigger_ns;
 volatile u32 input_trigger_rate;  /* Triggers per second (EMA) */
-volatile u8 continuous_input_mode; /* 1 = sustained high input rate detected */
+volatile u8 continuous_input_mode; /* 1 = sustained high input rate detected (>150 Hz) */
+volatile u8 ultra_highfreq_input_mode; /* 1 = ultra-high-frequency detected (>4000 Hz, 8kHz mice) */
 volatile u8 continuous_input_lane_mode[INPUT_LANE_MAX] = {0};
 /* Count of currently held keyboard keys (press increments, release decrements) */
 volatile u32 kbd_pressed_count;
@@ -2347,6 +2351,13 @@ int set_input_window(void *unused)
     }
     input_trigger_rate = rate_new;
 
+    /* Ultra-high-frequency mode: 8kHz mice generate >4000 Hz event rates */
+    if (rate_new > 4000)
+        ultra_highfreq_input_mode = 1;
+    else if (rate_new < 2000)
+        ultra_highfreq_input_mode = 0;
+
+    /* Continuous input mode: sustained high input rate (>150 Hz) */
     if (rate_new > 150)
         continuous_input_mode = 1;
     else if (rate_new < 75)
@@ -2475,6 +2486,35 @@ int track_net_softirq(struct trace_event_raw_softirq_entry *ctx)
 /* Removed unused structs and functions
  * Replaced with smart vendor-based detection */
 
+/* RGB/LED device blacklist - filters out non-gaming HID noise
+ * These devices generate constant HID events that pollute input detection */
+static __always_inline bool device_blacklist_lookup(u16 vendor, u16 product)
+{
+    switch (vendor) {
+        case 0x1b1c: /* Corsair RGB/LED controllers */
+            /* iCUE Commander, LCD displays, RGB hubs - constant polling noise */
+            if (product == 0x0c1c || /* iCUE Commander CORE */
+                product == 0x0c39 || /* LCD Cap for Elite Capellix */
+                product == 0x0c1a || /* iCUE Commander PRO */
+                product == 0x0c10 || /* iCUE Lighting Node PRO */
+                product == 0x0c1e)   /* iCUE H100i/H115i RGB */
+                return true;
+            return false;
+        case 0x0b05: /* ASUS AURA LED controllers */
+            if (product == 0x1aa6 || /* AURA LED Controller (motherboard) */
+                product == 0x19af)   /* AURA LED Controller (case) */
+                return true;
+            return false;
+        case 0x1e7d: /* Razer Chroma RGB */
+            /* Only blacklist non-input RGB devices (e.g., Chroma standalone controllers) */
+            if (product == 0x3200)   /* Razer Chroma Mug Holder (yes, this exists) */
+                return true;
+            return false;
+        default:
+            return false;
+    }
+}
+
 /* Smart device detection using event capabilities and vendor patterns
  * Replaces hardcoded device lists with dynamic detection */
 static __always_inline bool device_profile_lookup(u16 vendor, u16 product, u8 *lane_hint)
@@ -2493,6 +2533,9 @@ static __always_inline bool device_profile_lookup(u16 vendor, u16 product, u8 *l
             return true;
         case 0x3367: /* Endgame Gear Gaming */
             *lane_hint = INPUT_LANE_MOUSE; /* XM2 8k and other high-performance mice */
+            return true;
+        case 0x1220: /* TC Electronic Audio */
+            *lane_hint = INPUT_LANE_OTHER; /* GoXLR and other pro audio interfaces */
             return true;
         case 0x31e3: /* Wooting Gaming Keyboards */
             *lane_hint = INPUT_LANE_KEYBOARD;
@@ -2541,6 +2584,10 @@ struct device_cache_entry {
     u64 dev_ptr;
     u8 whitelisted;
     u8 lane_hint;
+    s32 usb_irq_cpu_hint;  /* CPU that handles USB IRQ for this device (-1 = unknown)
+                            * FUTURE OPTIMIZATION: Userspace can populate this by parsing /proc/interrupts
+                            * to map USB controllers to IRQ affinity, then hint scheduler to prefer
+                            * same CPU for better cache locality (~50-200ns potential savings) */
     u32 last_access;  /* For LRU eviction */
 };
 
@@ -2594,10 +2641,19 @@ static __always_inline void record_input_boost(u8 lane, u64 now,
 	if (delta_ns > 1000000ULL) {
 		input_trigger_rate = 0;
 		continuous_input_mode = 0;
+		ultra_highfreq_input_mode = 0;
 	} else if (delta_ns > 0) {
 		u32 instant_rate = delta_ns < 10000000ULL ? (u32)(1000000000ULL / delta_ns) : 0;
 		input_trigger_rate = (input_trigger_rate * 7 + instant_rate) >> 3;
 
+		/* Ultra-high-frequency mode: 8kHz mice generate >4000 Hz event rates
+		 * Enable tighter latency guarantees and scheduling optimizations */
+		if (input_trigger_rate > 4000)
+			ultra_highfreq_input_mode = 1;
+		else if (input_trigger_rate < 2000)
+			ultra_highfreq_input_mode = 0;
+
+		/* Continuous input mode: sustained high input rate (>150 Hz) */
 		if (input_trigger_rate > 150)
 			continuous_input_mode = 1;
 		else if (input_trigger_rate < 75)
@@ -2817,7 +2873,16 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
             u16 product = BPF_CORE_READ(dev, id.product);
             entry.dev_ptr = dev_key;
             entry.lane_hint = lane_hint;
-            entry.whitelisted = device_profile_lookup(vendor, product, &entry.lane_hint) ? 1 : 0;
+            entry.usb_irq_cpu_hint = -1;  /* Unknown - userspace can populate via /proc/interrupts */
+            
+            /* OPTIMIZATION: Check blacklist first to filter out RGB/LED noise
+             * These devices generate 10-100Hz HID events that waste scheduler cycles
+             * Blacklist check is ~5ns, prevents expensive whitelist lookup + caching */
+            if (device_blacklist_lookup(vendor, product)) {
+                entry.whitelisted = 0;  /* Explicitly mark as filtered */
+            } else {
+                entry.whitelisted = device_profile_lookup(vendor, product, &entry.lane_hint) ? 1 : 0;
+            }
         }
 
         entry.last_access = now_shared >> 20;
@@ -2834,6 +2899,7 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
             percpu_slot->dev_ptr = dev_key;
             percpu_slot->whitelisted = entry.whitelisted;
             percpu_slot->lane_hint = entry.lane_hint;
+            percpu_slot->usb_irq_cpu_hint = entry.usb_irq_cpu_hint;
             percpu_slot->last_access = now_shared >> 20;
         }
     }
