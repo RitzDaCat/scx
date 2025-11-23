@@ -14,7 +14,7 @@
 #include "task_class.bpf.h"
 #include <bpf/bpf_core_read.h>
 
-static __always_inline void recompute_boost_shift(struct task_ctx *tctx);
+static __always_inline void recompute_boost_shift(struct task_ctx *tctx, u64 now);
 
 /* Shared globals */
 extern volatile u32 detected_fg_tgid;
@@ -153,7 +153,7 @@ int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned i
             apply_class_boost(tctx, 1);
             __atomic_fetch_add(&nr_game_audio_threads, 1, __ATOMIC_RELAXED);
             update_task_flags_cache(p, tctx);
-            recompute_boost_shift(tctx);
+            recompute_boost_shift(tctx, 0);  /* Pass 0 - audio detection not time-critical */
         }
     } else {
         u8 one = 1;
@@ -175,7 +175,7 @@ int BPF_PROG(detect_audio_submit, struct file *filp, unsigned int fd, unsigned i
             __atomic_fetch_add(&nr_system_audio_threads, 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&nr_system_audio_fentry_matches, 1, __ATOMIC_RELAXED);
             update_task_flags_cache(p, tctx);
-            recompute_boost_shift(tctx);
+            recompute_boost_shift(tctx, 0);  /* Pass 0 - audio detection not time-critical */
         }
     }
 
