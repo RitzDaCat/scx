@@ -843,6 +843,35 @@ static __always_inline void refresh_keyboard_lane(u64 now)
 		fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
 }
 
+/* CRITICAL: Fast path for input window decay (separate from housekeeping)
+ * 
+ * Called every ~1024 dispatch calls (~1-1.3ms at high dispatch rates).
+ * This ensures input boost windows expire on time:
+ * - Mouse boost: 6ms (needs <6ms decay granularity)
+ * - Input window: 8ms (needs <8ms decay granularity)
+ * - Keyboard boost: 300ms (1ms granularity is overkill, but safe)
+ * 
+ * Previously coupled with housekeeping (21ms intervals at 4x coalescing).
+ * This caused mouse boost windows (6ms) to persist for 21ms (3.5x overshoot).
+ * Now decoupled for input responsiveness.
+ */
+static __always_inline void maybe_decay_input_windows_fast(void)
+{
+	u64 now = scx_bpf_now();
+	maybe_decay_input_windows(now);
+}
+
+/* Non-input housekeeping: Stats, foreground sync, etc.
+ * 
+ * Called every ~16384 dispatch calls (~21ms at high dispatch rates).
+ * Handles non-critical background tasks that don't affect input latency:
+ * - Window activity accumulation (for stats/analytics)
+ * - Keyboard lane refresh (300ms window, 21ms check is fine)
+ * - Foreground process sync (not latency-critical)
+ * - Stats aggregation (diagnostic only)
+ * 
+ * Can be coalesced aggressively (8x, 16x, 32x) without impacting input.
+ */
 static __always_inline void maybe_run_housekeeping(void)
 {
 	u64 now = scx_bpf_now();
@@ -852,17 +881,6 @@ static __always_inline void maybe_run_housekeeping(void)
 
 	u64 delta = (last && now > last) ? (now - last) : HOUSEKEEPING_INTERVAL_NS;
 	last_housekeeping_ns = now;
-
-	/* OPTIMIZATION: Batch input window decay in housekeeping instead of per-wakeup.
-	 * Previously called 158k times/sec (92k select_cpu + 66k enqueue).
-	 * Now called ~200 times/sec in housekeeping.
-	 * Savings: ~158k time checks/sec = ~0.79-1.58M ns/sec = ~0.08-0.16% CPU
-	 * 
-	 * Input latency: UNCHANGED - this is window DECAY (cleanup), not activation.
-	 * Input activation happens immediately via trigger_input_window() from userspace.
-	 * Decay granularity of ~4.35ms is fine (input windows are typically 5-10ms).
-	 */
-	maybe_decay_input_windows(now);
 
 	accumulate_window_activity(delta, now);
 	refresh_keyboard_lane(now);
@@ -4224,17 +4242,29 @@ void BPF_STRUCT_OPS(gamer_dispatch, s32 cpu, struct task_struct *prev)
 	PROF_START_HIST(dispatch);
 	
 	/* DISPATCH COALESCING: Use counter-based sampling instead of time checks.
-	 * Eliminates ~1.88M scx_bpf_now() calls/sec (940k dispatch/sec × 2 checks).
+	 * Eliminates ~1.88M scx_bpf_now() calls/sec (940k dispatch/sec × 3 checks).
 	 * Savings: ~0.94-1.88% CPU (5-10ns per time check × 1.88M calls).
 	 * 
 	 * Counter approach: Check modulo instead of time delta.
 	 * - Faster: Bitwise AND (~1ns) vs scx_bpf_now() call (~5-10ns)
 	 * - Adaptive: Automatically adjusts to actual dispatch frequency
 	 * - No false positives: Exact call-count-based triggering
+	 * 
+	 * CRITICAL: Input decay is FAST (1024 intervals) to ensure boost windows
+	 * expire on time (6ms mouse boost needs <6ms decay granularity).
+	 * Housekeeping is SLOW (16384 intervals) for non-critical background work.
 	 */
 	if (should_sample_cpu_util())
 		maybe_sample_cpu_util();
 	
+	/* FAST PATH: Input window decay (every ~1024 dispatches = ~1-1.3ms)
+	 * This ensures mouse boost (6ms) and input window (8ms) expire correctly.
+	 * Previously coupled with housekeeping (21ms) causing 3.5x overshoot. */
+	if (should_decay_input_windows())
+		maybe_decay_input_windows_fast();
+	
+	/* SLOW PATH: Non-input housekeeping (every ~16384 dispatches = ~21ms)
+	 * Stats, foreground sync, etc. Can be pushed to 8x/16x for more savings. */
 	if (should_run_housekeeping())
 		maybe_run_housekeeping();
 	

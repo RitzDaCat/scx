@@ -31,13 +31,15 @@
 
 /* Coalescing intervals (call counts, not time) */
 #define UTIL_SAMPLE_EVERY     2048   /* Power of 2 for fast modulo (bitwise AND) */
-#define HOUSEKEEPING_EVERY    16384  /* Power of 2 for fast modulo */
+#define INPUT_DECAY_EVERY     1024   /* Input window decay (CRITICAL for input responsiveness) */
+#define HOUSEKEEPING_EVERY    16384  /* Non-input housekeeping (stats, fg sync, etc.) */
 #define CLASSIFICATION_CHECK_EVERY 1024 /* Check classification refresh every 1024 runnable calls */
 
 /* Per-CPU dispatch call counters (avoid atomic contention) */
 struct dispatch_coalesce_ctx {
 	u32 dispatch_call_count;         /* Incremented on every dispatch */
 	u32 util_sample_calls;           /* Calls since last util sample */
+	u32 input_decay_calls;           /* Calls since last input window decay */
 	u32 housekeeping_calls;          /* Calls since last housekeeping */
 	u32 runnable_call_count;         /* Incremented on every runnable */
 };
@@ -79,10 +81,49 @@ static __always_inline bool should_sample_cpu_util(void)
 }
 
 /**
- * should_run_housekeeping - Counter-based coalescing for housekeeping tasks
+ * should_decay_input_windows - Counter-based coalescing for input window decay
+ * 
+ * Returns true every ~1024 dispatch calls (adaptive to actual dispatch rate).
+ * This maintains ~1-1.3ms decay checks to ensure input boost windows expire on time.
+ * 
+ * CRITICAL: This is FAST on purpose to match input window durations (6-8ms).
+ * Mouse boost = 6ms, so we need sub-6ms decay granularity.
+ * 
+ * At Palworld's 779k dispatch/sec: 1024 calls = ~1.3ms
+ * At Arc Raiders' 144k dispatch/sec: 1024 calls = ~7ms (still acceptable)
+ * 
+ * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
+ * Savings: ~779k scx_bpf_now() calls/sec eliminated = ~3.9-7.8 million ns/sec
+ */
+static __always_inline bool should_decay_input_windows(void)
+{
+	const u32 idx = 0;
+	struct dispatch_coalesce_ctx *ctx = bpf_map_lookup_elem(&dispatch_coalesce_stor, &idx);
+	if (!ctx)
+		return false;  /* Fallback: skip if map lookup fails */
+	
+	ctx->input_decay_calls++;
+	
+	/* TIER 0: Bitwise AND for modulo (faster than % operator) */
+	if ((ctx->input_decay_calls & (INPUT_DECAY_EVERY - 1)) == 0) {
+		ctx->input_decay_calls = 0;  /* Reset counter */
+		return true;
+	}
+	
+	return false;
+}
+
+/**
+ * should_run_housekeeping - Counter-based coalescing for non-input housekeeping
  * 
  * Returns true every ~16384 dispatch calls (adaptive to actual dispatch rate).
  * This maintains ~20ms housekeeping rate at 940k dispatch/sec without calling scx_bpf_now().
+ * 
+ * Handles non-critical background tasks:
+ * - Window activity accumulation (for stats)
+ * - Keyboard lane refresh (300ms window, 20ms check is fine)
+ * - Foreground process sync (not latency-critical)
+ * - Stats aggregation (diagnostic only)
  * 
  * TIER 0: Modulo operation on per-CPU counter (~1-2ns vs 5-10ns for scx_bpf_now())
  * Savings: ~940k scx_bpf_now() calls/sec eliminated = ~4.7-9.4 million ns/sec
