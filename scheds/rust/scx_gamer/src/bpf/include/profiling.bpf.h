@@ -14,6 +14,7 @@
 
 #include "config.bpf.h"
 #include "stats.bpf.h"
+#include "coalesce.bpf.h"  /* For should_profile() coalescing */
 
 #ifdef ENABLE_PROFILING
 
@@ -72,7 +73,7 @@ extern volatile u64 prof_pick_idle_calls;
  */
 #define PROF_START(name) \
 	u64 __prof_##name##_start = 0; \
-	if (likely(!no_stats)) __prof_##name##_start = scx_bpf_now()
+	if (likely(!no_stats) && should_profile()) __prof_##name##_start = scx_bpf_now()
 
 /**
  * PROF_END - End profiling measurement and record
@@ -169,7 +170,7 @@ static __always_inline u32 ns_to_bucket(u64 ns)
  */
 #define PROF_START_HIST(name) \
 	u64 __prof_##name##_start = 0; \
-	if (likely(!no_stats)) __prof_##name##_start = scx_bpf_now()
+	if (likely(!no_stats) && should_profile()) __prof_##name##_start = scx_bpf_now()
 
 /**
  * PROF_END_HIST - End profiling and record in histogram
