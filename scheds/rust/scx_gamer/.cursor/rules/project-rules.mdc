@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+You do not have sudo access in the environment
+You must ask for permission and get a response to build new documentation.
+You do not need permission to update existing documentation such as error.md or readme.
+Do not use emojis in documentation.
+Emojis are acceptable in user conversation but only for green checkmark or red x or yellow warning. Do
+not use obsessive emojis
