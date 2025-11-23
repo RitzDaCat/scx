@@ -2491,6 +2491,9 @@ static __always_inline bool device_profile_lookup(u16 vendor, u16 product, u8 *l
         case 0x3710: /* Pulsar Gaming */
             *lane_hint = INPUT_LANE_MOUSE; /* Default to mouse, userspace will refine */
             return true;
+        case 0x3367: /* Endgame Gear Gaming */
+            *lane_hint = INPUT_LANE_MOUSE; /* XM2 8k and other high-performance mice */
+            return true;
         case 0x31e3: /* Wooting Gaming Keyboards */
             *lane_hint = INPUT_LANE_KEYBOARD;
             return true;
