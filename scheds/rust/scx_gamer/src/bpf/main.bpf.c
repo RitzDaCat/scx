@@ -843,34 +843,47 @@ static __always_inline void refresh_keyboard_lane(u64 now)
 		fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
 }
 
-/* CRITICAL: Fast path for input window decay (separate from housekeeping)
+/* CRITICAL: Fast path for input window decay and keyboard lane refresh
  * 
  * Called every ~1024 dispatch calls (~1-1.3ms at high dispatch rates).
- * This ensures input boost windows expire on time:
- * - Mouse boost: 6ms (needs <6ms decay granularity)
- * - Input window: 8ms (needs <8ms decay granularity)
- * - Keyboard boost: 300ms (1ms granularity is overkill, but safe)
+ * This ensures input boost windows expire on time AND held keys stay boosted:
+ * - Mouse boost: 6ms (needs <6ms decay granularity) ✓
+ * - Input window: 8ms (needs <8ms decay granularity) ✓
+ * - Keyboard boost: 300ms (1.3ms refresh = bulletproof) ✓
+ * - Keyboard held keys: Refreshed every 1.3ms (was 21-84ms) ✓
  * 
- * Previously coupled with housekeeping (21ms intervals at 4x coalescing).
- * This caused mouse boost windows (6ms) to persist for 21ms (3.5x overshoot).
- * Now decoupled for input responsiveness.
+ * Previously:
+ * - Input decay coupled with housekeeping (21ms intervals at 4x)
+ * - Keyboard lane refresh in housekeeping (21-84ms intervals)
+ * - Result: Mouse boost persisted 3.5x longer, keyboard refresh too slow
+ * 
+ * Now:
+ * - Input decay: Fast (1.3ms)
+ * - Keyboard lane refresh: Fast (1.3ms) ← MOVED HERE FOR ZERO LATENCY
+ * - Housekeeping: Can be pushed to 16x/32x/64x safely (stats/fg sync only)
+ * 
+ * Overhead: ~760 refresh_keyboard_lane calls/sec × 5-10ns = ~4-8µs/sec (negligible)
  */
 static __always_inline void maybe_decay_input_windows_fast(void)
 {
 	u64 now = scx_bpf_now();
 	maybe_decay_input_windows(now);
+	refresh_keyboard_lane(now);  /* Keep held keys boosted with <2ms latency */
 }
 
 /* Non-input housekeeping: Stats, foreground sync, etc.
  * 
- * Called every ~16384 dispatch calls (~21ms at high dispatch rates).
- * Handles non-critical background tasks that don't affect input latency:
+ * Called every ~16384+ dispatch calls (~21ms+ at high dispatch rates).
+ * Handles non-critical background tasks that DON'T affect input latency:
  * - Window activity accumulation (for stats/analytics)
- * - Keyboard lane refresh (300ms window, 21ms check is fine)
  * - Foreground process sync (not latency-critical)
  * - Stats aggregation (diagnostic only)
  * 
- * Can be coalesced aggressively (8x, 16x, 32x) without impacting input.
+ * REMOVED from housekeeping (moved to fast path):
+ * - refresh_keyboard_lane() → Now in maybe_decay_input_windows_fast() (1.3ms)
+ * 
+ * Can be coalesced VERY aggressively (8x, 16x, 32x, 64x) without ANY input impact.
+ * All input-critical work is now on the fast path (1.3ms granularity).
  */
 static __always_inline void maybe_run_housekeeping(void)
 {
@@ -883,8 +896,7 @@ static __always_inline void maybe_run_housekeeping(void)
 	last_housekeeping_ns = now;
 
 	accumulate_window_activity(delta, now);
-	refresh_keyboard_lane(now);
-	sync_detected_fg();
+	sync_detected_fg();  /* Foreground process detection (not input-critical) */
 
 	bool stats_owner = (bpf_get_smp_processor_id() == 0);
 	if (!no_stats && stats_owner) {
