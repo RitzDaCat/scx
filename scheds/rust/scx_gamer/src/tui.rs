@@ -109,7 +109,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-use crate::process_monitor::find_obs_pid;
 use crate::stats::Metrics;
 use crate::Opts;
 
@@ -544,8 +543,8 @@ impl Default for ConfigSummary {
 
 impl TuiState {
     pub fn new(config: ConfigSummary, history_len: usize, event_capacity: usize) -> Self {
-        // Try to find OBS PID
-        let obs_pid = find_obs_pid();
+        // OBS detection disabled (process_monitor.rs removed for esports focus)
+        let obs_pid = None;
 
         Self {
             paused: false,
@@ -741,6 +740,49 @@ fn render_health_check(f: &mut Frame, area: Rect, metrics: &Metrics, _state: &Tu
                 },
             ),
         ]),
+        // Frame Timing (Per-Monitor)
+        {
+            let frame_timing_active = metrics.frame_interval_ns > 0;
+            let fps = if metrics.frame_interval_ns > 0 {
+                1_000_000_000.0 / metrics.frame_interval_ns as f64
+            } else {
+                0.0
+            };
+            let primary_fps = metrics.primary_crtc_fps_x10 as f64 / 10.0;
+            Line::from(vec![
+                status_icon(frame_timing_active),
+                Span::raw("Frame Timing:  "),
+                Span::styled(
+                    if frame_timing_active {
+                        format!("{:.1}Hz ({:.2}ms)", fps, metrics.frame_interval_ns as f64 / 1_000_000.0)
+                    } else {
+                        "Inactive".to_string()
+                    },
+                    if frame_timing_active {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::raw("    │    "),
+                Span::styled(
+                    "Primary CRTC: ",
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    if metrics.primary_crtc_ptr != 0 {
+                        format!("{:.1}Hz (frames: {})", primary_fps, metrics.frame_count)
+                    } else {
+                        "None".to_string()
+                    },
+                    if metrics.primary_crtc_ptr != 0 {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ])
+        },
     ];
 
     let health_block = Paragraph::new(health_info).block(

@@ -25,7 +25,6 @@ nix = { version = "0.28", default-features = false, features = ["event", "time",
 inotify = "0.10"
 drm = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-zbus = { version = "4.1", default-features = false, features = ["blocking", "async-io"] }
 wayland-client = { version = "0.31", default-features = false }
 wayland-protocols = { version = "0.32", default-features = false, features = ["client", "unstable"] }
 dirs = "5.0"
@@ -55,6 +54,4 @@ wayland-protocols = { version = "0.32", default-features = false, features = ["c
 [features]
 enable_backtrace = []
 full_tui = []
-monitor-nvidia = []
-proc_monitor = ["monitor-nvidia"]
 

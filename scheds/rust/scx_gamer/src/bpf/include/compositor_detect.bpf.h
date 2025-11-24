@@ -70,6 +70,55 @@ volatile u64 compositor_detect_new_threads;  /* New compositor threads discovere
 extern volatile u64 frame_phase_gpu_ns;
 extern volatile u64 frame_phase_cpu_ns;
 extern volatile u64 frame_phase_events;
+
+/*
+ * Per-CRTC Frame Timing (Multi-Monitor Support)
+ *
+ * Tracks frame timing separately for each monitor/CRTC to prevent
+ * secondary monitors (e.g., 60Hz) from influencing primary gaming
+ * monitor timing (e.g., 480Hz VRR).
+ *
+ * PRIMARY CRTC SELECTION:
+ * - Automatically selects CRTC with highest frame rate as primary
+ * - Primary CRTC's timing is used for scheduler frame-aware decisions
+ * - VRR on primary is isolated from fixed-rate secondary monitors
+ *
+ * TIER 0: Struct layout optimized for 64-byte cache line
+ */
+#define MAX_CRTC_COUNT 4  /* Support up to 4 monitors */
+
+struct crtc_frame_timing {
+	u64 last_flip_ns;       /* Timestamp of last frame presentation */
+	u64 frame_interval_ns;  /* Current frame interval (EMA-smoothed) */
+	u64 frame_count;        /* Total frames on this CRTC */
+	u32 recent_fps_x10;     /* FPS × 10 for comparison (e.g., 1440 = 144Hz) */
+	u8  is_primary;         /* 1 if this is the primary gaming monitor */
+	u8  is_active;          /* 1 if CRTC has had recent activity */
+	u16 _pad;               /* Padding for alignment */
+};
+
+/*
+ * BPF Map: Per-CRTC Frame Timing
+ * Key: CRTC pointer (cast to u64 for map key)
+ * Value: crtc_frame_timing
+ *
+ * Max entries: 4 (typical multi-monitor setups have 2-4 displays)
+ * Using LRU to handle dynamic CRTC changes (hotplug, etc.)
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, MAX_CRTC_COUNT);
+	__type(key, u64);   /* CRTC pointer */
+	__type(value, struct crtc_frame_timing);
+} crtc_timing_map SEC(".maps");
+
+/*
+ * Primary CRTC tracking (for fast access without map lookup)
+ * Updated when a new CRTC becomes primary (higher FPS detected)
+ */
+volatile u64 primary_crtc_ptr;           /* Pointer to current primary CRTC */
+volatile u32 primary_crtc_fps_x10;       /* Primary CRTC's FPS × 10 */
+volatile u64 primary_crtc_switch_count;  /* Times primary CRTC changed (debug) */
 extern volatile u64 frame_phase_gpu_dominant;
 extern volatile u64 frame_phase_cpu_dominant;
 
@@ -222,22 +271,177 @@ int BPF_PROG(detect_compositor_mode_set, struct drm_device *dev,
 }
 
 /**
- * detect_compositor_plane_set - Compositor plane operations detection
+ * Frame timing tracking for VRR and high refresh rate monitors
+ *
+ * VRR SUPPORT: Frame intervals vary dynamically (e.g., 60-144Hz range)
+ * We use a fast-adapting EMA (1/4 weight) to track actual frame timing.
+ *
+ * HIGH REFRESH RATE: 480Hz = 2.08ms frames, 240Hz = 4.17ms frames
+ * Accurate timing is critical for frame-aware deadline scheduling.
+ *
+ * VALID RANGE: 1.5ms (666Hz) to 50ms (20Hz)
+ * - Below 1.5ms: Likely duplicate/spurious events, ignore
+ * - Above 50ms: Likely mode switch or pause, ignore
+ *
+ * MULTI-MONITOR: Per-CRTC tracking prevents secondary monitors from
+ * influencing primary gaming monitor's frame timing.
+ *
+ * These are declared extern as they're defined in main.bpf.c
+ */
+extern volatile u64 last_page_flip_ns;
+extern volatile u64 frame_interval_ns;
+extern volatile u64 frame_count;
+
+/**
+ * update_crtc_timing - Per-CRTC frame timing with primary monitor selection
+ * @crtc: DRM CRTC pointer (identifies monitor)
+ * @now: Current timestamp
+ *
+ * MULTI-MONITOR STRATEGY:
+ * 1. Track frame timing separately for each CRTC
+ * 2. Calculate FPS for each CRTC
+ * 3. CRTC with highest FPS becomes "primary" (gaming monitor)
+ * 4. Only primary CRTC's timing affects scheduler decisions
+ *
+ * This ensures:
+ * - 480Hz gaming monitor is not influenced by 60Hz secondary
+ * - VRR transitions on gaming monitor are isolated
+ * - Secondary monitor can run at any refresh rate without impact
+ *
+ * TIER 1: Map lookup + update (~50-150ns)
+ */
+static __always_inline void update_crtc_timing(struct drm_crtc *crtc, u64 now)
+{
+	/* Use CRTC pointer as unique key */
+	u64 crtc_key = (u64)crtc;
+	if (unlikely(crtc_key == 0))
+		return;
+
+	/* Lookup or create per-CRTC timing entry */
+	struct crtc_frame_timing *timing = bpf_map_lookup_elem(&crtc_timing_map, &crtc_key);
+	struct crtc_frame_timing new_timing = {};
+
+	if (!timing) {
+		/* New CRTC - initialize timing entry */
+		new_timing.last_flip_ns = now;
+		new_timing.frame_interval_ns = 0;
+		new_timing.frame_count = 1;
+		new_timing.recent_fps_x10 = 0;
+		new_timing.is_primary = 0;
+		new_timing.is_active = 1;
+		bpf_map_update_elem(&crtc_timing_map, &crtc_key, &new_timing, BPF_ANY);
+		return;
+	}
+
+	/* Calculate interval since last frame on THIS CRTC */
+	u64 prev_flip = timing->last_flip_ns;
+	u64 interval = now - prev_flip;
+
+	/* Valid frame interval range: 1.5ms (666Hz) to 50ms (20Hz) */
+	if (interval >= 1500000ULL && interval <= 50000000ULL) {
+		u64 current_interval = timing->frame_interval_ns;
+
+		if (unlikely(current_interval == 0)) {
+			/* First valid interval: initialize directly */
+			timing->frame_interval_ns = interval;
+		} else {
+			/* VRR-ADAPTIVE EMA: 1/4 weight for fast response
+			 * new_interval = (3 * old + 1 * new) / 4
+			 * Converges in ~4 frames to new rate */
+			timing->frame_interval_ns = (current_interval * 3 + interval) >> 2;
+		}
+
+		/* Calculate FPS × 10 for comparison (avoids floating point)
+		 * FPS = 1_000_000_000 / interval_ns
+		 * FPS × 10 = 10_000_000_000 / interval_ns */
+		u32 new_fps_x10 = 0;
+		if (timing->frame_interval_ns > 0) {
+			new_fps_x10 = (u32)(10000000000ULL / timing->frame_interval_ns);
+		}
+		timing->recent_fps_x10 = new_fps_x10;
+
+		/* PRIMARY CRTC SELECTION: Highest FPS wins
+		 *
+		 * Gaming monitor typically has highest refresh rate:
+		 * - 480Hz gaming = 4800 FPS×10
+		 * - 240Hz gaming = 2400 FPS×10
+		 * - 144Hz VRR = 480-1440 FPS×10 (variable)
+		 * - 60Hz secondary = 600 FPS×10
+		 *
+		 * Hysteresis: Only switch primary if new CRTC is 10% faster
+		 * This prevents oscillation during VRR rate changes
+		 */
+		u32 current_primary_fps = primary_crtc_fps_x10;
+		u64 current_primary_crtc = primary_crtc_ptr;
+
+		bool should_become_primary = false;
+
+		if (current_primary_crtc == 0) {
+			/* No primary yet - this becomes primary */
+			should_become_primary = true;
+		} else if (crtc_key == current_primary_crtc) {
+			/* Already primary - update FPS tracking */
+			primary_crtc_fps_x10 = new_fps_x10;
+		} else if (new_fps_x10 > (current_primary_fps * 11 / 10)) {
+			/* New CRTC is >10% faster than current primary - switch */
+			should_become_primary = true;
+		}
+
+		if (should_become_primary) {
+			/* Demote old primary */
+			if (current_primary_crtc != 0 && current_primary_crtc != crtc_key) {
+				struct crtc_frame_timing *old_primary = 
+					bpf_map_lookup_elem(&crtc_timing_map, &current_primary_crtc);
+				if (old_primary)
+					old_primary->is_primary = 0;
+			}
+
+			/* Promote this CRTC to primary */
+			timing->is_primary = 1;
+			primary_crtc_ptr = crtc_key;
+			primary_crtc_fps_x10 = new_fps_x10;
+			__atomic_fetch_add(&primary_crtc_switch_count, 1, __ATOMIC_RELAXED);
+		}
+
+		/* UPDATE GLOBAL TIMING: Only if this is the primary CRTC
+		 * This isolates scheduler from secondary monitor timing */
+		if (crtc_key == primary_crtc_ptr || timing->is_primary) {
+			last_page_flip_ns = now;
+			frame_interval_ns = timing->frame_interval_ns;
+		}
+	}
+
+	/* Always update timestamp and frame count */
+	timing->last_flip_ns = now;
+	timing->frame_count++;
+	timing->is_active = 1;
+}
+
+/**
+ * detect_compositor_plane_set - Compositor plane operations + per-CRTC frame timing
  *
  * fentry/drm_mode_setplane: Compositor plane operations detection
  *
  * This hooks the DRM plane setting function used for compositor operations.
- * Fires on EVERY plane update, so we must be fast.
+ * Fires on EVERY frame presentation, providing accurate VRR timing.
+ *
+ * MULTI-MONITOR SUPPORT:
+ * - Tracks frame timing separately for each CRTC (monitor)
+ * - Automatically selects highest-FPS monitor as "primary"
+ * - Only primary monitor's timing affects scheduler decisions
+ * - Secondary monitors (60Hz desktop, etc.) don't influence gaming
  *
  * TIER 1: Optimized for high-frequency fentry hook
+ * - Timestamp: Tier 0/1 (~10-15ns, bpf_ktime_get_ns)
  * - PID lookup: Tier 0 (~1-2ns, bpf_get_current_pid_tgid)
  * - Atomic counter: Tier 0 (~1-2ns)
+ * - Per-CRTC timing: Tier 1 (~50-150ns, map lookup + update)
  * - Thread registration: Tier 1 (~160-315ns for new, ~60-115ns for existing)
- * - Total: ~162-319ns (new thread) or ~62-119ns (existing thread)
+ * - Total: ~223-485ns (new thread/CRTC) or ~123-285ns (existing)
  *
  * Critical path: NO (only affects compositor threads, not scheduler)
- * Frequency: 60-240 calls/sec (matches frame rate)
- * Net overhead: ~3.7-76.6μs/sec (acceptable for compositor detection)
+ * Frequency: 60-480+ calls/sec per monitor
+ * Net overhead: ~7.4-137μs/sec per monitor (acceptable)
  *
  * NOTE: This may not work on all kernels if drm_mode_setplane is not exported.
  *       If attachment fails, we gracefully degrade to name-based detection.
@@ -249,11 +453,21 @@ int BPF_PROG(detect_compositor_plane_set, struct drm_device *dev,
              uint32_t crtc_w, uint32_t crtc_h, uint32_t src_x, uint32_t src_y,
              uint32_t src_w, uint32_t src_h)
 {
+	/* TIER 0: Get timestamp FIRST for accurate frame timing */
+	u64 now = bpf_ktime_get_ns();
+
 	/* TIER 0: Get current thread ID (fast, no syscall) */
 	u32 tid = bpf_get_current_pid_tgid();
 
 	/* TIER 0: Track statistics (atomic increment, ~1-2ns) */
 	__atomic_fetch_add(&compositor_detect_plane_calls, 1, __ATOMIC_RELAXED);
+
+	/* TIER 1: Per-CRTC frame timing with primary monitor selection
+	 * This ensures secondary monitors don't influence gaming monitor timing */
+	update_crtc_timing(crtc, now);
+
+	/* Increment global frame counter (all monitors) */
+	__atomic_fetch_add(&frame_count, 1, __ATOMIC_RELAXED);
 
 	/* TIER 1: Register this thread as compositor thread */
 	register_compositor_thread(tid, COMPOSITOR_TYPE_UNKNOWN);

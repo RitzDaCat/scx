@@ -16,39 +16,22 @@ pub use bpf_intf::*;
 
 mod affinity_override; // CPU affinity override system (proactive)
 mod audio_detect;
-mod cpu_detect;
 mod debug_api;
 mod engine_presets;
 mod game_detect;
 mod game_detect_bpf; // BPF LSM-based game detection (modern, kernel-level)
 mod gpu_queue_monitor;
-mod ml_autotune;
-mod ml_bayesian;
-mod ml_collect;
-mod ml_profiles;
-mod ml_scoring;
 mod power_monitor;
-mod process_monitor;
 mod ring_buffer;
 mod stats;
 mod trigger;
 mod tui;
-// Thread learning modules removed - experimental, not production-ready
-// mod thread_patterns;
-// mod thread_sampler;
-use crate::cpu_detect::CpuInfo;
 use crate::engine_presets::seed_engine_presets;
 use crate::game_detect::GameDetector;
 use crate::game_detect_bpf::BpfGameDetector;
 use crate::gpu_queue_monitor::{monotonic_nanos, GpuQueueMonitor};
-use crate::ml_autotune::MLAutotuner;
-use crate::ml_collect::MLCollector;
-use crate::ml_profiles::ProfileManager;
 use crate::power_monitor::{PowerHint, PowerMonitor};
 use crate::trigger::TriggerOps;
-// Thread learning removed:
-// use crate::thread_patterns::ThreadPatternManager;
-// use crate::thread_sampler::ThreadSampler;
 use rustc_hash::FxHashSet;
 use std::ffi::c_int;
 // removed: userspace /proc/stat util sampling
@@ -76,12 +59,11 @@ use libc::{
     sched_attr, sched_param, sched_setscheduler, SCHED_DEADLINE, SCHED_FIFO, SCHED_FLAG_DL_OVERRUN,
     SCHED_OTHER,
 };
-use log::{debug, info, warn};
+use log::{info, warn};
 use nix::fcntl;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
 use nix::unistd::Pid;
-use once_cell::sync::Lazy;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -112,21 +94,6 @@ fn stats_interval_from_secs(value: f64) -> Option<Duration> {
         Some(Duration::from_secs_f64(value))
     }
 }
-
-// Cache CPU detection to avoid repeated /proc/cpuinfo reads
-// Gracefully handle detection failures with default fallback
-static CPU_INFO: Lazy<CpuInfo> = Lazy::new(|| {
-    CpuInfo::detect().unwrap_or_else(|e| {
-        warn!(
-            "CPU detection failed: {}, using defaults. ML autotune will use generic profile.",
-            e
-        );
-        CpuInfo {
-            model_name: "Unknown CPU".to_string(),
-            safe_name: "Unknown_CPU".to_string(),
-        }
-    })
-});
 
 // ZERO-LATENCY MODE: No gap debouncing - removed entirely
 // All input events trigger immediately for competitive gaming
@@ -446,47 +413,6 @@ struct Opts {
     #[clap(long, default_value = "1000")]
     deadline_period_us: u64,
 
-    /// Enable ML data collection (samples saved to ~/.scx_gamer/ml_data/)
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    ml_collect: bool,
-
-    /// ML sample interval in seconds (default: 5s)
-    #[clap(long, default_value = "5.0")]
-    ml_sample_interval: f64,
-
-    /// Export ML training data to CSV and exit
-    #[clap(long)]
-    ml_export_csv: Option<String>,
-
-    /// Show best config for a game and exit
-    #[clap(long)]
-    ml_show_best: Option<String>,
-
-    /// Enable automated parameter tuning (learning mode)
-    /// The scheduler will automatically try different configurations and find the optimal one
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    ml_autotune: bool,
-
-    /// Duration per trial in autotune mode (seconds)
-    #[clap(long, default_value = "120")]
-    ml_autotune_trial_duration: u64,
-
-    /// Maximum total autotune session duration (seconds)
-    #[clap(long, default_value = "900")]
-    ml_autotune_max_duration: u64,
-
-    /// Use Bayesian optimization instead of grid search (faster convergence)
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    ml_bayesian: bool,
-
-    /// Enable per-game profiles (auto-load best config for detected games)
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    ml_profiles: bool,
-
-    /// List all saved game profiles and exit
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    ml_list_profiles: bool,
-
     /// Disable BPF stats collection (reduces overhead by ~0.6-1.2%)
     /// When enabled, per-CPU classification stats are not collected
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -517,10 +443,6 @@ struct Scheduler<'a> {
     input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane),
     bpf_game_detector: Option<BpfGameDetector>, // BPF LSM game detection (kernel-level, preferred)
     game_detector: Option<GameDetector>,        // Fallback inotify detection (if BPF unavailable)
-    ml_collector: Option<MLCollector>,          // ML data collection for per-game tuning
-    ml_autotuner: Option<MLAutotuner>,          // Automated parameter exploration
-    profile_manager: Option<ProfileManager>,    // Per-game config profiles
-    last_detected_game: String,                 // Track game changes for profile loading
     input_ring_buffer: Option<ring_buffer::InputRingBufferManager>, // Interrupt-driven ring buffer for ultra-low latency input
     dispatch_event_ringbuf: Option<libbpf_rs::RingBuffer<'a>>, // Event-driven dispatch events for watchdog (eliminates polling)
     debug_api_state: Option<Arc<debug_api::DebugApiState>>, // Debug API state for external metric access
@@ -1689,89 +1611,6 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Initialize ML autotuner if enabled
-        let ml_autotuner = if opts.ml_autotune {
-            let baseline_config = opts_to_ml_config(opts);
-            let trial_duration = Duration::from_secs(opts.ml_autotune_trial_duration);
-            let max_duration = Duration::from_secs(opts.ml_autotune_max_duration);
-
-            info!(
-                "ML Autotune: Enabled (trial: {}s, max: {}s)",
-                opts.ml_autotune_trial_duration, opts.ml_autotune_max_duration
-            );
-
-            if opts.ml_bayesian {
-                info!("ML Autotune: Using Bayesian optimization (faster convergence)");
-                Some(MLAutotuner::new_bayesian(
-                    baseline_config,
-                    trial_duration,
-                    max_duration,
-                ))
-            } else {
-                info!("ML Autotune: Using grid search");
-                Some(MLAutotuner::new_grid_search(
-                    baseline_config,
-                    trial_duration,
-                    max_duration,
-                ))
-            }
-        } else {
-            None
-        };
-
-        // Initialize ML collector if enabled (or auto-enabled by autotune)
-        let ml_collector = if opts.ml_collect || opts.ml_autotune {
-            // Use cached CPU detection for hardware-specific training data
-            let cpu_id = CPU_INFO.short_id();
-
-            // Use project-relative path for git-committable training data
-            // Structure: ./ml_data/{cpu_model}/{game}.json
-            let ml_dir = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join("ml_data")
-                .join(&cpu_id);
-
-            let config = opts_to_ml_config(opts);
-            let interval = Duration::from_secs_f64(opts.ml_sample_interval);
-
-            if opts.ml_autotune {
-                info!("ML: Data collection auto-enabled for autotune mode");
-            } else {
-                info!(
-                    "ML: Data collection enabled (interval: {:.1}s)",
-                    opts.ml_sample_interval
-                );
-            }
-            info!("ML: CPU detected: {} ({})", CPU_INFO.model_name, cpu_id);
-            info!("ML: Training data: {}", ml_dir.display());
-
-            Some(MLCollector::new(ml_dir, config, interval)?)
-        } else {
-            None
-        };
-
-        // Initialize profile manager if enabled
-        let profile_manager = if opts.ml_profiles || opts.ml_autotune {
-            // Use cached CPU detection for hardware-specific profiles
-            let cpu_id = CPU_INFO.short_id();
-
-            // Use project-relative path: ./ml_data/{cpu_model}/profiles/
-            let profiles_dir = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join("ml_data")
-                .join(&cpu_id)
-                .join("profiles");
-
-            info!("Profile: Enabled for {} ({})", CPU_INFO.model_name, cpu_id);
-            info!("Profile: Storage: {}", profiles_dir.display());
-            Some(ProfileManager::new(profiles_dir)?)
-        } else {
-            None
-        };
-
-        // Thread learning feature removed - experimental, not production-ready
-        // If needed in future, restore from git history
-
         // Select input trigger function at init time based on prefer_napi_on_input flag
         // This avoids runtime branching on every input event (saves 10-20ns per event)
         let input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane) =
@@ -1849,10 +1688,6 @@ impl<'a> Scheduler<'a> {
             input_trigger_fn,
             bpf_game_detector,
             game_detector: game_detector_fallback,
-            ml_collector,
-            ml_autotuner,
-            profile_manager,
-            last_detected_game: String::new(),
             input_ring_buffer,
             dispatch_event_ringbuf: None, // Initialized after epoll setup
             debug_api_state: None,        // Injected from main() if enabled
@@ -2260,6 +2095,12 @@ impl<'a> Scheduler<'a> {
             frame_interval_ns: bss.frame_interval_ns,
             frame_count: bss.frame_count,
             last_page_flip_ns: bss.last_page_flip_ns,
+
+            // P2: Per-CRTC Frame Timing (Multi-Monitor)
+            primary_crtc_ptr: bss.primary_crtc_ptr,
+            primary_crtc_fps_x10: bss.primary_crtc_fps_x10,
+            primary_crtc_switch_count: bss.primary_crtc_switch_count,
+            compositor_plane_calls: bss.compositor_detect_plane_calls,
 
             // AI Analytics: Latency Percentiles (from histograms)
             select_cpu_latency_p10: Metrics::histogram_percentile(&bss.hist_select_cpu, 10.0),
@@ -3114,40 +2955,6 @@ impl<'a> Scheduler<'a> {
             while stats_request_rx.try_recv().is_ok() {
                 let metrics = self.get_metrics();
 
-                let game_info = self
-                    .get_detected_game_info()
-                    .map(|g| ml_collect::GameInfo {
-                        tgid: g.tgid,
-                        name: g.name,
-                        is_wine: g.is_wine,
-                        is_steam: g.is_steam,
-                    })
-                    .unwrap_or_else(|| ml_collect::GameInfo {
-                        tgid: 0,
-                        name: "system".to_string(),
-                        is_wine: false,
-                        is_steam: false,
-                    });
-
-                if let Some(ref mut autotuner) = self.ml_autotuner {
-                    let sample = ml_collect::PerformanceSample {
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_else(|_| Duration::ZERO)
-                            .as_secs(),
-                        config: opts_to_ml_config(self.opts),
-                        metrics: ml_collect::MLCollector::convert_metrics_static(&metrics),
-                        game: game_info,
-                    };
-                    autotuner.record_sample(sample);
-                }
-
-                if let Some(ref mut ml) = self.ml_collector {
-                    if let Err(e) = ml.record_sample(&metrics) {
-                        warn!("ML: Failed to record sample: {}", e);
-                    }
-                }
-
                 // Update debug API state if enabled
                 // PERF: Pass reference to avoid clone - update_metrics clones internally and wraps in Arc
                 // This is still better than double-cloning (one for API, one for stats)
@@ -3213,51 +3020,19 @@ impl<'a> Scheduler<'a> {
                         self.clear_tracked_game_threads();
                     }
 
-                    // Update ML collector with new game
-                    let game_info_for_ml = self.get_detected_game_info().map(|g| {
+                    // Log detected game for debugging
+                    if let Some(game_info) = self.get_detected_game_info() {
                         info!(
-                            "ML: Detected game '{}' (tgid: {}, wine: {}, steam: {})",
-                            g.name, g.tgid, g.is_wine, g.is_steam
+                            "Game detected: '{}' (tgid: {}, wine: {}, steam: {})",
+                            game_info.name, game_info.tgid, game_info.is_wine, game_info.is_steam
                         );
-                        ml_collect::GameInfo {
-                            tgid: g.tgid,
-                            name: g.name.clone(),
-                            is_wine: g.is_wine,
-                            is_steam: g.is_steam,
-                        }
-                    });
-                    if let Some(ref mut ml) = self.ml_collector {
-                        ml.set_game(game_info_for_ml);
                     }
+                }
 
-                    // Auto-load profile for detected game
-                    if let Some(ref game_info) = self.get_detected_game_info() {
-                        if self.last_detected_game != game_info.name {
-                            self.last_detected_game = game_info.name.clone();
-
-                            if let Some(ref manager) = self.profile_manager {
-                                if let Some(profile) = manager.get_profile(&game_info.name) {
-                                    info!(
-                                        "Profile: Auto-loading '{}' (score: {:.2}, FPS: {:.1})",
-                                        game_info.name, profile.best_score, profile.avg_fps
-                                    );
-
-                                    // Apply the saved config
-                                    if let Err(e) = ml_autotune::apply_config_hot(
-                                        &mut self.skel,
-                                        &profile.best_config,
-                                    ) {
-                                        warn!("Profile: Failed to apply config: {}", e);
-                                    }
-                                } else {
-                                    info!(
-                                        "Profile: No saved config for '{}', using defaults",
-                                        game_info.name
-                                    );
-                                }
-                            }
-                        }
-                    }
+                // Sync game PID to BPF map for exit detection (BPF LSM task_free hook)
+                // This must be called periodically to ensure the kernel knows which PID to track
+                if let Some(ref detector) = self.bpf_game_detector {
+                    detector.sync_to_bpf_map(&self.skel.maps.current_game_map);
                 }
             } // End of rate-limited game detection block
 
@@ -3449,80 +3224,9 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            // ML Autotune: Check if we should switch to next trial
-            if let Some(ref mut autotuner) = self.ml_autotuner {
-                if autotuner.should_switch_trial() {
-                    if let Some(next_config) = autotuner.next_trial() {
-                        // Apply new configuration hot (without restart!)
-                        if let Err(e) = ml_autotune::apply_config_hot(&mut self.skel, &next_config)
-                        {
-                            warn!("ML Autotune: Failed to apply config: {}", e);
-                        }
-
-                        // ML collector updates are handled automatically by autotuner
-                        // No manual intervention needed here
-                    } else {
-                        // Autotune complete! Print final report
-                        let report = autotuner.generate_report();
-                        info!("{}", report);
-
-                        // Optionally: Apply best config and continue running
-                        if let Some((best_config, score)) = autotuner.get_best_config() {
-                            info!("ML Autotune: Applying best config (score: {:.2})", score);
-                            if let Err(e) =
-                                ml_autotune::apply_config_hot(&mut self.skel, &best_config)
-                            {
-                                warn!("ML Autotune: Failed to apply best config: {}", e);
-                            }
-                        }
-
-                        // Clear autotuner to stop further switching
-                        self.ml_autotuner = None;
-                    }
-                }
-            }
-
             // Service any pending stats requests without blocking
             while stats_request_rx.try_recv().is_ok() {
                 let metrics = self.get_metrics();
-
-                // Record ML sample for autotune trial
-                // Get game info before mutable borrow (borrow checker)
-                let game_info = self
-                    .get_detected_game_info()
-                    .map(|g| ml_collect::GameInfo {
-                        tgid: g.tgid,
-                        name: g.name,
-                        is_wine: g.is_wine,
-                        is_steam: g.is_steam,
-                    })
-                    .unwrap_or_else(|| ml_collect::GameInfo {
-                        tgid: 0,
-                        name: "system".to_string(),
-                        is_wine: false,
-                        is_steam: false,
-                    });
-
-                if let Some(ref mut autotuner) = self.ml_autotuner {
-                    let sample = ml_collect::PerformanceSample {
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_else(|_| Duration::ZERO)
-                            .as_secs(),
-                        config: opts_to_ml_config(self.opts),
-                        metrics: ml_collect::MLCollector::convert_metrics_static(&metrics),
-                        game: game_info,
-                    };
-
-                    autotuner.record_sample(sample);
-                }
-
-                // Record ML sample if collector is enabled (before sending to stats)
-                if let Some(ref mut ml) = self.ml_collector {
-                    if let Err(e) = ml.record_sample(&metrics) {
-                        warn!("ML: Failed to record sample: {}", e);
-                    }
-                }
 
                 // Update debug API state if enabled
                 // PERF: Pass reference to avoid clone - update_metrics clones internally and wraps in Arc
@@ -3742,23 +3446,6 @@ impl<'a> Scheduler<'a> {
     }
 }
 
-/// Convert Opts to ML SchedulerConfig (inline for zero-cost abstraction)
-#[inline]
-fn opts_to_ml_config(opts: &Opts) -> ml_collect::SchedulerConfig {
-    ml_collect::SchedulerConfig {
-        slice_us: opts.slice_us,
-        slice_lag_us: opts.slice_lag_us,
-        input_window_us: opts.input_window_us,
-        mig_window_ms: opts.mig_window_ms,
-        mig_max: opts.mig_max,
-        mm_affinity: opts.mm_affinity,
-        avoid_smt: opts.avoid_smt,
-        preferred_idle_scan: opts.preferred_idle_scan,
-        enable_numa: opts.enable_numa,
-        wakeup_timer_us: opts.wakeup_timer_us,
-    }
-}
-
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {SCHEDULER_NAME} scheduler");
@@ -3783,15 +3470,6 @@ impl Drop for Scheduler<'_> {
         self.input_fd_info_vec.clear();
         self.input_devs.clear();
     }
-}
-
-/// Helper to get ML data directory (CPU-specific, project-relative)
-fn get_ml_data_dir() -> Result<std::path::PathBuf> {
-    let cpu_id = CPU_INFO.short_id();
-    Ok(std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join("ml_data")
-        .join(&cpu_id))
 }
 
 fn collect_input_devices(opts: &Opts) -> Vec<String> {
@@ -3820,122 +3498,6 @@ fn main() -> Result<()> {
 
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
-        return Ok(());
-    }
-
-    // List profiles command
-    if opts.ml_list_profiles {
-        let ml_dir = get_ml_data_dir()?;
-        let profiles_dir = ml_dir.join("profiles");
-        let manager = ProfileManager::new(profiles_dir)?;
-
-        let games = manager.list_games();
-        if games.is_empty() {
-            println!("No saved profiles found.");
-        } else {
-            println!("Saved Game Profiles:");
-            println!("═══════════════════════════════════════════════════════════");
-            for game in &games {
-                if let Some(profile) = manager.get_profile(game) {
-                    println!("{}", game);
-                    println!(
-                        "  Score: {:.2}  FPS: {:.1}  Jitter: {:.2}ms  Latency: {}ns",
-                        profile.best_score,
-                        profile.avg_fps,
-                        profile.avg_jitter_ms,
-                        profile.avg_latency_ns
-                    );
-                    println!(
-                        "  Config: --slice-us {} --input-window-us {} --mig-max {}",
-                        profile.best_config.slice_us,
-                        profile.best_config.input_window_us,
-                        profile.best_config.mig_max
-                    );
-                    if profile.best_config.mm_affinity {
-                        println!("    --mm-affinity");
-                    }
-                    if profile.best_config.avoid_smt {
-                        println!("    --avoid-smt");
-                    }
-                    println!();
-                }
-            }
-
-            let summary = manager.get_summary();
-            println!("═══════════════════════════════════════════════════════════");
-            println!(
-                "Total games: {}  Avg score: {:.2}  Avg FPS: {:.1}",
-                summary.total_games, summary.avg_score, summary.avg_fps
-            );
-        }
-        return Ok(());
-    }
-
-    // ML export command: export all collected data to CSV for training
-    if let Some(ref csv_path) = opts.ml_export_csv {
-        let ml_dir = get_ml_data_dir()?;
-        let config = opts_to_ml_config(&opts);
-        let collector = MLCollector::new(
-            ml_dir.clone(),
-            config,
-            Duration::from_secs_f64(opts.ml_sample_interval),
-        )?;
-        collector.export_training_csv(csv_path)?;
-        println!("ML training data exported to: {}", csv_path);
-        println!("Training data from: {}", ml_dir.display());
-        return Ok(());
-    }
-
-    // ML best config command: show best known configuration for a game
-    if let Some(ref game_name) = opts.ml_show_best {
-        let ml_dir = get_ml_data_dir()?;
-        let config = opts_to_ml_config(&opts);
-        let collector = MLCollector::new(
-            ml_dir.clone(),
-            config,
-            Duration::from_secs_f64(opts.ml_sample_interval),
-        )?;
-        let summary = collector.get_game_summary(game_name)?;
-
-        println!("ML Summary for '{}':", game_name);
-        println!("  Samples collected: {}", summary.sample_count);
-        println!("  Avg CPU util: {:.1}%", summary.avg_cpu_util);
-        println!(
-            "  Avg select_cpu latency: {:.0}ns",
-            summary.avg_select_cpu_latency_ns
-        );
-        println!(
-            "  Avg enqueue latency: {:.0}ns",
-            summary.avg_enqueue_latency_ns
-        );
-
-        if let Some(best_cfg) = summary.best_config {
-            println!(
-                "\nBest Configuration (score: {:.2}):",
-                summary.best_score.unwrap_or(0.0)
-            );
-            println!("  --slice-us {}", best_cfg.slice_us);
-            println!("  --slice-lag-us {}", best_cfg.slice_lag_us);
-            println!("  --input-window-us {}", best_cfg.input_window_us);
-            println!("  --mig-window-ms {}", best_cfg.mig_window_ms);
-            println!("  --mig-max {}", best_cfg.mig_max);
-            if best_cfg.mm_affinity {
-                println!("  --mm-affinity");
-            }
-            if best_cfg.avoid_smt {
-                println!("  --avoid-smt");
-            }
-            if best_cfg.preferred_idle_scan {
-                println!("  --preferred-idle-scan");
-            }
-            if best_cfg.enable_numa {
-                println!("  --enable-numa");
-            }
-            println!("  --wakeup-timer-us {}", best_cfg.wakeup_timer_us);
-        } else {
-            println!("\nNo configuration data available yet.");
-        }
-
         return Ok(());
     }
 

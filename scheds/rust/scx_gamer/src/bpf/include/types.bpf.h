@@ -55,6 +55,7 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_save_game:1;		/* Save game thread (game save operations) */
 	u8 is_config_file:1;		/* Config file thread (configuration changes) */
 	u8 is_background:1;		/* Background/batch work */
+	u8 is_compiler:1;		/* Compiler/build tool (cargo, rustc, gcc, clang, etc.) - HEAVY penalty */
 	u8 is_taskgraph_worker:1;	/* Unreal Engine TaskGraph worker thread (UE5.6 DX12) */
 	u8 is_network_counted:1;	/* Flag to ensure network threads are counted only once */
 	u8 is_per_cpu_kthread:1;	/* Per-CPU kernel thread (kworker, ksoftirqd) - cached detection */
@@ -317,6 +318,18 @@ struct {
 	__type(key, u32);   /* TGID */
 	__type(value, u8);  /* GPU vendor */
 } gpu_vendor_by_tgid_map SEC(".maps");
+
+/*
+ * BPF Map: Game Thread Set
+ * Tracks which threads belong to the current game process
+ * Populated by userspace when game is detected
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 2048);
+	__type(key, u32);   /* TID */
+	__type(value, u8);  /* 1 = belongs to game */
+} game_threads_map SEC(".maps");
 
 /* Audio thread classification caches (kernel fentry detection → scheduler fast path)
  * Key: TID (thread id)
