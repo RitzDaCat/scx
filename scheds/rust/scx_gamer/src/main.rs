@@ -842,57 +842,27 @@ impl<'a> Scheduler<'a> {
         irq_to_cpu
     }
 
-    /// Get USB bus number for an input device by parsing sysfs
-    /// Returns bus number (e.g., 1 for Bus 001, 3 for Bus 003)
-    fn get_usb_bus_for_device(dev_path: &Path) -> Option<u32> {
-        use std::fs;
-
-        // /dev/input/eventX → /sys/class/input/eventX
-        let event_name = dev_path.file_name()?.to_str()?;
-        let sysfs_path = format!("/sys/class/input/{}/device", event_name);
-        
-        // Read the 'uevent' file which contains PRODUCT=bus/vendor/product
-        let uevent_path = format!("{}/uevent", sysfs_path);
-        let uevent_content = fs::read_to_string(&uevent_path).ok()?;
-        
-        // Look for HID_UNIQ or PHYS which contains bus number
-        // Format: "usb-0000:0c:00.0-2/input0" → bus 001
-        for line in uevent_content.lines() {
-            if let Some(phys) = line.strip_prefix("PHYS=") {
-                // Extract PCI address from phys string
-                // Format: "usb-0000:0c:00.0-2/input0"
-                if let Some(pci_part) = phys.split("usb-").nth(1) {
-                    if let Some(pci_addr) = pci_part.split('/').next() {
-                        // pci_addr = "0000:0c:00.0-2", extract "0c:00.0"
-                        if let Some(addr_part) = pci_addr.split('-').next() {
-                            // Now we have PCI address, need to map to USB bus
-                            // Read /sys/bus/pci/devices/0000:0c:00.0/usb*/busnum
-                            let pci_dev_path = format!("/sys/bus/pci/devices/{}", addr_part);
-                            if let Ok(entries) = fs::read_dir(&pci_dev_path) {
-                                for entry in entries.flatten() {
-                                    let path = entry.path();
-                                    if path.is_dir() && path.file_name()?.to_str()?.starts_with("usb") {
-                                        let busnum_file = path.join("busnum");
-                                        if let Ok(busnum_str) = fs::read_to_string(&busnum_file) {
-                                            if let Ok(bus) = busnum_str.trim().parse::<u32>() {
-                                                return Some(bus);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
+    /// Extract PCI address from physical device path
+    /// Input: "usb-0000:0c:00.0-2/input0" or just "0000:0c:00.0"
+    /// Output: "0000:0c:00.0"
+    fn extract_pci_address(phys_path: &str) -> Option<String> {
+        // Handle "usb-0000:0c:00.0-2/input0" format
+        if let Some(pci_part) = phys_path.strip_prefix("usb-") {
+            if let Some(addr) = pci_part.split('-').next() {
+                return Some(addr.to_string());
             }
+        }
+        // Handle direct PCI address
+        if phys_path.contains(':') && phys_path.split(':').count() >= 2 {
+            return Some(phys_path.split('-').next()?.to_string());
         }
         None
     }
 
-    /// Map USB bus to IRQ number by parsing /proc/interrupts
-    /// Returns IRQ number for the xHCI controller handling this USB bus
-    fn get_irq_for_usb_bus(_bus_num: u32) -> Option<u32> {
+
+    /// Map PCI address to IRQ number by parsing /proc/interrupts
+    /// Returns IRQ number for the xHCI controller at this PCI address
+    fn get_irq_for_pci_address(pci_addr: &str) -> Option<u32> {
         use std::fs::File;
         use std::io::{BufRead, BufReader};
 
@@ -906,32 +876,29 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            // Extract IRQ number
+            // Check if this line contains our PCI address
+            if !line.contains(pci_addr) {
+                continue;
+            }
+
+            // Extract IRQ number (first field)
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.is_empty() {
                 continue;
             }
 
             let irq_str = parts[0].trim_end_matches(':');
-            let Ok(irq_num) = irq_str.parse::<u32>() else {
-                continue;
-            };
-
-            // Check if this line mentions this bus number
-            // xHCI controllers show up with PCI addresses that we need to match
-            // For now, use heuristic: first active xHCI is bus 1, second is bus 3, etc.
-            // This is a simplified approach - could be improved with PCI address matching
-            
-            // For robustness, we'll return the first active xHCI IRQ for now
-            // This works for most systems where USB bus enumeration is predictable
-            return Some(irq_num);
+            if let Ok(irq_num) = irq_str.parse::<u32>() {
+                return Some(irq_num);
+            }
         }
         None
     }
 
     /// Get CPU hint for input device based on USB IRQ affinity
     /// Returns CPU number that handles USB interrupts for this device
-    fn get_usb_irq_cpu_hint(dev_path: &Path) -> Option<i32> {
+    /// phys_path: Physical device path like "usb-0000:0c:00.0-2/input0"
+    fn get_usb_irq_cpu_hint(phys_path: &str) -> Option<i32> {
         // Step 1: Get IRQ → CPU mapping
         let irq_to_cpu = Self::parse_usb_irq_affinities();
         
@@ -939,11 +906,11 @@ impl<'a> Scheduler<'a> {
             return None;
         }
 
-        // Step 2: Get USB bus for this device
-        let bus_num = Self::get_usb_bus_for_device(dev_path)?;
+        // Step 2: Extract PCI address from physical path
+        let pci_addr = Self::extract_pci_address(phys_path)?;
         
-        // Step 3: Get IRQ for this USB bus
-        let irq_num = Self::get_irq_for_usb_bus(bus_num)?;
+        // Step 3: Get IRQ for this PCI address
+        let irq_num = Self::get_irq_for_pci_address(&pci_addr)?;
         
         // Step 4: Lookup CPU for this IRQ
         irq_to_cpu.get(&irq_num).copied()
@@ -1690,23 +1657,20 @@ impl<'a> Scheduler<'a> {
                 let mut hint_count = 0;
                 
                 for dev in &input_devs {
-                    // Get USB IRQ CPU hint for this device
-                    if let Some(syspath) = dev.physical_path() {
-                        let dev_path = std::path::Path::new(&syspath);
-                        if let Some(cpu_hint) = Self::get_usb_irq_cpu_hint(dev_path) {
-                            // Update BPF map with CPU hint
-                            // We'll need to create a device_cache_entry structure
-                            // For now, just log the hint - BPF map update will be added after struct definition
+                    // Get USB IRQ CPU hint for this device using physical path
+                    if let Some(phys_path) = dev.physical_path() {
+                        if let Some(cpu_hint) = Self::get_usb_irq_cpu_hint(&phys_path) {
                             info!(
-                                "USB IRQ hint: {} (fd={}) → CPU {}",
+                                "USB IRQ hint: {} (phys={}) → CPU {}",
                                 dev.name().unwrap_or("unknown"),
-                                dev.as_raw_fd(),
+                                phys_path,
                                 cpu_hint
                             );
                             hint_count += 1;
                             
-                            // Store hint for later use when updating BPF map
-                            // (BPF map update will be implemented once we have the map accessor)
+                            // TODO: Update BPF device_whitelist_cache map with cpu_hint
+                            // This would require accessing the map and updating the entry
+                            // For now, the BPF side will use global hint updated in input_event_raw
                         }
                     }
                 }
