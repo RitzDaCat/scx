@@ -115,6 +115,9 @@ struct CACHE_ALIGNED task_ctx {
 	u64 audio_latency_ema_ns;	/* EMA of deadline overshoot (nanoseconds) */
 	u64 audio_latency_peak_ns;	/* Decaying peak of recent overshoot (nanoseconds) */
 	u64 task_cookie;		/* Unique lifetime cookie (task_struct start_time) */
+	
+	/* USB IRQ cache locality optimization */
+	u64 input_dev_ptr;		/* Pointer to input device (for USB IRQ CPU hint lookup) */
 
 	/* Deadline miss detection and auto-recovery */
 	u64 expected_deadline;		/* Deadline calculated at enqueue time */
