@@ -30,11 +30,11 @@
  * strip legacy heuristics or high-volume telemetry in lean deployments.
  */
 #ifndef CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY
-#define CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY	1
+#define CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY	0
 #endif
 
 #ifndef CONFIG_GAMER_ENABLE_EXTENDED_STATS
-#define CONFIG_GAMER_ENABLE_EXTENDED_STATS	1
+#define CONFIG_GAMER_ENABLE_EXTENDED_STATS	0
 #endif
 
 /*

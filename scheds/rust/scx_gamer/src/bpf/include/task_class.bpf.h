@@ -808,8 +808,107 @@ static __always_inline void classify_network(struct task_struct *p, struct task_
 	}
 }
 
+/**
+ * is_compiler_name - Detect compiler/build tool processes
+ * @comm: Process name
+ *
+ * Compilers and build tools are EXTREMELY CPU-intensive and should
+ * be heavily penalized when gaming. These processes can easily
+ * consume 100% of multiple cores and pollute caches.
+ *
+ * Returns: true if this is a compiler/build tool
+ */
+static __always_inline bool is_compiler_name(const char *comm)
+{
+	/* Rust toolchain - cargo, rustc, rustdoc, rust-analyzer */
+	if (comm[0] == 'c' && comm[1] == 'a' && comm[2] == 'r' && comm[3] == 'g' &&
+	    comm[4] == 'o')
+		return true;  /* cargo */
+
+	if (comm[0] == 'r' && comm[1] == 'u' && comm[2] == 's' && comm[3] == 't') {
+		if (comm[4] == 'c')
+			return true;  /* rustc */
+		if (comm[4] == 'd' && comm[5] == 'o' && comm[6] == 'c')
+			return true;  /* rustdoc */
+		if (comm[4] == '-' && comm[5] == 'a' && comm[6] == 'n')
+			return true;  /* rust-analyzer */
+	}
+
+	/* C/C++ compilers - gcc, g++, clang, clang++, cc, c++ */
+	if (comm[0] == 'g' && comm[1] == 'c' && comm[2] == 'c')
+		return true;  /* gcc */
+
+	if (comm[0] == 'g' && comm[1] == '+' && comm[2] == '+')
+		return true;  /* g++ */
+
+	if (comm[0] == 'c' && comm[1] == 'l' && comm[2] == 'a' && comm[3] == 'n' &&
+	    comm[4] == 'g')
+		return true;  /* clang, clang++ */
+
+	if (comm[0] == 'c' && comm[1] == 'c' && (comm[2] == '\0' || comm[2] == '1'))
+		return true;  /* cc, cc1 */
+
+	if (comm[0] == 'c' && comm[1] == '+' && comm[2] == '+')
+		return true;  /* c++ */
+
+	/* Linkers - ld, lld, gold, mold */
+	if (comm[0] == 'l' && comm[1] == 'd' && (comm[2] == '\0' || comm[2] == '.'))
+		return true;  /* ld, ld.bfd, ld.gold */
+
+	if (comm[0] == 'l' && comm[1] == 'l' && comm[2] == 'd')
+		return true;  /* lld */
+
+	if (comm[0] == 'g' && comm[1] == 'o' && comm[2] == 'l' && comm[3] == 'd')
+		return true;  /* gold */
+
+	if (comm[0] == 'm' && comm[1] == 'o' && comm[2] == 'l' && comm[3] == 'd')
+		return true;  /* mold */
+
+	/* Build systems - make, ninja, cmake */
+	if (comm[0] == 'm' && comm[1] == 'a' && comm[2] == 'k' && comm[3] == 'e')
+		return true;  /* make */
+
+	if (comm[0] == 'n' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'j' &&
+	    comm[4] == 'a')
+		return true;  /* ninja */
+
+	if (comm[0] == 'c' && comm[1] == 'm' && comm[2] == 'a' && comm[3] == 'k' &&
+	    comm[4] == 'e')
+		return true;  /* cmake */
+
+	/* LLVM tools */
+	if (comm[0] == 'l' && comm[1] == 'l' && comm[2] == 'v' && comm[3] == 'm')
+		return true;  /* llvm-* tools */
+
+	/* Node.js build tools (npm, yarn, node when building) */
+	if (comm[0] == 'n' && comm[1] == 'p' && comm[2] == 'm')
+		return true;  /* npm */
+
+	if (comm[0] == 'y' && comm[1] == 'a' && comm[2] == 'r' && comm[3] == 'n')
+		return true;  /* yarn */
+
+	/* Other compilers/interpreters doing heavy work */
+	if (comm[0] == 'j' && comm[1] == 'a' && comm[2] == 'v' && comm[3] == 'a' &&
+	    comm[4] == 'c')
+		return true;  /* javac */
+
+	if (comm[0] == 'g' && comm[1] == 'o' && comm[2] == ' ' && comm[3] == 'b')
+		return true;  /* go build */
+
+	/* Assembler */
+	if (comm[0] == 'a' && comm[1] == 's' && (comm[2] == '\0' || comm[2] == ' '))
+		return true;  /* as (GNU assembler) */
+
+	return false;
+}
+
 static __always_inline bool is_background_name(const char *comm)
 {
+	/* COMPILERS: Highest priority for background detection
+	 * These are extremely CPU-intensive and should be heavily penalized */
+	if (is_compiler_name(comm))
+		return true;
+
 	/* GPU render threads often treated as background when they go idle */
 	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd' &&
 	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'T')
@@ -1279,6 +1378,14 @@ static __always_inline void classify_background(struct task_struct *p, struct ta
 {
 	if (!tctx->is_background && is_background_name(p->comm))
 		tctx->is_background = 1;
+
+	/* COMPILER DETECTION: Flag compilers for extra-heavy penalty
+	 * This is critical for preventing cargo/rustc/gcc builds from
+	 * causing game lockups. Compilers get 32x penalty vs 8x for regular background. */
+	if (!tctx->is_compiler && is_compiler_name(p->comm)) {
+		tctx->is_compiler = 1;
+		tctx->is_background = 1;  /* Also mark as background */
+	}
 }
 
 /**

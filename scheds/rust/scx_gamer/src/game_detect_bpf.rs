@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use libbpf_rs::RingBufferBuilder;
+use libbpf_rs::{MapCore, RingBufferBuilder};
 use log::{info, warn};
 
 /// Process event from BPF ring buffer
@@ -59,6 +59,8 @@ pub struct BpfGameDetector {
     current_game_info: Arc<ArcSwap<Option<GameInfo>>>,
     shutdown: Arc<AtomicBool>,
     _thread: Option<JoinHandle<()>>,
+    /// Last game PID synced to BPF map (for exit detection)
+    last_synced_game: AtomicU32,
 }
 
 impl BpfGameDetector {
@@ -71,10 +73,13 @@ impl BpfGameDetector {
         let current_game_info = Arc::new(ArcSwap::from_pointee(None));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // Clone for thread
+        // Clone for ring buffer callback
         let thread_game = Arc::clone(&current_game);
         let thread_game_info = Arc::clone(&current_game_info);
         let thread_shutdown = Arc::clone(&shutdown);
+
+        // Clone for adaptive poll loop (separate from callback)
+        let poll_game = Arc::clone(&current_game);
 
         // Build ring buffer consumer with callback
         let mut builder = RingBufferBuilder::new();
@@ -96,17 +101,68 @@ impl BpfGameDetector {
         }
 
         // Spawn consumer thread for ongoing BPF LSM events
+        // OPTIMIZATION: Adaptive poll intervals based on game state
+        // - No game: 500ms poll (low urgency, save CPU)
+        // - Game detected: 100ms poll initially, backs off to 1s after stable
+        // - Game just detected: 100ms poll for 5s (catch related processes)
         let handle = thread::Builder::new()
             .name("bpf-game-detect".into()) // TIER 1: .into() avoids extra allocation vs .to_string()
             .spawn(move || {
-                info!("BPF LSM game detector: starting event consumer");
+                info!("BPF LSM game detector: starting event consumer (adaptive polling)");
+
+                // Adaptive poll state
+                let mut last_game_change = std::time::Instant::now();
+                let mut last_game_tgid = 0u32;
+                let mut consecutive_empty_polls = 0u32;
+
+                // Poll intervals (adaptive based on state)
+                const POLL_FAST_MS: u64 = 100;      // Fast: game just changed
+                const POLL_NORMAL_MS: u64 = 250;   // Normal: game active, monitoring
+                const POLL_SLOW_MS: u64 = 500;     // Slow: no game, idle
+                const POLL_IDLE_MS: u64 = 1000;    // Idle: game stable for 30s+
 
                 while !thread_shutdown.load(Ordering::Relaxed) {
-                    // PERF: 100ms poll (faster shutdown response)
-                    // Reduced from 200ms to improve Ctrl+C responsiveness
-                    match ringbuf.poll(Duration::from_millis(100)) {
-                        Ok(_) => {
-                            // Events processed, continue
+                    // Determine adaptive poll interval
+                    let current_game = poll_game.load(Ordering::Relaxed);
+                    let now = std::time::Instant::now();
+                    let since_change = now.duration_since(last_game_change);
+
+                    // Track game state changes
+                    if current_game != last_game_tgid {
+                        last_game_change = now;
+                        last_game_tgid = current_game;
+                        consecutive_empty_polls = 0;
+                    }
+
+                    // Adaptive interval selection
+                    let poll_interval = if current_game == 0 {
+                        // No game: slow poll, save CPU
+                        Duration::from_millis(POLL_SLOW_MS)
+                    } else if since_change.as_secs() < 5 {
+                        // Game just detected: fast poll to catch related processes
+                        Duration::from_millis(POLL_FAST_MS)
+                    } else if since_change.as_secs() < 30 {
+                        // Game active, normal monitoring
+                        Duration::from_millis(POLL_NORMAL_MS)
+                    } else {
+                        // Game stable for 30s+: idle poll, minimal CPU
+                        Duration::from_millis(POLL_IDLE_MS)
+                    };
+
+                    // OPTIMIZATION: Batch event draining
+                    // libbpf-rs poll() drains all available events in one call
+                    // Return type is Result<(), Error> - events processed via callback
+                    match ringbuf.poll(poll_interval) {
+                        Ok(()) => {
+                            // Events processed via callback, or timeout (no distinction)
+                            // Track empty polls for potential future optimizations
+                            let new_game = poll_game.load(Ordering::Relaxed);
+                            if new_game == current_game {
+                                consecutive_empty_polls += 1;
+                            } else {
+                                consecutive_empty_polls = 0;
+                            }
+                            let _ = consecutive_empty_polls; // Suppress unused warning
                         }
                         Err(e) => {
                             // Poll error (not timeout - timeout returns Ok)
@@ -114,7 +170,6 @@ impl BpfGameDetector {
                             thread::sleep(Duration::from_millis(100));
                         }
                     }
-                    // Check shutdown flag frequently
                 }
 
                 info!("BPF LSM game detector: stopped");
@@ -127,6 +182,7 @@ impl BpfGameDetector {
             current_game_info,
             shutdown,
             _thread: Some(handle),
+            last_synced_game: AtomicU32::new(0),
         })
     }
 
@@ -138,6 +194,43 @@ impl BpfGameDetector {
     #[inline]
     pub fn get_game_info(&self) -> Option<GameInfo> {
         (**self.current_game_info.load()).clone()
+    }
+
+    /// Sync current game PID to BPF map for exit detection
+    ///
+    /// The BPF LSM `task_free` hook checks `current_game_map` to detect game exit.
+    /// This method must be called periodically to keep the BPF map in sync.
+    ///
+    /// Returns: true if sync was performed (game changed), false if no change
+    #[inline]
+    pub fn sync_to_bpf_map(&self, current_game_map: &libbpf_rs::Map) -> bool {
+        let current = self.current_game.load(Ordering::Relaxed);
+        let last = self.last_synced_game.load(Ordering::Relaxed);
+
+        if current != last {
+            // Update BPF map with new game PID
+            let key: u32 = 0;
+            let value: u32 = current;
+
+            if let Err(e) = current_game_map.update(
+                &key.to_ne_bytes(),
+                &value.to_ne_bytes(),
+                libbpf_rs::MapFlags::ANY,
+            ) {
+                warn!("BPF LSM: Failed to sync game PID to BPF map: {}", e);
+                return false;
+            }
+
+            self.last_synced_game.store(current, Ordering::Relaxed);
+
+            if current != 0 {
+                info!("BPF LSM: Synced game PID {} to kernel for exit tracking", current);
+            } else {
+                info!("BPF LSM: Cleared game PID from kernel (game exited)");
+            }
+            return true;
+        }
+        false
     }
 }
 

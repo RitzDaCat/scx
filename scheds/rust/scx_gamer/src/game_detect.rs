@@ -261,13 +261,27 @@ fn detection_loop(
     info!("game detector: initial scan complete");
 
     let mut last_liveness_check = std::time::Instant::now();
+    let mut last_game_change = std::time::Instant::now();
+    let mut last_detected_game = 0u32;
+
+    // Adaptive polling intervals
+    const POLL_FAST_MS: u64 = 50;       // Fast: game just changed, catch related processes
+    const POLL_NORMAL_MS: u64 = 100;    // Normal: game active
+    const POLL_SLOW_MS: u64 = 200;      // Slow: game stable for 10s+
+    const POLL_IDLE_MS: u64 = 500;      // Idle: game stable for 30s+
+    const FALLBACK_INTERVAL_SECS: u64 = 10; // Fallback scan interval (no inotify)
+    const FALLBACK_GAME_STABLE_SECS: u64 = 30; // Increase fallback interval when game stable
 
     while !shutdown.load(Ordering::Relaxed) {
-        // PERF: Game liveness check removed - BPF LSM task_free hook handles game exit detection
-        // The LSM hook emits GAME_EVENT_EXIT events when the tracked game process exits,
-        // providing instant detection (<1ms latency) vs polling (0-5s delay).
-        // This eliminates 0.2Hz polling overhead completely.
-        // Fallback: Keep liveness check as safety net only if BPF LSM unavailable (inotify fallback)
+        let now = std::time::Instant::now();
+        let current_detected = current_game.load(Ordering::Relaxed);
+
+        // Track game state changes for adaptive backoff
+        if current_detected != last_detected_game {
+            last_game_change = now;
+            last_detected_game = current_detected;
+        }
+        let since_change = now.duration_since(last_game_change);
 
         // Process inotify events for new processes (primary detection method)
         if let Some(ref mut inotify_instance) = inotify {
@@ -307,12 +321,20 @@ fn detection_loop(
                 }
             }
         } else {
-            // Fallback: inotify disabled/unavailable, do lightweight scan every 5s
-            if fallback_scan_due(
-                &mut last_liveness_check,
-                std::time::Instant::now(),
-                Duration::from_secs(5),
-            ) {
+            // Fallback: inotify disabled/unavailable
+            // OPTIMIZATION: Adaptive fallback interval based on game state
+            let fallback_interval = if current_detected == 0 {
+                // No game: normal scan interval
+                Duration::from_secs(FALLBACK_INTERVAL_SECS)
+            } else if since_change.as_secs() >= FALLBACK_GAME_STABLE_SECS {
+                // Game stable for 30s+: reduce scanning significantly
+                Duration::from_secs(FALLBACK_INTERVAL_SECS * 3)
+            } else {
+                // Game active but recent: normal interval
+                Duration::from_secs(FALLBACK_INTERVAL_SECS)
+            };
+
+            if fallback_scan_due(&mut last_liveness_check, now, fallback_interval) {
                 let detection_result = panic::catch_unwind(AssertUnwindSafe(|| {
                     detect_game_cached(&mut cache, &shutdown_check)
                 }));
@@ -325,8 +347,23 @@ fn detection_loop(
             }
         }
 
-        // Short sleep to check shutdown flag and avoid busy-looping
-        thread::sleep(Duration::from_millis(100));
+        // OPTIMIZATION: Adaptive sleep based on game state
+        // Less CPU when game is stable, more responsive when state is changing
+        let sleep_interval = if current_detected == 0 {
+            // No game: slower poll, save CPU
+            Duration::from_millis(POLL_SLOW_MS)
+        } else if since_change.as_secs() < 5 {
+            // Game just detected: fast poll to catch related processes
+            Duration::from_millis(POLL_FAST_MS)
+        } else if since_change.as_secs() < 30 {
+            // Game active: normal poll
+            Duration::from_millis(POLL_NORMAL_MS)
+        } else {
+            // Game stable for 30s+: idle poll, minimal CPU
+            Duration::from_millis(POLL_IDLE_MS)
+        };
+
+        thread::sleep(sleep_interval);
     }
 
     info!("game detector: stopped");

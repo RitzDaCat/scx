@@ -19,7 +19,6 @@
 #include "include/boost.bpf.h"
 #include "include/task_class.bpf.h"
 #include "include/profiling.bpf.h"  /* Hot-path instrumentation */
-#include "include/thread_runtime.bpf.h"
 #include "include/cpu_select.bpf.h"  /* CPU selection logic with get_preferred_cpu_safe() */
 /* Advanced detection - fentry-based detection enabled */
 #include "include/gpu_detect.bpf.h"
@@ -30,10 +29,6 @@
 #include "include/memory_detect.bpf.h"
 #include "include/interrupt_detect.bpf.h"
 #include "include/filesystem_detect.bpf.h"
-/* Wine detection and advanced detection still disabled for now
-#include "include/wine_detect.bpf.h"
-#include "include/advanced_detect.bpf.h"
-*/
 #include "game_detect_lsm.bpf.c"    /* BPF LSM game detection (kernel-level) */
 #include "include/affinity_detect.bpf.h"
 #include "include/coalesce.bpf.h"  /* CPU affinity override system */
@@ -2232,14 +2227,22 @@ standard_path:
     if (tctx->is_gpu_submit)
         exec_component = exec_component >> 2; /* 4x deadline boost */
 
+    /* COMPILER/BUILD TOOLS: MAXIMUM penalty (32x) to prevent game lockups
+     * Compilers (cargo, rustc, gcc, clang) are extremely CPU-intensive and
+     * can easily saturate all cores, causing game stuttering/freezing.
+     * 32x penalty ensures game threads ALWAYS get priority over builds.
+     * This penalty stacks with is_background (which compilers also have). */
+    if (tctx->is_compiler)
+        exec_component = exec_component << 5; /* 32x penalty for compilers */
+
     /* Background tasks: deprioritize to prevent cache pollution during critical frames */
-    if (tctx->is_background)
+    if (tctx->is_background && !tctx->is_compiler)  /* Skip if already penalized as compiler */
         exec_component = exec_component << 3; /* 8x penalty (later deadline) - increased from 4x */
 
     /* Non-foreground processes (OBS, Discord, browsers, etc.): heavy penalty
      * This ensures game always has priority over streaming/recording software.
      * Penalty: 8x slower than normal game threads (same as is_background) */
-    if (is_non_fg_process)
+    if (is_non_fg_process && !tctx->is_compiler)  /* Skip if already penalized as compiler */
         exec_component = exec_component << 3; /* 8x penalty for all non-game processes */
 
     /* Page fault penalty: threads with high fault rates are loading assets, not rendering.
@@ -3506,6 +3509,50 @@ static __noinline s32 gamer_select_cpu_slowpath(struct task_struct *p, s32 prev_
 	 * select_cpu just reads the cached value - no calculation needed.
 	 */
 	
+	/* COMPILER CORRALLING: Force compilers (cargo, rustc, gcc, clang) to E-cores/low-priority CPUs
+	 * This prevents builds from saturating P-cores that games need for smooth frametimes.
+	 * Combined with 32x deadline penalty, this ensures games NEVER lock up due to builds.
+	 * 
+	 * Same strategy as TaskGraph workers - use tail of preferred_cpus (lowest capacity).
+	 * This is critical for preventing Cursor/cargo builds from causing game stuttering. */
+	bool is_compiler_thread = (tctx && tctx->is_compiler);
+	if (unlikely(is_compiler_thread)) {
+		u32 cpu_count = nr_cpu_ids < MAX_CPUS ? nr_cpu_ids : MAX_CPUS;
+		u32 bounded_cpu_count = cpu_count;
+		if (bounded_cpu_count > MAX_CPUS)
+			bounded_cpu_count = MAX_CPUS;
+
+		if (bounded_cpu_count > 0) {
+			/* Compilers: scan ALL lower-priority cores (more aggressive than TaskGraph)
+			 * This ensures builds spread across E-cores and don't steal P-cores */
+			u32 scan_cap = bounded_cpu_count > 16 ? 16 : bounded_cpu_count;
+			u32 base_idx = bounded_cpu_count - 1;
+
+			for (u32 scan_idx = 0; scan_idx < scan_cap; scan_idx++) {
+				if (scan_idx > base_idx)
+					break;
+
+				u32 idx = base_idx - scan_idx;
+				s32 candidate;
+				if (!load_preferred_cpu_safe(idx, &candidate))
+					continue;
+				if (candidate < 0)
+					continue;
+				if (!bpf_cpumask_test_cpu(candidate, p->cpus_ptr))
+					continue;
+
+				if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
+					/* Give compilers shorter slice for faster preemption by game */
+					u64 compiler_slice = task_slice(p) >> 1;
+					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate,
+							   compiler_slice, 0);
+					RETURN_SELECTED_CPU(candidate);
+				}
+			}
+		}
+		/* Fall through to normal path if no E-cores available */
+	}
+
 	/* TASKGRAPH WORKER CORRALLING: Restrict TaskGraph workers to dedicated cores
 	 * (last half of CPUs, assuming E-cores or separate CCD on typical systems)
 	 * This prevents cache pollution on P-cores used by GameThread/RenderThread/RHIThread.

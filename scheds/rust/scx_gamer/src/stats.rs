@@ -333,6 +333,16 @@ pub struct Metrics {
     #[stat(desc = "Timestamp of last page flip (ns)")]
     pub last_page_flip_ns: u64,
 
+    /* P2: Per-CRTC Frame Timing (Multi-Monitor) */
+    #[stat(desc = "Primary CRTC pointer (identifies gaming monitor)")]
+    pub primary_crtc_ptr: u64,
+    #[stat(desc = "Primary CRTC FPS x10 (e.g., 1440 = 144Hz)")]
+    pub primary_crtc_fps_x10: u32,
+    #[stat(desc = "Times primary CRTC changed (debug)")]
+    pub primary_crtc_switch_count: u64,
+    #[stat(desc = "Compositor plane operations detected")]
+    pub compositor_plane_calls: u64,
+
     /* AI Analytics: Latency Percentiles (from histograms) */
     #[stat(desc = "select_cpu latency p10 (ns)")]
     pub select_cpu_latency_p10: u64,
@@ -777,6 +787,12 @@ impl Metrics {
             frame_interval_ns: self.frame_interval_ns,
             frame_count: self.frame_count,
             last_page_flip_ns: self.last_page_flip_ns,
+
+            // P2: Per-CRTC Frame Timing - live values (not deltas)
+            primary_crtc_ptr: self.primary_crtc_ptr,
+            primary_crtc_fps_x10: self.primary_crtc_fps_x10,
+            primary_crtc_switch_count: self.primary_crtc_switch_count,
+            compositor_plane_calls: self.compositor_plane_calls,
 
             // AI Analytics: Latency Percentiles - live values (not deltas)
             select_cpu_latency_p10: self.select_cpu_latency_p10,
