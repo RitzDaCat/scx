@@ -76,7 +76,7 @@ use libc::{
     sched_attr, sched_param, sched_setscheduler, SCHED_DEADLINE, SCHED_FIFO, SCHED_FLAG_DL_OVERRUN,
     SCHED_OTHER,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use nix::fcntl;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
@@ -1538,6 +1538,12 @@ impl<'a> Scheduler<'a> {
             // ENQUEUE_SIGNAL tailcall slot here to avoid kernel EINVAL errors
             // when attempting to tailcall between incompatible program types.
         }
+
+        // Note: BPF map pre-warming was considered but not implemented.
+        // Reason: The critical maps (task_ctx_stor, cpu_ctx_stor) are special types:
+        // - task_ctx_stor: BPF_MAP_TYPE_TASK_STORAGE (kernel-managed, can't pre-warm)
+        // - cpu_ctx_stor: BPF_MAP_TYPE_PERCPU_ARRAY (already pre-allocated by kernel)
+        // These maps don't benefit from userspace pre-warming.
 
         // Enable primary scheduling domain, if defined.
         if primary_cpus.len() < *NR_CPU_IDS {
