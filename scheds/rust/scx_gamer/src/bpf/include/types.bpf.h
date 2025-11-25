@@ -392,6 +392,7 @@ struct hotpath_signals {
 	volatile u64 wine_input_ns;		/* Last Wine input handler wake timestamp */
 	volatile u64 sdl_event_ns;		/* Last SDL event loop wake timestamp */
 	volatile u64 network_tx_ns;		/* Last network TX timestamp (for online gaming) */
+	volatile u64 audio_submit_ns;		/* Last game audio submit timestamp (AUDIO WAKE CHAIN) */
 } __attribute__((aligned(64)));  /* Ensure struct starts on cache line boundary */
 extern struct hotpath_signals hotpath_signals;
 

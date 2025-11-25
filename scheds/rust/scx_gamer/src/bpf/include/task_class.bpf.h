@@ -528,52 +528,126 @@ static __always_inline bool is_nvme_hot_path_thread(const struct task_struct *p,
 }
 
 /*
- * Game audio threads (lower priority than system audio)
- * Game audio is important for immersion but shouldn't delay input processing.
- * Examples: AudioDeviceBuff, FMODThread, AudioEncoder, OpenAL
+ * Game audio threads - ELEVATED PRIORITY for competitive gaming
+ * Game audio (footsteps, gunshots, voice chat) is critical for gameplay awareness.
+ * Latency here directly affects reaction time to audio cues.
+ * 
+ * Supported engines: FMOD, Wwise, Vivox, OpenAL, FAudio, Miles, Criware
+ * Examples: AudioThread, FMODThread, AkAudioThread, VivoxVoice
  */
 static __always_inline bool is_game_audio_name(const char *comm)
 {
+	/* FMOD Studio (Arc Raiders, Fortnite, many indie games)
+	 * Thread patterns: FMOD*, fmod*, FMODStream, FMODMixer */
+	if (comm[0] == 'F' && comm[1] == 'M' && comm[2] == 'O' && comm[3] == 'D')
+		return true;  /* FMOD* (uppercase) */
+	if (comm[0] == 'f' && comm[1] == 'm' && comm[2] == 'o' && comm[3] == 'd')
+		return true;  /* fmod* (lowercase) */
+
+	/* Wwise (Destiny 2, Valorant, many AAA games)
+	 * Thread patterns: AkAudio*, Wwise*, AK::* */
+	if (comm[0] == 'A' && comm[1] == 'k' && comm[2] == 'A' && comm[3] == 'u')
+		return true;  /* AkAudio* (Wwise thread prefix) */
+	if (comm[0] == 'W' && comm[1] == 'w' && comm[2] == 'i' && comm[3] == 's' && comm[4] == 'e')
+		return true;  /* Wwise* */
+	if (comm[0] == 'w' && comm[1] == 'w' && comm[2] == 'i' && comm[3] == 's' && comm[4] == 'e')
+		return true;  /* wwise* (lowercase) */
+
+	/* Vivox (voice middleware - Fortnite, PUBG, many multiplayer games)
+	 * Thread patterns: vivox*, Vivox*, vx_* */
+	if (comm[0] == 'V' && comm[1] == 'i' && comm[2] == 'v' && comm[3] == 'o' && comm[4] == 'x')
+		return true;  /* Vivox* */
+	if (comm[0] == 'v' && comm[1] == 'i' && comm[2] == 'v' && comm[3] == 'o' && comm[4] == 'x')
+		return true;  /* vivox* */
+	if (comm[0] == 'v' && comm[1] == 'x' && comm[2] == '_')
+		return true;  /* vx_* (Vivox internal threads) */
+
 	/* Unreal Engine audio threads */
 	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o') {
-		/* Handle AudioThread, AudioThread0, AudioMixerRende, etc. */
-		if (comm[5] == '\0' || comm[5] == 'T' || comm[5] == 'M')
-			return true;  /* AudioThread, AudioThread0, AudioMixerRende */
+		/* Handle AudioThread, AudioThread0, AudioMixerRende, AudioDevice, etc. */
+		if (comm[5] == '\0' || comm[5] == 'T' || comm[5] == 'M' || comm[5] == 'D')
+			return true;  /* AudioThread, AudioMixerRende, AudioDevice */
 	}
 
+	/* FAudio (Wine/Proton XAudio2 implementation) - THE key audio layer for Proton */
 	if (comm[0] == 'F' && comm[1] == 'A' && comm[2] == 'u' && comm[3] == 'd')
-		return true;  /* FAudio_AudioCli */
+		return true;  /* FAudio* */
+
+	/* Wine/Proton audio threads - CRITICAL for Linux gaming
+	 * Wine translates Windows audio APIs, these are the actual threads doing the work.
+	 * Even if FMOD/Wwise runs inside Wine, audio flows through these threads. */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e') {
+		/* winepulse - Wine PulseAudio/PipeWire bridge */
+		if (comm[4] == 'p' && comm[5] == 'u' && comm[6] == 'l' && comm[7] == 's')
+			return true;  /* winepulse */
+		/* wineaudio - Generic Wine audio thread */
+		if (comm[4] == 'a' && comm[5] == 'u' && comm[6] == 'd' && comm[7] == 'i')
+			return true;  /* wineaudio */
+		/* wine-audio - Alternate naming */
+		if (comm[4] == '-' && comm[5] == 'a' && comm[6] == 'u' && comm[7] == 'd')
+			return true;  /* wine-audio */
+	}
+
+	/* mmdevapi - Windows Multimedia Device API (used by FMOD/Wwise in Proton) */
+	if (comm[0] == 'm' && comm[1] == 'm' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'v')
+		return true;  /* mmdevapi */
+
+	/* xaudio2 - DirectX audio threads in Proton */
+	if (comm[0] == 'x' && comm[1] == 'a' && comm[2] == 'u' && comm[3] == 'd' && comm[4] == 'i')
+		return true;  /* xaudio2_* */
+
+	/* dsound - DirectSound threads in Proton (older games) */
+	if (comm[0] == 'd' && comm[1] == 's' && comm[2] == 'o' && comm[3] == 'u' && comm[4] == 'n')
+		return true;  /* dsound* */
+
+	/* Miles Sound System (older games, Source engine)
+	 * Thread patterns: Miles*, MSS* */
+	if (comm[0] == 'M' && comm[1] == 'i' && comm[2] == 'l' && comm[3] == 'e' && comm[4] == 's')
+		return true;  /* Miles* */
+	if (comm[0] == 'M' && comm[1] == 'S' && comm[2] == 'S')
+		return true;  /* MSS* */
+
+	/* Criware ADX (Japanese games, many JRPGs)
+	 * Thread patterns: CriAtom*, criatomex*, Adx* */
+	if (comm[0] == 'C' && comm[1] == 'r' && comm[2] == 'i' && comm[3] == 'A')
+		return true;  /* CriAtom* */
+	if (comm[0] == 'c' && comm[1] == 'r' && comm[2] == 'i' && comm[3] == 'a')
+		return true;  /* criatomex* */
+	if (comm[0] == 'A' && comm[1] == 'd' && comm[2] == 'x')
+		return true;  /* Adx* */
 
 	/* Bink audio (common video codec in games) */
 	if (comm[0] == 'B' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'k')
-		return true;  /* Bink Snd */
+		return true;  /* Bink* (video/audio codec) */
+
+	/* OpenAL (common game audio library) */
+	if (comm[0] == 'O' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 'A' && comm[5] == 'L')
+		return true;  /* OpenAL* */
+	if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 'a' && comm[5] == 'l')
+		return true;  /* openal* */
+
+	/* XAudio2 (Windows games via Wine/Proton)
+	 * Thread patterns: XAudio*, xaudio* */
+	if (comm[0] == 'X' && comm[1] == 'A' && comm[2] == 'u' && comm[3] == 'd')
+		return true;  /* XAudio* */
+	if (comm[0] == 'x' && comm[1] == 'a' && comm[2] == 'u' && comm[3] == 'd')
+		return true;  /* xaudio* */
 
 	/* Generic game audio threads: "audio", "sound", "snd_" */
 	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o')
-		return true;
-
-	/* Warframe audio threads */
-	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o' &&
-	    comm[5] == '_' && comm[6] == 'c' && comm[7] == 'l' && comm[8] == 'i' && comm[9] == 'e')
-		return true;  /* audio_client_ma */
-
+		return true;  /* audio* */
 	if (comm[0] == 's' && comm[1] == 'o' && comm[2] == 'u' && comm[3] == 'n' && comm[4] == 'd')
-		return true;
-
+		return true;  /* sound* */
 	if (comm[0] == 's' && comm[1] == 'n' && comm[2] == 'd' && comm[3] == '_')
-		return true;
+		return true;  /* snd_* */
 
-	/* OpenAL (common game audio library) */
-	if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 'a')
-		return true;
-
-	/* FMOD (game audio engine) */
-	if (comm[0] == 'f' && comm[1] == 'm' && comm[2] == 'o' && comm[3] == 'd')
-		return true;
-
-	/* Wwise (game audio engine) */
-	if (comm[0] == 'w' && comm[1] == 'w' && comm[2] == 'i' && comm[3] == 's' && comm[4] == 'e')
-		return true;
+	/* Voice chat threads (in-game voice) */
+	if (comm[0] == 'V' && comm[1] == 'o' && comm[2] == 'i' && comm[3] == 'c' && comm[4] == 'e')
+		return true;  /* Voice* (VoiceChat, VoiceThread) */
+	if (comm[0] == 'v' && comm[1] == 'o' && comm[2] == 'i' && comm[3] == 'c' && comm[4] == 'e')
+		return true;  /* voice* */
+	if (comm[0] == 'V' && comm[1] == 'O' && comm[2] == 'I' && comm[3] == 'P')
+		return true;  /* VOIP* */
 
 	return false;
 }
@@ -834,6 +908,9 @@ static __always_inline void classify_gpu_submit(struct task_struct *p, struct ta
 	}
 }
 
+/* Forward declaration - full definition in Discord detection section */
+static __always_inline bool is_voice_chat_audio_thread(const char *comm);
+
 static __always_inline void classify_audio(struct task_struct *p, struct task_ctx *tctx)
 {
 	/* LAYER 1 (HIGHEST PRIORITY): TGID-based system audio detection
@@ -846,18 +923,28 @@ static __always_inline void classify_audio(struct task_struct *p, struct task_ct
 		struct system_audio_entry *entry = bpf_map_lookup_elem(&system_audio_tgids_map, &tgid);
 		if (entry && entry->refcount > 0) {
 			tctx->is_system_audio = 1;
-			apply_class_boost(tctx, 1);
+			apply_class_boost(tctx, 2);  /* AUDIO IMPROVEMENT: Elevated to match USB audio */
 		}
 	}
 	
 	/* LAYER 2: Name-based detection (fallback for threads not in audio server processes) */
 	if (!tctx->is_system_audio && is_system_audio_name(p->comm)) {
 		tctx->is_system_audio = 1;
-		apply_class_boost(tctx, 1);
+		apply_class_boost(tctx, 2);  /* AUDIO IMPROVEMENT: Elevated to match USB audio */
 	}
+	
+	/* LAYER 3: Game audio detection (FMOD, Wwise, Vivox, etc.)
+	 * Game audio is critical for gameplay (footsteps, gunshots, voice chat) */
 	if (!tctx->is_game_audio && is_game_audio_name(p->comm)) {
 		tctx->is_game_audio = 1;
-		apply_class_boost(tctx, 1);
+		apply_class_boost(tctx, 2);  /* AUDIO IMPROVEMENT: Same priority as USB audio */
+	}
+	
+	/* LAYER 4: Voice chat audio detection (Discord, TeamSpeak, etc.)
+	 * Voice threads need low latency for clear teammate communication */
+	if (!tctx->is_system_audio && is_voice_chat_audio_thread(p->comm)) {
+		tctx->is_system_audio = 1;
+		apply_class_boost(tctx, 2);  /* Same priority as USB audio for clear comms */
 	}
 }
 
@@ -1388,9 +1475,62 @@ static __always_inline void classify_plasma_systemmonitor(struct task_struct *p,
 }
 
 /*
+ * Voice chat audio thread detection
+ * Detects audio/voice threads from voice chat applications (Discord, TeamSpeak, Mumble, etc.)
+ * These threads should get audio priority for clear comms with teammates.
+ * 
+ * Thread patterns:
+ * - AudioDevice*, AudioInput*, AudioOutput* (generic audio threads)
+ * - WebRTC*, webrtc* (real-time communication)
+ * - opus*, Opus* (voice codec)
+ * - voice*, Voice* (voice processing)
+ */
+static __always_inline bool is_voice_chat_audio_thread(const char *comm)
+{
+	/* WebRTC audio/voice processing (Discord, browser-based voice) */
+	if (comm[0] == 'W' && comm[1] == 'e' && comm[2] == 'b' && comm[3] == 'R' && comm[4] == 'T' && comm[5] == 'C')
+		return true;  /* WebRTC* */
+	if (comm[0] == 'w' && comm[1] == 'e' && comm[2] == 'b' && comm[3] == 'r' && comm[4] == 't' && comm[5] == 'c')
+		return true;  /* webrtc* */
+
+	/* Opus codec (used by Discord, many VoIP apps) */
+	if (comm[0] == 'O' && comm[1] == 'p' && comm[2] == 'u' && comm[3] == 's')
+		return true;  /* Opus* */
+	if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'u' && comm[3] == 's')
+		return true;  /* opus* */
+
+	/* Audio device/input/output threads */
+	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o') {
+		if (comm[5] == 'D' || comm[5] == 'I' || comm[5] == 'O' || comm[5] == 'C')
+			return true;  /* AudioDevice, AudioInput, AudioOutput, AudioCapture */
+	}
+
+	/* PulseAudio/PipeWire sink threads from apps */
+	if (comm[0] == 'p' && comm[1] == 'u' && comm[2] == 'l' && comm[3] == 's' && comm[4] == 'e')
+		return true;  /* pulse* (app PulseAudio threads) */
+
+	/* TeamSpeak patterns */
+	if (comm[0] == 't' && comm[1] == 's' && comm[2] == '3')
+		return true;  /* ts3* (TeamSpeak 3) */
+	if (comm[0] == 'T' && comm[1] == 'e' && comm[2] == 'a' && comm[3] == 'm' && comm[4] == 'S')
+		return true;  /* TeamSpeak, TeamS* */
+
+	/* Mumble patterns */
+	if (comm[0] == 'm' && comm[1] == 'u' && comm[2] == 'm' && comm[3] == 'b' && comm[4] == 'l')
+		return true;  /* mumble */
+	if (comm[0] == 'M' && comm[1] == 'u' && comm[2] == 'm' && comm[3] == 'b' && comm[4] == 'l')
+		return true;  /* Mumble */
+
+	return false;
+}
+
+/*
  * Discord detection - Electron-based communication application
- * Discord is an Electron-based app that can consume significant CPU for voice/video
- * Should be throttled when not in foreground to preserve game performance
+ * Discord is an Electron-based app that can consume significant CPU for UI/JS
+ * 
+ * AUDIO IMPROVEMENT: Discord voice threads should NOT be penalized.
+ * Only Discord UI/renderer threads get background penalty.
+ * Voice threads are detected separately and get audio priority.
  */
 static __always_inline bool is_discord_name(const char *comm)
 {
@@ -1398,6 +1538,10 @@ static __always_inline bool is_discord_name(const char *comm)
 	if (comm[0] == 'd' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'c' &&
 	    comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'd')
 		return true;  /* discord */
+	/* Discord Canary/PTB variants */
+	if (comm[0] == 'D' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'c' &&
+	    comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'd')
+		return true;  /* Discord* */
 
 	return false;
 }
@@ -1405,9 +1549,33 @@ static __always_inline bool is_discord_name(const char *comm)
 static __always_inline void classify_discord(struct task_struct *p, struct task_ctx *tctx)
 {
 	if (!tctx->is_background && is_discord_name(p->comm)) {
+		/* AUDIO IMPROVEMENT: Check if this is a voice/audio thread first
+		 * Voice threads should NOT be classified as background */
+		if (is_voice_chat_audio_thread(p->comm)) {
+			/* This is a Discord voice thread - give it system audio priority */
+			if (!tctx->is_system_audio) {
+				tctx->is_system_audio = 1;
+				apply_class_boost(tctx, 2);  /* Same boost as USB audio */
+			}
+			return;  /* Don't mark as background! */
+		}
+		
 		tctx->is_background = 1;
-		/* Discord gets background penalty (8x slower) when not in foreground */
+		/* Discord UI/renderer gets background penalty (8x slower) when not in foreground */
 		/* This prevents Discord from competing with games for CPU time */
+	}
+}
+
+/*
+ * Voice chat application audio classification
+ * Detects and prioritizes voice threads from any voice chat app
+ * Called during classify_audio to catch voice threads early
+ */
+static __always_inline void classify_voice_chat_audio(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (!tctx->is_system_audio && is_voice_chat_audio_thread(p->comm)) {
+		tctx->is_system_audio = 1;
+		apply_class_boost(tctx, 2);  /* Same priority as USB audio for clear comms */
 	}
 }
 
