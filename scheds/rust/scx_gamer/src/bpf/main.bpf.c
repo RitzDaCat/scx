@@ -4209,6 +4209,9 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 	/* WAKEUP CHAIN FRONT-RUN: Audio Thread Force Dispatch
 	 * When a tagged audio server thread wakes up (likely from a hardware IRQ),
 	 * force-dispatch it immediately to prevent buffer underruns (audio crackling).
+	 * 
+	 * AUDIO CHAIN: Game Audio → PipeWire (system audio) → GoXLR (USB audio) → Earbuds
+	 * All three need force-dispatch for minimum latency through the full chain.
 	 */
 	if (unlikely(is_system_audio_cached(p))) {
 		if (tctx) {
@@ -4224,6 +4227,40 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 			PROF_END_HIST(enqueue);
 			return;
 			}
+		}
+	}
+
+	/* AUDIO IMPROVEMENT: Game Audio Force Dispatch
+	 * Game audio threads (FMOD, Wwise, AudioThread, etc.) generate the actual game sounds.
+	 * Force-dispatch ensures footsteps, gunshots, and voice chat arrive with minimum latency.
+	 * Without this, game audio can be delayed by other threads in the queue.
+	 * 
+	 * AUDIO WAKE CHAIN: Set signal so PipeWire (system audio) gets priority next.
+	 * Chain: Game Audio → PipeWire → GoXLR USB → Earbuds */
+	if (unlikely(tctx && tctx->is_game_audio && !tctx->is_background)) {
+		u64 cookie = BPF_CORE_READ(p, start_time);
+		if (cookie && tctx->task_cookie == cookie) {
+			/* Signal audio wake chain - PipeWire should run next */
+			hotpath_signals.audio_submit_ns = now;
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+			wakeup_cpu(prev_cpu);
+			PROF_END_HIST(enqueue);
+			return;
+		}
+	}
+
+	/* AUDIO WAKE CHAIN: System audio (PipeWire) consumes game audio signal
+	 * When PipeWire wakes after game audio submitted, force-dispatch for minimum latency.
+	 * This ensures the full chain (Game → PipeWire → GoXLR) runs without gaps. */
+	if (unlikely(is_system_audio_cached(p))) {
+		u64 audio_time = hotpath_signals.audio_submit_ns;
+		if (audio_time != 0 && (now - audio_time) < 5000000) { /* <5ms window */
+			/* Clear signal and force-dispatch */
+			hotpath_signals.audio_submit_ns = 0;
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+			wakeup_cpu(prev_cpu);
+			PROF_END_HIST(enqueue);
+			return;
 		}
 	}
 
@@ -4781,7 +4818,13 @@ static inline void recompute_boost_shift(struct task_ctx *tctx, u64 now)
 		base_boost = 3;  /* Gaming traffic pattern latency */
 
 	if (tctx->is_usb_audio && base_boost < 2)
-		base_boost = 2;  /* USB audio latency */
+		base_boost = 2;  /* USB audio latency (GoXLR, Focusrite - final audio output) */
+
+	/* AUDIO IMPROVEMENT: Game audio elevated to same priority as USB audio
+	 * Game audio feeds into the USB audio chain (Game → PipeWire → GoXLR → Earbuds)
+	 * Both need to run on time to prevent buffer underruns and crackling */
+	if (tctx->is_game_audio && base_boost < 2)
+		base_boost = 2;  /* Game audio latency (footsteps, gunshots, etc.) */
 
 	if (tctx->is_input_interrupt && base_boost < 2)
 		base_boost = 2;  /* Input interrupt latency */
@@ -4790,7 +4833,6 @@ static inline void recompute_boost_shift(struct task_ctx *tctx, u64 now)
 	     tctx->is_audio_pipeline ||
 	     tctx->is_gaming_peripheral ||
 	     tctx->is_storage_hot_path ||
-	     tctx->is_game_audio ||
 	     tctx->is_nvme_io ||
 	     tctx->is_memory_intensive ||
 	     tctx->is_asset_loading ||
