@@ -60,6 +60,9 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_network_counted:1;	/* Flag to ensure network threads are counted only once */
 	u8 is_per_cpu_kthread:1;	/* Per-CPU kernel thread (kworker, ksoftirqd) - cached detection */
 	u8 is_per_cpu_kthread_set:1;	/* Flag indicating per-CPU kthread detection was computed */
+	u8 is_wine_input:1;		/* Wine/Proton input handler (xinput, dinput, rawinput, wginput) */
+	u8 is_sdl_event:1;		/* SDL event loop thread */
+	u8 is_network_tx:1;		/* Network TX thread (for online gaming input→server latency) */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
 	u8 boost_shift;			/* 0=no boost, 7=10x boost for input handlers */
@@ -385,9 +388,10 @@ struct {
  */
 struct hotpath_signals {
 	volatile u64 input_ns[MAX_CPUS];	/* Per-target CPU timestamp for latest input wake */
-	char __pad1[64 - (sizeof(u64) * MAX_CPUS) % 64];  /* Align compositor_ns to cache line */
 	volatile u64 compositor_ns;		/* Last compositor wake timestamp */
-	char __pad2[64 - sizeof(u64)];  /* Pad to full cache line */
+	volatile u64 wine_input_ns;		/* Last Wine input handler wake timestamp */
+	volatile u64 sdl_event_ns;		/* Last SDL event loop wake timestamp */
+	volatile u64 network_tx_ns;		/* Last network TX timestamp (for online gaming) */
 } __attribute__((aligned(64)));  /* Ensure struct starts on cache line boundary */
 extern struct hotpath_signals hotpath_signals;
 
@@ -719,7 +723,10 @@ static inline struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 #define SCX_GAMER_FLAG_SYSTEM_AUDIO         (1ULL << 40)
 #define SCX_GAMER_FLAG_GAME_AUDIO           (1ULL << 41)
 #define SCX_GAMER_FLAG_PERIODIC             (1ULL << 42)
-/* Bits 43-47: Reserved for future classification flags */
+#define SCX_GAMER_FLAG_WINE_INPUT           (1ULL << 43)  /* Wine/Proton input handler threads */
+#define SCX_GAMER_FLAG_SDL_EVENT            (1ULL << 44)  /* SDL event loop threads */
+#define SCX_GAMER_FLAG_NETWORK_TX           (1ULL << 45)  /* Network TX threads (for online gaming) */
+/* Bits 46-47: Reserved for future classification flags */
 
 /* boost_shift cache (bits 48-55, 8 bits for values 0-7) */
 #define SCX_GAMER_BOOST_SHIFT_MASK          (0xFFULL << 48)
@@ -787,6 +794,40 @@ static inline bool is_system_audio_cached(const struct task_struct *p)
 }
 
 /**
+ * is_wine_input_cached - Check if task is Wine/Proton input handler (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ * Wine input handlers include: wine_xinput, wine_wginput, wine_dinput, wine_rawinput
+ */
+static inline bool is_wine_input_cached(const struct task_struct *p)
+{
+	return likely((p->scx.flags & SCX_GAMER_FLAG_WINE_INPUT) != 0);
+}
+
+/**
+ * is_sdl_event_cached - Check if task is SDL event loop thread (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ */
+static inline bool is_sdl_event_cached(const struct task_struct *p)
+{
+	return likely((p->scx.flags & SCX_GAMER_FLAG_SDL_EVENT) != 0);
+}
+
+/**
+ * is_network_tx_cached - Check if task is network TX thread (cached flag check)
+ * @p: Task struct pointer
+ *
+ * TIER 0: Cached flag check (~1-2ns)
+ */
+static inline bool is_network_tx_cached(const struct task_struct *p)
+{
+	return likely((p->scx.flags & SCX_GAMER_FLAG_NETWORK_TX) != 0);
+}
+
+/**
  * get_boost_shift_cached - Get cached boost_shift (zero map lookup!)
  * @p: Task struct pointer
  *
@@ -851,6 +892,12 @@ static inline void update_task_flags_cache(struct task_struct *p, struct task_ct
 		flags |= SCX_GAMER_FLAG_GAME_AUDIO;
 	if (tctx->is_periodic)
 		flags |= SCX_GAMER_FLAG_PERIODIC;
+	if (tctx->is_wine_input)
+		flags |= SCX_GAMER_FLAG_WINE_INPUT;
+	if (tctx->is_sdl_event)
+		flags |= SCX_GAMER_FLAG_SDL_EVENT;
+	if (tctx->is_network_tx)
+		flags |= SCX_GAMER_FLAG_NETWORK_TX;
 	
 	/* TIER 0: Cache boost_shift (8 bits: 0-7) - bitwise operations (~1-2ns) */
 	flags |= ((u64)tctx->boost_shift & 0xFF) << SCX_GAMER_BOOST_SHIFT_SHIFT;

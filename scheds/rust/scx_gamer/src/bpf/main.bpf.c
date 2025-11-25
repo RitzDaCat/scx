@@ -178,6 +178,7 @@ const volatile u64 input_window_ns;
 /* Per-lane boost durations (ns) - tunable from userspace */
 const volatile u64 keyboard_boost_ns;
 const volatile u64 mouse_boost_ns;
+const volatile u64 controller_boost_ns;  /* Controller thumbstick/trigger boost duration */
 
 /* Foreground game/application tgid (0 = disabled, apply globally) */
 const volatile u32 foreground_tgid;
@@ -941,6 +942,18 @@ volatile u8 ultra_highfreq_input_mode; /* 1 = ultra-high-frequency detected (>40
 volatile u8 continuous_input_lane_mode[INPUT_LANE_MAX] = {0};
 /* Count of currently held keyboard keys (press increments, release decrements) */
 volatile u32 kbd_pressed_count;
+
+/* Keyboard refresh throttling for high-frequency input devices (8kHz mice)
+ * At 8kHz, refreshing keyboard lane on every mouse event = 8000 calls/sec overhead.
+ * Throttle to once per 10ms (100 Hz) - keyboard boost is 1000ms, so 10ms refresh is plenty. */
+volatile u64 last_kbd_lane_refresh_ns;
+#define KBD_REFRESH_THROTTLE_NS 10000000ULL  /* 10ms = 100 Hz max refresh rate */
+
+/* Input prediction: track expected next input for CPU warm-keeping
+ * At high polling rates, we can predict when next input arrives and prevent CPU from
+ * entering deep C-states, reducing worst-case latency by avoiding C-state exit delays. */
+volatile u64 predicted_next_input_ns;
+volatile u8 input_prediction_enabled;  /* Set when polling rate is stable enough to predict */
 
 /* USB IRQ cache locality optimization
  * Tracks the CPU that handles USB interrupts for the most recent input device.
@@ -2562,6 +2575,7 @@ struct raw_input_stats {
     u64 mouse_buttons;        /* EV_KEY events */
     u64 button_press;         /* KEY_PRESS */
     u64 button_release;       /* KEY_RELEASE */
+    u64 controller_analog;    /* EV_ABS events (thumbsticks, triggers) */
     u64 gaming_device_events; /* Events from registered devices */
     u64 filtered_events;      /* Events ignored (non-gaming) */
     u64 fentry_boost_triggers; /* Times fentry triggered boost */
@@ -2663,10 +2677,30 @@ static __always_inline void record_input_boost(u8 lane, u64 now,
 	if (stats)
 		__atomic_fetch_add(&stats->fentry_boost_triggers, 1, __ATOMIC_RELAXED);
 
+	/* Keyboard lane refresh with throttling for high-frequency devices
+	 * OPTIMIZATION: At 8kHz mouse, this was called 8000x/sec. Now throttled to 100 Hz.
+	 * Keyboard boost is typically 1000ms, so 10ms refresh granularity is more than adequate.
+	 * Savings: ~7900 function calls/sec eliminated at 8kHz polling. */
 	if (kbd_pressed_count > 0 && lane != INPUT_LANE_KEYBOARD) {
-		u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
-		if (!time_before(now + guard, input_lane_until[INPUT_LANE_KEYBOARD]))
-			fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
+		/* Throttle check: only refresh if 10ms+ since last refresh */
+		if (now - last_kbd_lane_refresh_ns > KBD_REFRESH_THROTTLE_NS) {
+			u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
+			if (!time_before(now + guard, input_lane_until[INPUT_LANE_KEYBOARD])) {
+				fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
+				last_kbd_lane_refresh_ns = now;
+			}
+		}
+	}
+
+	/* Input prediction: calculate expected next input arrival time
+	 * Enable prediction only when input rate is stable (EMA has converged).
+	 * This allows dispatch to keep CPU warm before expected input. */
+	if (input_trigger_rate > 100) {
+		u64 interval_ns = 1000000000ULL / input_trigger_rate;
+		predicted_next_input_ns = now + interval_ns;
+		input_prediction_enabled = 1;
+	} else {
+		input_prediction_enabled = 0;
 	}
 }
 
@@ -2983,9 +3017,14 @@ int BPF_PROG(input_event_raw, struct input_dev *dev,
             }
         }
     } else if (type == EV_ABS) {
-        if (lane_hint == INPUT_LANE_KEYBOARD) {
+        /* Analog input: controller thumbsticks, triggers, touchpads
+         * FIXED: Previously only boosted if lane_hint was KEYBOARD (always false for controllers)
+         * Now properly boosts for controller and mouse (touchpad) analog input */
+        if (lane_hint == INPUT_LANE_CONTROLLER || lane_hint == INPUT_LANE_MOUSE) {
             should_boost = true;
-            lane = INPUT_LANE_KEYBOARD;
+            lane = lane_hint;
+            if (stats)
+                __atomic_fetch_add(&stats->controller_analog, 1, __ATOMIC_RELAXED);
         }
     }
 
@@ -4041,6 +4080,20 @@ static inline void wakeup_cpu(s32 cpu)
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Wake-up @cpu for input handlers - NEVER defer.
+ * Input latency is critical for gaming. Even if deferred_wakeups is enabled
+ * (for power saving or batch efficiency), input handlers should always get
+ * immediate CPU kicks to minimize input-to-screen latency.
+ *
+ * This is the key difference from wakeup_cpu(): it bypasses deferred_wakeups.
+ */
+static inline void wakeup_cpu_for_input(s32 cpu)
+{
+	/* ALWAYS kick immediately for input - latency is paramount */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 static __noinline void gamer_enqueue_slowpath(struct task_struct *p, u64 enq_flags)
 {
 	PROF_START_HIST(enqueue);
@@ -4107,7 +4160,7 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 			 * any static pinning decisions made by launch scripts (e.g., esports mode).
 			 */
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
-			wakeup_cpu(prev_cpu);
+			wakeup_cpu_for_input(prev_cpu);  /* NEVER defer input handler wakeups */
 			u64 dispatch_latency = now - input_time;
 			__atomic_fetch_add(&nr_input_force_dispatch, 1, __ATOMIC_RELAXED);
 			if (dispatch_latency > 1000000ULL)
@@ -4138,6 +4191,21 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 		hotpath_signals.compositor_ns = now;
 	}
 
+	/* EXTENDED WAKE CHAINS: Wine/Proton input handlers
+	 * Wine input threads (xinput, dinput, rawinput, wginput) process input from
+	 * Windows games running through Proton. Signal game threads when these wake.
+	 * This reduces latency for Proton games like Arc Raiders, Sea of Thieves, etc. */
+	if (unlikely(is_wine_input_cached(p) && input_active)) {
+		hotpath_signals.wine_input_ns = now;
+	}
+
+	/* EXTENDED WAKE CHAINS: SDL event threads
+	 * SDL event loop threads process input for SDL-based games.
+	 * Signal game threads when SDL event handlers wake during input. */
+	if (unlikely(is_sdl_event_cached(p) && input_active)) {
+		hotpath_signals.sdl_event_ns = now;
+	}
+
 	/* WAKEUP CHAIN FRONT-RUN: Audio Thread Force Dispatch
 	 * When a tagged audio server thread wakes up (likely from a hardware IRQ),
 	 * force-dispatch it immediately to prevent buffer underruns (audio crackling).
@@ -4159,20 +4227,47 @@ struct task_ctx *tctx = try_lookup_task_ctx(p);
 		}
 	}
 
-	/* WAKEUP CHAIN FRONT-RUN: Game thread consumes compositor signal.
-	 * When the game thread wakes, it performs a Tier 0/1 check on the per-CPU
-	 * flag set by the compositor. If the flag is fresh, it force-dispatches
-	 * itself immediately, completing the ultra-low-latency wakeup chain.
+	/* WAKEUP CHAIN FRONT-RUN: Game thread consumes wake chain signals.
+	 * When the game thread wakes, it performs Tier 0/1 checks on per-CPU
+	 * flags set by compositor, Wine input, or SDL event handlers.
+	 * If any flag is fresh, force-dispatch immediately.
+	 * 
+	 * EXTENDED WAKE CHAINS: Check compositor, Wine input, and SDL event signals.
+	 * This enables fast wake chains for:
+	 * - Native games (compositor signal)
+	 * - Proton games (Wine input signal)
+	 * - SDL games (SDL event signal)
 	 * 
 	 * PERFORMANCE: Tier 1 per-CPU lookup (30-60ns, lock-free) + Tier 2 dispatch (10-30ns)
 	 * = ~40-90ns total, orders of magnitude faster than the old Tier 3 shared map approach.
 	 */
 	if (unlikely(is_fg && input_active)) {
+		/* Check compositor signal first (most common for native Wayland/X11) */
 		u64 compositor_time = hotpath_signals.compositor_ns;
 		if (compositor_time != 0 && (now - compositor_time) < 2000000) { /* <2ms window */
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
-			wakeup_cpu(prev_cpu);
+			wakeup_cpu_for_input(prev_cpu);
 			hotpath_signals.compositor_ns = 0;
+			PROF_END_HIST(enqueue);
+			return;
+		}
+		
+		/* Check Wine input signal (for Proton games) */
+		u64 wine_time = hotpath_signals.wine_input_ns;
+		if (wine_time != 0 && (now - wine_time) < 2000000) { /* <2ms window */
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+			wakeup_cpu_for_input(prev_cpu);
+			hotpath_signals.wine_input_ns = 0;
+			PROF_END_HIST(enqueue);
+			return;
+		}
+		
+		/* Check SDL event signal (for SDL-based games) */
+		u64 sdl_time = hotpath_signals.sdl_event_ns;
+		if (sdl_time != 0 && (now - sdl_time) < 2000000) { /* <2ms window */
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+			wakeup_cpu_for_input(prev_cpu);
+			hotpath_signals.sdl_event_ns = 0;
 			PROF_END_HIST(enqueue);
 			return;
 		}
@@ -4335,7 +4430,7 @@ skip_wake_chain:
 					tctx->expected_deadline = deadline;
 				}
 				
-				wakeup_cpu(prev_cpu);
+				wakeup_cpu_for_input(prev_cpu);  /* NEVER defer input handler wakeups */
 				
 				hotpath_signals.input_ns[idx] = 0;
 				
