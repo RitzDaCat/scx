@@ -17,7 +17,9 @@ extern const volatile bool primary_all;
 extern const volatile u64 input_window_ns;
 extern const volatile u64 keyboard_boost_ns;
 extern const volatile u64 mouse_boost_ns;
+extern const volatile u64 controller_boost_ns;
 extern volatile u64 input_until_global;
+extern volatile u8 ultra_highfreq_input_mode;  /* 1 = 8kHz+ polling rate detected */
 extern volatile u64 input_lane_until[INPUT_LANE_MAX];
 extern volatile u32 input_lane_trigger_rate[INPUT_LANE_MAX];
 extern volatile u32 kbd_pressed_count;
@@ -169,30 +171,23 @@ static __always_inline u64 compute_dynamic_window(u32 rate, u64 base, u64 min_fl
  */
 static __always_inline bool is_input_lane_active(u8 lane, u64 now)
 {
-	/* TIER 0: Fast path - check bounds first */
-	if (unlikely(lane >= INPUT_LANE_MAX))
-		return time_before(now, input_until_global);
+	/* TIER 0: BPF VERIFIER - Use bitmask to guarantee bounds */
+	u32 idx = lane & (INPUT_LANE_MAX - 1);  /* & 3 for INPUT_LANE_MAX=4 */
 	
 	/* TIER 0: Array access (volatile array, cache-friendly) */
-	/* BPF VERIFIER: Explicit bounds check before array access */
-	if (likely(lane < INPUT_LANE_MAX)) {
-		bool active = time_before(now, input_lane_until[lane]);
+	bool active = time_before(now, input_lane_until[idx]);
 
-		if (!active && lane == INPUT_LANE_KEYBOARD && kbd_pressed_count > 0) {
-			u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
-			if (!time_before(now + guard, input_lane_until[lane]))
-				fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
-			active = time_before(now, input_lane_until[lane]);
-		}
-
-		if (!active && continuous_input_lane_mode[lane])
-			continuous_input_lane_mode[lane] = 0;
-
-		return active;
+	if (!active && idx == INPUT_LANE_KEYBOARD && kbd_pressed_count > 0) {
+		u64 guard = keyboard_boost_ns ? keyboard_boost_ns : 500000000ULL;
+		if (!time_before(now + guard, input_lane_until[idx]))
+			fanout_set_input_lane(INPUT_LANE_KEYBOARD, now);
+		active = time_before(now, input_lane_until[idx]);
 	}
-	
-	/* Fallback (should never reach here due to bounds check above) */
-	return time_before(now, input_until_global);
+
+	if (!active && continuous_input_lane_mode[idx])
+		continuous_input_lane_mode[idx] = 0;
+
+	return active;
 }
 
 /**
@@ -221,55 +216,58 @@ static __always_inline bool is_input_lane_active(u8 lane, u64 now)
  */
 static __always_inline void fanout_set_input_lane(u8 lane, u64 now)
 {
-    /* TIER 0: BPF VERIFIER - Ensure lane is within bounds (clamp to valid range) */
-    u8 safe_lane = lane;
-    if (unlikely(safe_lane >= INPUT_LANE_MAX))
-        safe_lane = INPUT_LANE_OTHER;
-
-    /* BPF VERIFIER: Verify safe_lane is definitely within bounds */
-    if (unlikely(safe_lane >= INPUT_LANE_MAX))
-        return;
+    /* TIER 0: BPF VERIFIER - Use bitmask to guarantee bounds (INPUT_LANE_MAX is 4)
+     * The verifier can definitively track `& 3` as constraining to 0-3, whereas
+     * branch-based checks can lose bounds after other operations. */
+    u32 safe_lane = lane & (INPUT_LANE_MAX - 1);  /* & 3 for INPUT_LANE_MAX=4 */
 
     /* TIER 0: Stack-allocated lookup table (no heap allocation)
-     * Branchless boost duration selection eliminates misprediction penalty */
+     * Branchless boost duration selection eliminates misprediction penalty
+     * 
+     * ULTRA-HIGHFREQ OPTIMIZATION: At 8kHz+ polling, use shorter mouse boost.
+     * Events arrive every 125µs, so 8ms boost is overkill. 2ms is sufficient and
+     * reduces scheduler overhead by allowing faster window expiry. */
+    u64 mouse_boost = mouse_boost_ns;
+    if (ultra_highfreq_input_mode && mouse_boost > 2000000ULL)
+        mouse_boost = 2000000ULL;  /* 2ms for 8kHz mice */
+    
     u64 boost_durations[INPUT_LANE_MAX] = {
         [INPUT_LANE_KEYBOARD] = keyboard_boost_ns,  /* Tunable: default 1000ms */
-        [INPUT_LANE_MOUSE] = mouse_boost_ns,        /* Tunable: default 8ms */
-        [INPUT_LANE_CONTROLLER] = 500000000ULL,     /* 500ms - console-style games */
+        [INPUT_LANE_MOUSE] = mouse_boost,           /* Tunable: default 8ms, 2ms for 8kHz */
+        [INPUT_LANE_CONTROLLER] = controller_boost_ns ? controller_boost_ns : 500000000ULL,  /* Tunable: default 500ms */
         [INPUT_LANE_OTHER] = 0,                     /* No boost for other devices */
     };
 
-    u64 boost_duration_ns = boost_durations[safe_lane];
+    /* BPF VERIFIER: Re-apply bitmask immediately before array access */
+    u32 idx = safe_lane & (INPUT_LANE_MAX - 1);
+    u64 boost_duration_ns = boost_durations[idx];
 
-	if (likely(safe_lane < INPUT_LANE_MAX)) {
-		u32 prev_rate = input_lane_trigger_rate[safe_lane];
-		u32 new_rate = prev_rate;
-		u64 last_ns = input_lane_last_trigger_ns[safe_lane];
+    /* Rate tracking with explicit bounds */
+    u32 prev_rate = input_lane_trigger_rate[idx];
+    u32 new_rate = prev_rate;
+    u64 last_ns = input_lane_last_trigger_ns[idx];
 
-		if (last_ns > 0 && now > last_ns) {
-			u64 delta = now - last_ns;
-			if (delta > 1000000ULL) {
-				new_rate = 0;
-			} else if (delta > 0) {
-				u32 instant = delta < 10000000ULL ? (u32)(1000000000ULL / delta) : 0;
-				new_rate = (prev_rate * 7 + instant) >> 3;
-			}
-		}
+    if (last_ns > 0 && now > last_ns) {
+        u64 delta = now - last_ns;
+        if (delta > 1000000ULL) {
+            new_rate = 0;
+        } else if (delta > 0) {
+            u32 instant = delta < 10000000ULL ? (u32)(1000000000ULL / delta) : 0;
+            new_rate = (prev_rate * 7 + instant) >> 3;
+        }
+    }
 
-		input_lane_trigger_rate[safe_lane] = new_rate;
+    input_lane_trigger_rate[idx] = new_rate;
 
-		if (boost_duration_ns > 0) {
-			boost_duration_ns = compute_dynamic_window(new_rate, boost_duration_ns, 200000ULL);
-			input_lane_dynamic_ns[safe_lane] = boost_duration_ns;
-		}
-	}
+    if (boost_duration_ns > 0) {
+        boost_duration_ns = compute_dynamic_window(new_rate, boost_duration_ns, 200000ULL);
+        input_lane_dynamic_ns[idx] = boost_duration_ns;
+    }
 
 	/* TIER 0: Early exit for non-boost lanes (other devices) */
 	if (unlikely(boost_duration_ns == 0)) {
-		if (likely(safe_lane < INPUT_LANE_MAX)) {
-			input_lane_last_trigger_ns[safe_lane] = now;
-			input_lane_dynamic_ns[safe_lane] = 0;
-		}
+		input_lane_last_trigger_ns[idx] = now;
+		input_lane_dynamic_ns[idx] = 0;
 		return;
 	}
 
@@ -277,12 +275,9 @@ static __always_inline void fanout_set_input_lane(u8 lane, u64 now)
 	u64 lane_expiry = now + boost_duration_ns;
 	
 	/* TIER 0: Update lane expiry (volatile write, ~1-2ns) */
-	/* BPF VERIFIER: Bounds check immediately before array access */
-	if (likely(safe_lane < INPUT_LANE_MAX)) {
-		input_lane_until[safe_lane] = lane_expiry;
-		continuous_input_lane_mode[safe_lane] = 1;  /* Mark lane as boosted */
-		input_lane_last_trigger_ns[safe_lane] = now;  /* Track trigger time */
-	}
+	input_lane_until[idx] = lane_expiry;
+	continuous_input_lane_mode[idx] = 1;  /* Mark lane as boosted */
+	input_lane_last_trigger_ns[idx] = now;  /* Track trigger time */
 
 	/* TIER 0: Update global input window if this lane extends it (volatile write, ~1-2ns) */
 	if (time_before(input_until_global, lane_expiry))

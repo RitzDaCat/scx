@@ -733,6 +733,58 @@ static __always_inline bool comm_contains(const char *comm, const char *needle, 
 }
 
 /**
+ * is_wine_input_thread - Check if thread is a Wine/Proton input handler
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * Wine input threads handle XInput, DirectInput, RawInput, and WGI (Windows Gaming Input).
+ * These are critical for gamepad and keyboard/mouse input in Proton games.
+ *
+ * TIER 0: Optimized character-by-character comparison (~5-20ns)
+ */
+static __always_inline bool is_wine_input_thread(const char *comm)
+{
+	/* Check for "wine_" prefix first */
+	if (comm[0] != 'w' || comm[1] != 'i' || comm[2] != 'n' || comm[3] != 'e' || comm[4] != '_')
+		return false;
+	
+	/* wine_xinput_hid - XInput controller handling */
+	if (comm[5] == 'x' && comm[6] == 'i' && comm[7] == 'n')
+		return true;
+	
+	/* wine_wginput_worker - Windows Gaming Input (WGI) */
+	if (comm[5] == 'w' && comm[6] == 'g' && comm[7] == 'i')
+		return true;
+	
+	/* wine_dinput_worker - DirectInput */
+	if (comm[5] == 'd' && comm[6] == 'i' && comm[7] == 'n')
+		return true;
+	
+	/* wine_rawinput_* - Raw Input */
+	if (comm[5] == 'r' && comm[6] == 'a' && comm[7] == 'w')
+		return true;
+	
+	return false;
+}
+
+/**
+ * is_sdl_event_thread - Check if thread is an SDL event loop thread
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * SDL event threads handle input events in SDL-based games.
+ * Examples: SDLTimer, SDLVideoResize, SDL Main Thread
+ *
+ * TIER 0: Optimized character-by-character comparison (~5-15ns)
+ */
+static __always_inline bool is_sdl_event_thread(const char *comm)
+{
+	/* SDL* prefix */
+	if (comm[0] == 'S' && comm[1] == 'D' && comm[2] == 'L')
+		return true;
+	
+	return false;
+}
+
+/**
  * classify_input_handler - Classify thread as input handler
  * @p: Task struct pointer
  * @tctx: Task context to update
@@ -748,6 +800,15 @@ static __always_inline void classify_input_handler(struct task_struct *p, struct
 	if (likely(is_input_handler_name(p->comm))) {
 		tctx->is_input_handler = 1;
 		apply_class_boost(tctx, 7);
+		
+		/* EXTENDED WAKE CHAINS: Detect Wine and SDL input threads for signal propagation
+		 * This enables wake chain signals to flow through Wine/SDL input handlers
+		 * to game threads, reducing latency for Proton games and SDL-based games. */
+		if (is_wine_input_thread(p->comm))
+			tctx->is_wine_input = 1;
+		else if (is_sdl_event_thread(p->comm))
+			tctx->is_sdl_event = 1;
+		
 		if (likely(tctx->input_lane == INPUT_LANE_OTHER)) {
 			if (comm_contains(p->comm, "mouse", 5))
 				tctx->input_lane = INPUT_LANE_MOUSE;

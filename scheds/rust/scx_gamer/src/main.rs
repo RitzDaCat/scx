@@ -300,6 +300,14 @@ struct Opts {
     #[clap(long, default_value = "8000")]
     mouse_boost_us: u64,
 
+    /// Controller boost duration in microseconds (default: 500ms).
+    /// Duration for which controller input (thumbstick, triggers) extends the boost window.
+    /// Covers analog input from gamepads and console-style games.
+    /// Lower values (200-300ms) for fighting games with precise inputs.
+    /// Higher values (500-1000ms) for open world games with sustained analog input.
+    #[clap(long, default_value = "500000")]
+    controller_boost_us: u64,
+
     /// Watchdog: if no dispatch progress is observed for N seconds, exit to restore CFS (0=off).
     #[clap(long, default_value = "0")]
     watchdog_secs: u64,
@@ -1359,6 +1367,7 @@ impl<'a> Scheduler<'a> {
         rodata.input_window_ns = opts.input_window_us * 1000;
         rodata.keyboard_boost_ns = opts.keyboard_boost_us * 1000;
         rodata.mouse_boost_ns = opts.mouse_boost_us * 1000;
+        rodata.controller_boost_ns = opts.controller_boost_us * 1000;
         rodata.prefer_napi_on_input = opts.prefer_napi_on_input;
         rodata.mm_hint_enabled = !opts.disable_mm_hint;
         rodata.no_stats = opts.no_stats;
