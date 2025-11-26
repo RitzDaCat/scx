@@ -393,6 +393,17 @@ struct hotpath_signals {
 	volatile u64 sdl_event_ns;		/* Last SDL event loop wake timestamp */
 	volatile u64 network_tx_ns;		/* Last network TX timestamp (for online gaming) */
 	volatile u64 audio_submit_ns;		/* Last game audio submit timestamp (AUDIO WAKE CHAIN) */
+	volatile u64 network_recv_ns;		/* NETWORK WAKE CHAIN: Last packet arrival timestamp */
+	volatile u32 network_recv_cpu;		/* CPU that received the packet (for locality) */
+	
+	/* FRAME PACING STABILIZER: VRR-aware jitter detection for motion clarity
+	 * Detects sudden frame time jumps (scheduler-induced jitter) vs gradual VRR changes.
+	 * When jitter detected, activates stabilization mode to smooth frame delivery.
+	 * Critical for: flick shots, target tracking, motion sync mice, competitive play. */
+	volatile u64 frame_stabilization_until;	/* Timestamp when stabilization mode expires */
+	volatile u64 last_frame_time_ns;	/* Previous frame time for delta calculation */
+	volatile u64 frame_jitter_ns;		/* Current frame-to-frame jitter (delta) */
+	volatile u8 frame_stabilization_active;	/* 1 = stabilization mode active */
 } __attribute__((aligned(64)));  /* Ensure struct starts on cache line boundary */
 extern struct hotpath_signals hotpath_signals;
 
