@@ -55,3 +55,23 @@ wayland-protocols = { version = "0.32", default-features = false, features = ["c
 enable_backtrace = []
 full_tui = []
 
+# ============================================================================
+# BUILD NOTES - AMD Ryzen 9800X3D (Zen 5 + 3D V-Cache)
+# ============================================================================
+#
+# Profile settings are defined in the WORKSPACE Cargo.toml (../../Cargo.toml)
+# and cannot be overridden here. Key settings from workspace:
+#   - lto = "fat"
+#   - codegen-units = 1
+#   - debug = "line-tables-only"
+#
+# Additional optimizations are applied via:
+#   1. .cargo/config.toml - RUSTFLAGS for znver5 target
+#   2. build.sh - Strips debug symbols post-build
+#
+# For maximum performance, use build.sh which:
+#   - Detects CPU architecture (znver5 for 9800X3D)
+#   - Sets optimal RUSTFLAGS
+#   - Strips the final binary
+#
+

@@ -184,7 +184,12 @@ static __always_inline bool is_network_name(const char *comm)
 	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't')
 		return true;  /* NetThread, Net Queue, Network */
 
-	/* Warframe network threads - Wine networking */
+	/* ============================================
+	 * WINE/PROTON NETWORK THREAD PATTERNS
+	 * These handle network I/O for Windows games on Linux
+	 * ============================================ */
+
+	/* Wine RPC threads (remote procedure calls - often network related) */
 	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
 	    comm[4] == '_' && comm[5] == 'r' && comm[6] == 'p' && comm[7] == 'c')
 		return true;  /* wine_rpcrt4_ser */
@@ -193,6 +198,41 @@ static __always_inline bool is_network_name(const char *comm)
 	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
 	    comm[4] == '_' && comm[5] == 'n' && comm[6] == 'e' && comm[7] == 't')
 		return true;  /* wine_net* threads */
+
+	/* Wine Winsock threads - Windows socket API implementation */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'w' && comm[6] == 's')
+		return true;  /* wine_ws* (winsock) */
+
+	/* Wine HTTP/WinHTTP threads */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'h' && comm[6] == 't' && comm[7] == 't')
+		return true;  /* wine_htt* (http/winhttp) */
+
+	/* Wine WinInet threads */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'w' && comm[6] == 'i' && comm[7] == 'n')
+		return true;  /* wine_win* (wininet) */
+
+	/* ntdll threadpool - handles async network I/O in Wine/Proton */
+	if (comm[0] == 'n' && comm[1] == 't' && comm[2] == 'd' && comm[3] == 'l' &&
+	    comm[4] == 'l' && comm[5] == '_')
+		return true;  /* ntdll_* (ntdll threadpool workers) */
+
+	/* Wine server - can be involved in network synchronization */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == 's' && comm[5] == 'e' && comm[6] == 'r' && comm[7] == 'v')
+		return true;  /* wineserv* */
+
+	/* Wine I/O completion port threads (async network I/O) */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'i' && comm[6] == 'o')
+		return true;  /* wine_io* */
+
+	/* Wine async threads (async I/O including network) */
+	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
+	    comm[4] == '_' && comm[5] == 'a' && comm[6] == 's' && comm[7] == 'y')
+		return true;  /* wine_asy* (async) */
 
 	/* Warframe main game threads - generic game executable patterns */
 	if (comm[0] == 'W' && comm[1] == 'a' && comm[2] == 'r' && comm[3] == 'f' &&
@@ -221,6 +261,16 @@ static __always_inline bool is_network_name(const char *comm)
 	    comm[4] == '_' && comm[5] == 'd' && comm[6] == 'i' && comm[7] == 'n')
 		return true;  /* wine_dinput_wor */
 
+	/* proton-* threads (Proton compatibility layer helpers) */
+	if (comm[0] == 'p' && comm[1] == 'r' && comm[2] == 'o' && comm[3] == 't' &&
+	    comm[4] == 'o' && comm[5] == 'n')
+		return true;  /* proton* */
+
+	/* Steam Runtime threads that handle network (for Steam games) */
+	if (comm[0] == 's' && comm[1] == 't' && comm[2] == 'e' && comm[3] == 'a' &&
+	    comm[4] == 'm' && comm[5] == '_')
+		return true;  /* steam_* */
+
 
 	if (comm[0] == 'r' && comm[1] == 'e' && comm[2] == 'c' && comm[3] == 'v')
 		return true;
@@ -244,6 +294,15 @@ static __always_inline bool is_network_name(const char *comm)
  * Gaming-specific network thread detection
  * Gaming network threads have specific patterns and require ultra-low latency
  * Examples: Client, Server, Netcode, Multiplayer, GameClient, GameServer
+ *
+ * Also detects common gaming networking libraries:
+ * - ENet (many indie games, Terraria, etc.)
+ * - RakNet (Rust, ARK, many Unreal games)
+ * - GameNetworkingSockets (Valve's networking library, CS2, Dota 2)
+ * - Photon (Unity multiplayer games)
+ * - Mirror (Unity networking)
+ * - SteamNetworking (Steam games)
+ * - Epic Online Services (Fortnite, Arc Raiders)
  */
 static __always_inline bool is_gaming_network_thread(const char *comm)
 {
@@ -259,6 +318,8 @@ static __always_inline bool is_gaming_network_thread(const char *comm)
 			return true;  /* GameClient */
 		if (comm[4] == 'S' && comm[5] == 'e' && comm[6] == 'r' && comm[7] == 'v')
 			return true;  /* GameServer */
+		if (comm[4] == 'N' && comm[5] == 'e' && comm[6] == 't')
+			return true;  /* GameNet*, GameNetworking */
 	}
 
 	/* Multiplayer/netcode threads */
@@ -274,6 +335,98 @@ static __always_inline bool is_gaming_network_thread(const char *comm)
 
 	if (comm[0] == 'C' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't')
 		return true;  /* Chat */
+
+	/* ============================================
+	 * GAMING NETWORKING LIBRARIES
+	 * ============================================ */
+
+	/* ENet - lightweight reliable UDP library (Terraria, many indie games)
+	 * Thread names: enet, ENetHost, ENet_* */
+	if ((comm[0] == 'e' || comm[0] == 'E') && 
+	    (comm[1] == 'n' || comm[1] == 'N') && 
+	    (comm[2] == 'e' || comm[2] == 'E') && 
+	    (comm[3] == 't' || comm[3] == 'T'))
+		return true;  /* enet/ENet */
+
+	/* RakNet - high-performance game networking (Rust, ARK, many Unreal games)
+	 * Thread names: RakNet*, RakPeer, RNS* */
+	if (comm[0] == 'R' && comm[1] == 'a' && comm[2] == 'k')
+		return true;  /* RakNet, RakPeer */
+	if (comm[0] == 'R' && comm[1] == 'N' && comm[2] == 'S')
+		return true;  /* RNS* (RakNet internal) */
+
+	/* GameNetworkingSockets - Valve's networking (CS2, Dota 2, TF2)
+	 * Thread names: GNS*, SteamNetworking*, ValveNet* */
+	if (comm[0] == 'G' && comm[1] == 'N' && comm[2] == 'S')
+		return true;  /* GNS* */
+	if (comm[0] == 'S' && comm[1] == 't' && comm[2] == 'e' && comm[3] == 'a' &&
+	    comm[4] == 'm' && comm[5] == 'N' && comm[6] == 'e' && comm[7] == 't')
+		return true;  /* SteamNet* */
+	if (comm[0] == 'V' && comm[1] == 'a' && comm[2] == 'l' && comm[3] == 'v' &&
+	    comm[4] == 'e' && comm[5] == 'N' && comm[6] == 'e' && comm[7] == 't')
+		return true;  /* ValveNet* */
+
+	/* Photon - Unity multiplayer (many Unity games)
+	 * Thread names: Photon*, PhotonPeer, PhotonSocket */
+	if (comm[0] == 'P' && comm[1] == 'h' && comm[2] == 'o' && comm[3] == 't' &&
+	    comm[4] == 'o' && comm[5] == 'n')
+		return true;  /* Photon* */
+
+	/* Mirror - Unity networking library (many Unity games)
+	 * Thread names: Mirror*, NetworkClient, NetworkServer, Transport */
+	if (comm[0] == 'M' && comm[1] == 'i' && comm[2] == 'r' && comm[3] == 'r' &&
+	    comm[4] == 'o' && comm[5] == 'r')
+		return true;  /* Mirror* */
+	if (comm[0] == 'T' && comm[1] == 'r' && comm[2] == 'a' && comm[3] == 'n' &&
+	    comm[4] == 's' && comm[5] == 'p' && comm[6] == 'o' && comm[7] == 'r')
+		return true;  /* Transport (Mirror/Netcode) */
+
+	/* Epic Online Services (EOS) - Fortnite, Arc Raiders, many Unreal games
+	 * Thread names: EOS*, EOSSDK*, EOSNet*, OnlineSubsystem* */
+	if (comm[0] == 'E' && comm[1] == 'O' && comm[2] == 'S')
+		return true;  /* EOS*, EOSSDK* */
+	if (comm[0] == 'O' && comm[1] == 'n' && comm[2] == 'l' && comm[3] == 'i' &&
+	    comm[4] == 'n' && comm[5] == 'e' && comm[6] == 'S' && comm[7] == 'u')
+		return true;  /* OnlineSu* (OnlineSubsystem) */
+
+	/* Unreal Engine networking threads
+	 * Thread names: NetDriver, NetConnection, IpNetDriver, IpConnection */
+	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'D')
+		return true;  /* NetDriver */
+	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'C' &&
+	    comm[4] == 'o' && comm[5] == 'n' && comm[6] == 'n')
+		return true;  /* NetConn* */
+	if (comm[0] == 'I' && comm[1] == 'p' && comm[2] == 'N' && comm[3] == 'e' &&
+	    comm[4] == 't')
+		return true;  /* IpNet* */
+	if (comm[0] == 'I' && comm[1] == 'p' && comm[2] == 'C' && comm[3] == 'o' &&
+	    comm[4] == 'n' && comm[5] == 'n')
+		return true;  /* IpConn* */
+
+	/* ReplicationGraph - Unreal Engine 5 replication system */
+	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'p' && comm[3] == 'l' &&
+	    comm[4] == 'i' && comm[5] == 'c')
+		return true;  /* Replic* */
+
+	/* Nakama - open source game server (used by indie games)
+	 * Thread names: Nakama* */
+	if (comm[0] == 'N' && comm[1] == 'a' && comm[2] == 'k' && comm[3] == 'a' &&
+	    comm[4] == 'm' && comm[5] == 'a')
+		return true;  /* Nakama* */
+
+	/* PlayFab - Microsoft game backend (many games)
+	 * Thread names: PlayFab* */
+	if (comm[0] == 'P' && comm[1] == 'l' && comm[2] == 'a' && comm[3] == 'y' &&
+	    comm[4] == 'F' && comm[5] == 'a' && comm[6] == 'b')
+		return true;  /* PlayFab* */
+
+	/* Vivox - voice chat (many AAA games including Arc Raiders)
+	 * Thread names: Vivox*, VivoxCore*, vx_* */
+	if (comm[0] == 'V' && comm[1] == 'i' && comm[2] == 'v' && comm[3] == 'o' &&
+	    comm[4] == 'x')
+		return true;  /* Vivox* */
+	if (comm[0] == 'v' && comm[1] == 'x' && comm[2] == '_')
+		return true;  /* vx_* */
 
 	return false;
 }
@@ -964,10 +1117,50 @@ static __always_inline void classify_network(struct task_struct *p, struct task_
  * be heavily penalized when gaming. These processes can easily
  * consume 100% of multiple cores and pollute caches.
  *
+ * ESPORTS: Also includes shader compilers which cause random hitches
+ * during gameplay when entering new areas or loading effects.
+ *
  * Returns: true if this is a compiler/build tool
  */
 static __always_inline bool is_compiler_name(const char *comm)
 {
+	/* SHADER COMPILERS - Critical for preventing gameplay hitches
+	 * These run when entering new areas, loading effects, or Steam pre-caching */
+	
+	/* Fossilize (Steam shader pre-caching) - can cause massive hitches */
+	if (comm[0] == 'f' && comm[1] == 'o' && comm[2] == 's' && comm[3] == 's' &&
+	    comm[4] == 'i' && comm[5] == 'l')
+		return true;  /* fossilize* */
+	
+	/* SPIRV shader compiler (Vulkan intermediate format) */
+	if (comm[0] == 's' && comm[1] == 'p' && comm[2] == 'i' && comm[3] == 'r' &&
+	    comm[4] == 'v')
+		return true;  /* spirv* */
+	
+	/* glslc/glslang (GLSL shader compiler) */
+	if (comm[0] == 'g' && comm[1] == 'l' && comm[2] == 's' && comm[3] == 'l')
+		return true;  /* glsl*, glslc, glslang */
+	
+	/* shaderc (Google shader compiler) */
+	if (comm[0] == 's' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 'd' &&
+	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'c')
+		return true;  /* shaderc */
+	
+	/* DXC (DirectX Shader Compiler - used by Proton) */
+	if (comm[0] == 'd' && comm[1] == 'x' && comm[2] == 'c')
+		return true;  /* dxc */
+	
+	/* Mesa shader compilers (radv, anv, etc.) */
+	if (comm[0] == 'r' && comm[1] == 'a' && comm[2] == 'd' && comm[3] == 'v' &&
+	    comm[4] == '_' && comm[5] == 's' && comm[6] == 'h')
+		return true;  /* radv_shader (AMD) */
+	
+	if (comm[0] == 'a' && comm[1] == 'c' && comm[2] == 'o' && comm[3] == '_')
+		return true;  /* aco_* (AMD ACO compiler) */
+	
+	if (comm[0] == 'n' && comm[1] == 'i' && comm[2] == 'r' && comm[3] == '_')
+		return true;  /* nir_* (Mesa NIR compiler) */
+	
 	/* Rust toolchain - cargo, rustc, rustdoc, rust-analyzer */
 	if (comm[0] == 'c' && comm[1] == 'a' && comm[2] == 'r' && comm[3] == 'g' &&
 	    comm[4] == 'o')

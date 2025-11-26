@@ -345,10 +345,12 @@ static __always_inline void update_crtc_timing(struct drm_crtc *crtc, u64 now)
 			/* First valid interval: initialize directly */
 			timing->frame_interval_ns = interval;
 		} else {
-			/* VRR-ADAPTIVE EMA: 1/4 weight for fast response
-			 * new_interval = (3 * old + 1 * new) / 4
-			 * Converges in ~4 frames to new rate */
-			timing->frame_interval_ns = (current_interval * 3 + interval) >> 2;
+			/* ESPORTS VRR EMA: 1/2 weight for fastest response
+			 * new_interval = (old + new) / 2
+			 * Converges in ~2 frames to new rate - critical for VRR gaming
+			 * where framerate swings (150-230 FPS) need instant adaptation.
+			 * Power savings not a concern - prioritize frame deadline accuracy. */
+			timing->frame_interval_ns = (current_interval + interval) >> 1;
 		}
 
 		/* Calculate FPS × 10 for comparison (avoids floating point)
@@ -408,6 +410,49 @@ static __always_inline void update_crtc_timing(struct drm_crtc *crtc, u64 now)
 		if (crtc_key == primary_crtc_ptr || timing->is_primary) {
 			last_page_flip_ns = now;
 			frame_interval_ns = timing->frame_interval_ns;
+			
+			/* FRAME PACING STABILIZER: VRR-aware jitter detection
+			 * 
+			 * Detect sudden frame time jumps vs gradual VRR changes.
+			 * VRR changes are gradual (monitor has physical limits).
+			 * Scheduler-induced jitter causes SUDDEN jumps.
+			 * 
+			 * Critical for: flick shots, target tracking, motion sync mice.
+			 * 
+			 * Thresholds:
+			 * - JITTER_ACTIVATE_NS: 1.5ms jump activates stabilization
+			 * - JITTER_DEACTIVATE_NS: 0.5ms sustained clears stabilization
+			 * - Stabilization lasts 4 frame intervals minimum (hysteresis)
+			 */
+			#define JITTER_ACTIVATE_NS   1500000ULL  /* 1.5ms frame-to-frame delta */
+			#define JITTER_DEACTIVATE_NS  500000ULL  /* 0.5ms to clear */
+			
+			u64 last_frame = hotpath_signals.last_frame_time_ns;
+			if (last_frame > 0) {
+				/* Calculate frame-to-frame delta (jitter) */
+				u64 delta = interval > last_frame ? 
+				            interval - last_frame : 
+				            last_frame - interval;
+				
+				hotpath_signals.frame_jitter_ns = delta;
+				
+				if (delta > JITTER_ACTIVATE_NS) {
+					/* JITTER DETECTED: Activate stabilization mode
+					 * Boost all render threads, lock migrations, crush background */
+					hotpath_signals.frame_stabilization_active = 1;
+					/* Hold stabilization for 4 frame intervals (hysteresis) */
+					u64 hold_duration = timing->frame_interval_ns << 2;
+					if (hold_duration < 16000000ULL)
+						hold_duration = 16000000ULL;  /* Min 16ms */
+					hotpath_signals.frame_stabilization_until = now + hold_duration;
+				} else if (delta < JITTER_DEACTIVATE_NS && 
+				           hotpath_signals.frame_stabilization_active &&
+				           now > hotpath_signals.frame_stabilization_until) {
+					/* Jitter cleared and hold time expired - deactivate */
+					hotpath_signals.frame_stabilization_active = 0;
+				}
+			}
+			hotpath_signals.last_frame_time_ns = interval;
 		}
 	}
 
