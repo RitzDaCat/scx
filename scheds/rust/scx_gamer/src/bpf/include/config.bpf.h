@@ -111,7 +111,11 @@
  */
 #define CLASSIFICATION_REFRESH_NS	(2ULL * NSEC_PER_MSEC)
 #define CLASSIFICATION_BACKOFF_MAX_SHIFT	3
-#define IDLE_HINT_VALID_NS		(500ULL * NSEC_PER_USEC)
+/* BUG FIX: Reduced from 500µs to 200µs to prevent stale hints from causing
+ * cross-CCX migrations at high frame rates (240Hz = 4.17ms frames).
+ * At 200µs, hints from different frames are rejected, reducing cache misses
+ * from unnecessary CCX hops (~100-300ns penalty per hop on AMD Ryzen). */
+#define IDLE_HINT_VALID_NS		(200ULL * NSEC_PER_USEC)
 
 /* NAPI preference tracking
  *

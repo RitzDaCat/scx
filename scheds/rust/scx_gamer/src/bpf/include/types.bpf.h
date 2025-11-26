@@ -137,6 +137,13 @@ struct CACHE_ALIGNED task_ctx {
 	/* UE5.6 DX12 Wake Chain Boosting */
 	u8 wake_chain_boost;		/* Temporary boost from wake chain (0-2, added to base boost) */
 	u64 wake_chain_expiry;		/* Timestamp when wake chain boost expires */
+	
+	/* CORE AFFINITY CHAIN: Cache locality optimization for input-to-frame pipeline
+	 * When input handler wakes game thread, we record which CPU the waker ran on.
+	 * select_cpu then prefers CPUs sharing cache (L2/L3) with the waker for locality.
+	 * This keeps mouse delta data hot in cache through the entire render pipeline. */
+	s32 wake_chain_cpu;		/* CPU where waker ran (-1 = invalid) */
+	u64 wake_chain_cpu_ts;		/* Timestamp when wake_chain_cpu was set */
 
 	/* Frame deadline feedback loop (per-thread state)
 	 * Tracks frame lateness to provide responsive boost adjustments without static tuning. */

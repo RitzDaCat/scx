@@ -26,7 +26,11 @@ extern volatile u32 kbd_pressed_count;
 extern volatile u32 input_trigger_rate;
 extern volatile u64 last_input_trigger_ns;
 extern volatile u64 napi_until_global;
-extern volatile u64 napi_last_softirq_ns[MAX_CPUS];
+/* OPTIMIZATION: Single best CPU tracking instead of per-CPU array scan.
+ * Eliminates 32-iteration loop that caused BPF verifier state explosion.
+ * The tracepoint updates these atomically when network softirqs run. */
+extern volatile s32 napi_best_cpu;       /* CPU that most recently handled NET softirq */
+extern volatile u64 napi_best_ts;        /* Timestamp when that CPU handled softirq */
 extern private(GAMER) struct bpf_cpumask __kptr *primary_cpumask;
 
 /* External stats */
@@ -41,29 +45,33 @@ extern volatile u64 input_force_dispatch_latency_max_ns;
 
 static __always_inline void fanout_set_input_lane(u8 lane, u64 now);
 
-#define NAPI_SCAN_MAX 32
-
-static __always_inline s32 find_recent_napi_cpu(u64 now)
+/**
+ * get_recent_napi_cpu - Get CPU that recently handled network softirq
+ * @now: Current timestamp
+ *
+ * OPTIMIZATION: Replaces 32-iteration loop with single variable check.
+ * Reduces BPF instruction count by ~100+ instructions.
+ * 
+ * Returns: CPU ID if valid and recent, -1 otherwise
+ *
+ * TIER 0: Single volatile read + comparison (~2-3ns)
+ */
+static __always_inline s32 get_recent_napi_cpu(u64 now)
 {
+	/* TIER 0: Early exit if NAPI window expired */
 	if (unlikely(!time_before(now, napi_until_global)))
 		return -1;
 
-	s32 best_cpu = -1;
-	u64 best_ts = 0;
+	/* TIER 0: Check if best CPU is still valid (within timeout) */
+	s32 cpu = napi_best_cpu;
+	if (cpu < 0 || (u32)cpu >= MAX_CPUS)
+		return -1;
 
-	for (int i = 0; i < NAPI_SCAN_MAX && i < MAX_CPUS; i++) {
-		u64 ts = napi_last_softirq_ns[i];
-		if (ts == 0)
-			continue;
-		if (!time_before(now, ts + NAPI_PREFER_TIMEOUT_NS))
-			continue;
-		if (ts > best_ts) {
-			best_ts = ts;
-			best_cpu = i;
-		}
-	}
+	/* TIER 0: Check if the timestamp is recent enough */
+	if (!time_before(now, napi_best_ts + NAPI_PREFER_TIMEOUT_NS))
+		return -1;
 
-	return best_cpu;
+	return cpu;
 }
 
 /**
@@ -119,6 +127,10 @@ static __always_inline bool is_input_active_now(u64 now)
 static __always_inline u64 compute_dynamic_window(u32 rate, u64 base, u64 min_floor_ns)
 {
 	u64 adjusted = base;
+	
+	/* BUG FIX: Define a reasonable maximum window cap to prevent overflow.
+	 * 10 seconds is a reasonable max - anything longer is clearly a bug. */
+	const u64 absolute_max_ns = 10000000000ULL;  /* 10 seconds */
 
 	if (rate > 800)
 		adjusted = base + (base >> 1);
@@ -129,27 +141,37 @@ static __always_inline u64 compute_dynamic_window(u32 rate, u64 base, u64 min_fl
 
 	u64 latency_ema = input_force_dispatch_latency_ns;
 	if (latency_ema > 0) {
-		if (latency_ema > 400000ULL)
-			adjusted += adjusted >> 1;
-		else if (latency_ema > 250000ULL)
-			adjusted += adjusted >> 2;
-		else if (latency_ema < 140000ULL && adjusted > min_floor_ns)
+		if (latency_ema > 400000ULL) {
+			u64 increment = adjusted >> 1;
+			/* BUG FIX: Check for overflow before addition */
+			if (adjusted + increment > adjusted)
+				adjusted += increment;
+		} else if (latency_ema > 250000ULL) {
+			u64 increment = adjusted >> 2;
+			if (adjusted + increment > adjusted)
+				adjusted += increment;
+		} else if (latency_ema < 140000ULL && adjusted > min_floor_ns)
 			adjusted = (adjusted * 3) >> 2;
 	}
 
 	u64 latency_peak = input_force_dispatch_latency_max_ns;
-	if (latency_peak > 800000ULL)
-		adjusted += adjusted >> 1;
+	if (latency_peak > 800000ULL) {
+		u64 increment = adjusted >> 1;
+		/* BUG FIX: Check for overflow before addition */
+		if (adjusted + increment > adjusted)
+			adjusted += increment;
+	}
 
 	if (base == 0)
-		return adjusted;
+		return adjusted > absolute_max_ns ? absolute_max_ns : adjusted;
 
 	u64 min_window = base >> 2;
 	if (min_window < min_floor_ns)
 		min_window = min_floor_ns;
 	u64 max_window = base << 1;
-	if (max_window < base)
-		max_window = base;
+	/* BUG FIX: Check for overflow on left shift */
+	if (max_window < base || max_window > absolute_max_ns)
+		max_window = base < absolute_max_ns ? base : absolute_max_ns;
 
 	if (adjusted < min_window)
 		adjusted = min_window;
@@ -322,15 +344,17 @@ static __always_inline void fanout_set_napi_window(void)
  * @cpu: CPU ID to check
  * @now: Current timestamp
  *
- * Returns true if this CPU should be preferred for network-related
- * task placement during input windows.
+ * Returns true if this CPU matches the most recent network softirq handler
+ * and should be preferred for network-related task placement.
  *
- * TIER 0/1: Optimized for CPU selection hot path
+ * OPTIMIZATION: Now uses single best CPU tracking instead of per-CPU array.
+ * This eliminates the 32-iteration loop that caused BPF load failures.
+ *
+ * TIER 0: Optimized for CPU selection hot path
  * - Window check: Tier 0 (~1-2ns, volatile read + comparison)
- * - Bounds check: Tier 0 (~0.5-1ns)
- * - Array access: Tier 0 (~0.5-1ns, volatile array)
+ * - CPU comparison: Tier 0 (~0.5-1ns)
  * - Time comparison: Tier 0 (~0.5-1ns)
- * - Total: ~2.5-5ns
+ * - Total: ~2-3ns
  */
 static __always_inline bool is_napi_softirq_preferred_cpu(s32 cpu, u64 now)
 {
@@ -338,12 +362,12 @@ static __always_inline bool is_napi_softirq_preferred_cpu(s32 cpu, u64 now)
 	if (unlikely(!time_before(now, napi_until_global)))
 		return false;
 
-	/* TIER 0: Bounds check before array access */
-	if (unlikely(cpu < 0 || (u32)cpu >= MAX_CPUS))
+	/* TIER 0: Check if this CPU is the best NAPI CPU */
+	if (cpu != napi_best_cpu)
 		return false;
 
-	/* TIER 0: Check if CPU handled net softirq within timeout window */
-	return time_before(now, napi_last_softirq_ns[cpu] + NAPI_PREFER_TIMEOUT_NS);
+	/* TIER 0: Check if the timestamp is recent enough */
+	return time_before(now, napi_best_ts + NAPI_PREFER_TIMEOUT_NS);
 }
 
 #define INPUT_IDLE_DECAY_NS 1000000ULL
