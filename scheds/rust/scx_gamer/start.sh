@@ -147,9 +147,10 @@ run_standard() {
 
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
-1) Baseline            Default settings, minimal optimizations
+1) Baseline            Clean scheduler defaults, no instrumentation
                        - Slice: 1000us (1ms)
-                       - Use for: Testing, debugging
+                       - No stats, no detectors, no tracing overhead
+                       - Use for: General desktop use, light gaming
 
 2) Casual Gaming       Balanced performance for general gaming
                        - Slice: 500us, MM affinity, NAPI preference
@@ -158,10 +159,10 @@ PROFILE                DESCRIPTION
                        - Use for: Single-player, RPGs, 60Hz monitors
 
 3) Esports             Competitive gaming with aggressive tuning
-                       - Slice: 250us, avoid SMT, max responsiveness
+                       - Slice: 250us, avoid SMT, NAPI-aware, no stats
                        - Keyboard boost: 300ms (tight, less background penalty)
                        - Mouse boost: 6ms (covers 8000Hz polling)
-                       - Use for: FPS, MOBAs, 144Hz-240Hz (RECOMMENDED)
+                       - Use for: Valorant, CS2, LoL, 144Hz-240Hz (RECOMMENDED)
 
 4) NAPI Preference     Network-aware scheduling testing
                        - Slice: 500us, prefer-napi-on-input
@@ -177,9 +178,14 @@ PROFILE                DESCRIPTION
                        - Kernel admission control, no starvation risk
                        - Use for: Maximum consistency and stability
 
-NOTE: Profiles run WITHOUT monitoring (--stats/--monitor/--tui) for maximum
-      performance. Ring buffer write is automatically skipped, saving ~20µs per
-      event. Use TUI Dashboard (option 3) if you need visual monitoring.
+PROFILE HIERARCHY:
+  Baseline       → General desktop, light gaming (minimal overhead)
+  Casual Gaming  → Single-player, RPGs, 60Hz (balanced optimizations)
+  Esports        → Competitive FPS/MOBA, 144Hz+ (aggressive tuning)
+  Ultra-Latency  → Aim trainers, 360Hz+ (extreme low-latency)
+
+NOTE: All profiles run WITHOUT monitoring for maximum performance.
+      Use TUI Dashboard (option 3) if you need visual monitoring.
 
 q) Back to main menu
 
@@ -190,18 +196,21 @@ PROFILE
             1)
                 echo
                 echo "Profile: Baseline"
-                echo "Purpose: Testing and debugging with default settings"
+                echo "Purpose: Clean scheduler defaults for general desktop and light gaming"
                 echo
                 echo "Active Flags:"
                 echo "  --slice-us 1000                (1ms scheduling slice)"
+                echo "  --no-stats                     (No stats collection overhead)"
+                echo "  Instrumentation: OFF (no detectors, no tracing)"
                 echo
                 launch_scx "Baseline" \
                     --env "RUST_LOG=warn" \
                     --arg "--slice-us" \
                     --arg "1000" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "--disable-runtime-trace" \
+                    --arg "--disable-detectors" \
+                    --arg "--disable-dispatch-events" \
+                    --arg "--no-stats"
                 return
                 ;;
             2)
@@ -211,29 +220,22 @@ PROFILE
                 echo
                 echo "Active Flags:"
                 echo "  --slice-us 500                 (500us scheduling slice)"
-                echo "  --wakeup-timer-us 500          (Fast BPF timer sampling)"
                 echo "  --keyboard-boost-us 1500000    (1500ms - covers ability chains)"
                 echo "  --mouse-boost-us 10000         (10ms - forgiving tracking)"
-                echo "  --preferred-idle-scan          (Intelligent CPU selection)"
-                echo "  --mm-affinity                  (Cache-conscious placement)"
                 echo "  --prefer-napi-on-input         (Network-aware scheduling)"
+                echo "  --no-stats                     (Minimal overhead)"
+                echo "  (preferred-idle-scan and mm-affinity are ON by default)"
                 echo
                 launch_scx "Casual Gaming" \
                     --env "RUST_LOG=warn" \
                     --arg "--slice-us" \
                     --arg "500" \
-                    --arg "--wakeup-timer-us" \
-                    --arg "500" \
                     --arg "--keyboard-boost-us" \
                     --arg "1500000" \
                     --arg "--mouse-boost-us" \
                     --arg "10000" \
-                    --arg "--preferred-idle-scan" \
-                    --arg "--mm-affinity" \
                     --arg "--prefer-napi-on-input" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "--no-stats"
                 return
                 ;;
             3)
@@ -243,22 +245,16 @@ PROFILE
                 echo
                 echo "Active Flags:"
                 echo "  --slice-us 250                 (250us aggressive preemption)"
-                echo "  --wakeup-timer-us 250          (Responsive monitoring)"
                 echo "  --input-window-us 8000         (8ms input boost window)"
                 echo "  --keyboard-boost-us 300000     (300ms - tight, less background penalty)"
                 echo "  --mouse-boost-us 6000          (6ms - covers 8000Hz polling)"
-                echo "  --mig-max 4                    (Migration rate limiting)"
-                echo "  --preferred-idle-scan          (Smart CPU placement)"
+                echo "  --prefer-napi-on-input         (Network-aware for online games)"
                 echo "  --avoid-smt                    (Prevents SMT contention)"
-                echo "  --no-stats                     (Disables stats collection for <1% overhead)"
-                echo "  Instrumentation: Detectors, runtime trace, and dispatch events are OFF"
+                echo "  --no-stats                     (Disables stats collection)"
                 echo
                 launch_scx "Esports" \
                     --env "RUST_LOG=warn" \
-                    --env "SCX_GAMER_INPUT_LATENCY=0" \
                     --arg "--slice-us" \
-                    --arg "250" \
-                    --arg "--wakeup-timer-us" \
                     --arg "250" \
                     --arg "--input-window-us" \
                     --arg "8000" \
@@ -266,13 +262,8 @@ PROFILE
                     --arg "300000" \
                     --arg "--mouse-boost-us" \
                     --arg "6000" \
-                    --arg "--mig-max" \
-                    --arg "4" \
-                    --arg "--preferred-idle-scan" \
+                    --arg "--prefer-napi-on-input" \
                     --arg "--avoid-smt" \
-                    --arg "--disable-runtime-trace" \
-                    --arg "--disable-detectors" \
-                    --arg "--disable-dispatch-events" \
                     --arg "--no-stats"
                 return
                 ;;
@@ -283,18 +274,16 @@ PROFILE
                 echo
                 echo "Active Flags:"
                 echo "  --slice-us 500                 (500us scheduling slice)"
-                echo "  --preferred-idle-scan          (Smart CPU selection)"
                 echo "  --prefer-napi-on-input         (Prefer NAPI-handling CPUs)"
+                echo "  --no-stats                     (Minimal overhead)"
+                echo "  (preferred-idle-scan and mm-affinity are ON by default)"
                 echo
                 launch_scx "NAPI Preference" \
                     --env "RUST_LOG=warn" \
                     --arg "--slice-us" \
                     --arg "500" \
-                    --arg "--preferred-idle-scan" \
                     --arg "--prefer-napi-on-input" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "--no-stats"
                 return
                 ;;
             5)
@@ -324,8 +313,8 @@ PROFILE
                 echo "  --wakeup-timer-us 100          (100us BPF timer)"
                 echo "  --avoid-smt                    (Avoids hyperthread contention)"
                 echo "  --mig-max 2                    (Minimal migrations)"
-                echo "  --preferred-idle-scan          (Smart CPU selection)"
-                echo "  --no-stats                     (Disables stats collection for <1% overhead)"
+                echo "  --no-stats                     (Disables stats collection)"
+                echo "  (preferred-idle-scan and mm-affinity are ON by default)"
                 echo
                 echo "Best For:"
                 echo "  - Aim trainers (Kovaak's, Aimlab)"
@@ -343,7 +332,6 @@ PROFILE
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
                     launch_scx "Ultra-Latency" \
                         --env "RUST_LOG=warn" \
-                        --env "SCX_GAMER_INPUT_LATENCY=0" \
                         --arg "--realtime-scheduling" \
                         --arg "--rt-priority" \
                         --arg "50" \
@@ -360,10 +348,6 @@ PROFILE
                         --arg "--avoid-smt" \
                         --arg "--mig-max" \
                         --arg "2" \
-                        --arg "--preferred-idle-scan" \
-                        --arg "--disable-runtime-trace" \
-                        --arg "--disable-detectors" \
-                        --arg "--disable-dispatch-events" \
                         --arg "--no-stats"
                 else
                     echo
@@ -486,8 +470,8 @@ Update interval: 0.1 seconds (100ms refresh rate)
 
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
-1) Baseline TUI        Default scheduler settings with TUI monitoring
-                       - Minimal optimizations, good for testing
+1) Baseline TUI        Clean scheduler defaults with TUI monitoring
+                       - Basic scheduling, good for debugging/testing
 
 2) Casual Gaming TUI   Balanced settings with visual monitoring
                        - Preferred idle scan, MM affinity, NAPI preference
@@ -520,14 +504,12 @@ TUI_PROFILE
             2)
                 echo
                 echo "Launching: TUI Dashboard - Casual Gaming"
-                echo "Active optimizations: Preferred idle scan, MM affinity"
+                echo "Active optimizations: Default (preferred-idle-scan, mm-affinity ON)"
                 echo
                 launch_scx "TUI Casual Gaming" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}" \
-                    --arg "--preferred-idle-scan" \
-                    --arg "--mm-affinity" \
                     --arg "--enable-runtime-trace" \
                     --arg "--enable-detectors" \
                     --arg "--enable-dispatch-events"
@@ -536,26 +518,21 @@ TUI_PROFILE
             3)
                 echo
                 echo "Launching: TUI Dashboard - Esports"
-                echo "Active optimizations: Full competitive tuning suite"
+                echo "Active optimizations: Competitive tuning with monitoring"
                 echo
                 launch_scx "TUI Esports" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}" \
-                    --arg "--preferred-idle-scan" \
-                    --arg "--disable-smt" \
+                    --arg "--slice-us" \
+                    --arg "250" \
                     --arg "--avoid-smt" \
-                    --arg "--prefer-napi-on-input" \
                     --arg "--input-window-us" \
                     --arg "8000" \
                     --arg "--keyboard-boost-us" \
                     --arg "300000" \
                     --arg "--mouse-boost-us" \
                     --arg "6000" \
-                    --arg "--wakeup-timer-us" \
-                    --arg "250" \
-                    --arg "--mig-max" \
-                    --arg "2" \
                     --arg "--enable-runtime-trace" \
                     --arg "--enable-detectors" \
                     --arg "--enable-dispatch-events"
@@ -570,7 +547,6 @@ TUI_PROFILE
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
                     --arg "${interval}" \
-                    --arg "--preferred-idle-scan" \
                     --arg "--prefer-napi-on-input" \
                     --arg "--enable-runtime-trace" \
                     --arg "--enable-detectors" \
@@ -733,18 +709,15 @@ DEBUG_API_MENU
             2)
                 echo
                 echo "Launching: Esports Profile with Debug API (port ${port})"
-                echo "Active optimizations: Full competitive tuning suite"
+                echo "Active optimizations: Competitive tuning with debug API"
                 echo
                 echo "Access metrics at: http://127.0.0.1:${port}/metrics"
                 echo
                 launch_scx "Esports + Debug API" \
                     --env "RUST_LOG=info" \
-                    --env "SCX_GAMER_INPUT_LATENCY=0" \
                     --arg "--debug-api" \
                     --arg "${port}" \
                     --arg "--slice-us" \
-                    --arg "250" \
-                    --arg "--wakeup-timer-us" \
                     --arg "250" \
                     --arg "--input-window-us" \
                     --arg "8000" \
@@ -752,11 +725,7 @@ DEBUG_API_MENU
                     --arg "300000" \
                     --arg "--mouse-boost-us" \
                     --arg "6000" \
-                    --arg "--mig-max" \
-                    --arg "4" \
-                    --arg "--preferred-idle-scan" \
                     --arg "--avoid-smt" \
-                    --arg "--prefer-napi-on-input" \
                     --arg "--enable-runtime-trace" \
                     --arg "--enable-detectors" \
                     --arg "--enable-dispatch-events"
@@ -765,7 +734,7 @@ DEBUG_API_MENU
             3)
                 echo
                 echo "Launching: TUI Dashboard with Debug API (port ${port})"
-                echo "Active optimizations: Preferred idle scan, MM affinity"
+                echo "Active optimizations: Default (preferred-idle-scan, mm-affinity ON)"
                 echo
                 echo "Access metrics at: http://127.0.0.1:${port}/metrics"
                 echo
@@ -775,8 +744,6 @@ DEBUG_API_MENU
                     --arg "0.1" \
                     --arg "--debug-api" \
                     --arg "${port}" \
-                    --arg "--preferred-idle-scan" \
-                    --arg "--mm-affinity" \
                     --arg "--enable-runtime-trace" \
                     --arg "--enable-detectors" \
                     --arg "--enable-dispatch-events"

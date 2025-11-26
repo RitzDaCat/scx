@@ -224,12 +224,12 @@ struct Opts {
     #[arg(short = 'i', long, action = clap::ArgAction::SetTrue)]
     flat_idle_scan: bool,
 
-    /// Enable preferred idle CPU scanning.
+    /// Disable preferred idle CPU scanning.
     ///
-    /// With this option enabled, the scheduler will prioritize assigning tasks to higher-ranked
-    /// cores before considering lower-ranked ones.
-    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
-    preferred_idle_scan: bool,
+    /// By default, the scheduler prioritizes assigning tasks to higher-ranked cores before
+    /// considering lower-ranked ones. This flag disables that behavior.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_preferred_idle_scan: bool,
 
     /// Disable SMT.
     ///
@@ -262,14 +262,13 @@ struct Opts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     no_deferred_wakeup: bool,
 
-    /// Enable address space affinity.
+    /// Disable address space affinity.
     ///
-    /// This option allows to keep tasks that share the same address space (e.g., threads of the
-    /// same process) on the same CPU across wakeups.
-    ///
-    /// This can improve locality and performance in certain cache-sensitive workloads.
-    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
-    mm_affinity: bool,
+    /// By default, the scheduler keeps tasks that share the same address space (e.g., threads
+    /// of the same process) on the same CPU across wakeups for better cache locality.
+    /// This flag disables that behavior.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_mm_affinity: bool,
 
     /// Migration limiter: window size in milliseconds.
     #[clap(long, default_value = "50")]
@@ -1074,13 +1073,16 @@ impl<'a> Scheduler<'a> {
             .any(|c| !matches!(c.core_type, CoreType::Little));
         let is_hybrid = has_little && has_big;
 
-        // Auto-enable preferred idle scan for hybrid CPUs unless flat scan is explicitly enabled
-        let preferred_idle_scan = if is_hybrid && !opts.flat_idle_scan && !opts.preferred_idle_scan
-        {
-            info!("Hybrid CPU topology detected, auto-enabling preferred idle scan");
+        // Preferred idle scan is ON by default for gaming workloads.
+        // Can be disabled with --no-preferred-idle-scan if needed.
+        // Also auto-enabled for hybrid CPUs unless flat scan is explicitly enabled.
+        let preferred_idle_scan = if opts.no_preferred_idle_scan {
+            false
+        } else if is_hybrid && !opts.flat_idle_scan {
+            info!("Hybrid CPU topology detected, preferred idle scan enabled");
             true
         } else {
-            opts.preferred_idle_scan
+            true  // Default ON for gaming
         };
 
         info!(
@@ -1120,7 +1122,9 @@ impl<'a> Scheduler<'a> {
         rodata.numa_enabled = opts.enable_numa;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
-        rodata.mm_affinity = opts.mm_affinity;
+        // MM affinity is ON by default for gaming workloads (cache locality).
+        // Can be disabled with --no-mm-affinity if needed.
+        rodata.mm_affinity = !opts.no_mm_affinity;
 
         // Generate the list of available CPUs sorted by capacity in descending order.
         // For SMT systems with uniform capacity, prioritize physical cores over hyperthreads.
