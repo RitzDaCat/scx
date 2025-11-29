@@ -88,6 +88,51 @@ struct CACHE_ALIGNED task_ctx {
 	u64 exec_avg;			/* EMA of exec_runtime per wake cycle */
 	u32 chain_boost;		/* Sync-wake chain boost depth */
 
+	/* ═══════════════════════════════════════════════════════════════════
+	 * LAVD-STYLE BEHAVIORAL LATENCY CRITICALITY (Phase 2 - Enhanced)
+	 * Behavioral detection that works for ANY game without name matching.
+	 * These fields enable automatic discovery of latency-critical threads.
+	 * 
+	 * NEW in Phase 2: run_freq, acc_runtime, sync wakeup tracking
+	 * ═══════════════════════════════════════════════════════════════════ */
+	
+	/* Producer signal: how often this task wakes OTHER tasks
+	 * High wake_freq = task is a producer in a task chain (e.g., game→render)
+	 * Note: wakeup_freq (above) is WAIT frequency (being woken = consumer) */
+	u64 wake_freq;			/* EMA of waking-others frequency (producer signal) */
+	u64 last_wake_clk;		/* Timestamp when this task last woke another */
+	u64 last_quiescent_clk;		/* Timestamp when this task last went to sleep */
+	
+	/* NEW: Scheduling frequency tracking (from scx_lavd)
+	 * run_freq measures how often task actually RUNS, not just woken.
+	 * A task can be woken often but blocked (low run_freq, high wait_freq).
+	 * High run_freq * avg_runtime = task is CPU-hungry = important for perf */
+	u64 run_freq;			/* Scheduling frequency per second (how often we run) */
+	u64 last_run_clk;		/* Timestamp when task last started running */
+	u64 acc_runtime;		/* Accumulated runtime this scheduling cycle (wake→sleep) */
+	
+	/* NEW: Sync wakeup tracking
+	 * Sync wakeups indicate tight producer-consumer relationships.
+	 * If waker was RUNNING when it woke us, this is a sync wakeup. */
+	u8 is_sync_wakeup:1;		/* Set in runnable if waker was running */
+	u8 is_wakeup:1;			/* Task was just woken (not fork/exec) */
+	u8 is_lock_holder:1;		/* Task appears to be holding a lock (others waiting) */
+	u8 _sync_pad:5;
+	
+	/* Computed latency criticality (updated on enqueue) */
+	u32 lat_cri;			/* Behavioral priority score (higher = more critical) */
+	u32 lat_cri_waker;		/* Inherited lat_cri from waker (task chain propagation) */
+	
+	/* NEW: Performance criticality (for CPU frequency scaling)
+	 * Tasks in middle of task chain with high runtime = perf critical */
+	u32 perf_cri;			/* Performance criticality (higher = needs faster CPU) */
+	
+	/* Greedy penalty: accumulated service time for fairness */
+	u64 svc_time;			/* Weight-normalized CPU time used (for greedy penalty) */
+	
+	/* Input correlation ratio (behavioral input handler detection)
+	 * Note: input_window_wakeups and total_wakeups_sampled already exist below */
+
 	/* CACHE LINE 2 (64+ bytes): Cold data accessed less frequently */
 
 	/* Migration limiter state (scaled token bucket) */
@@ -171,16 +216,17 @@ struct CACHE_ALIGNED task_ctx {
 	u64 worst_case_exec_ns;		/* Worst-case execution time (Ci) */
 	u64 worst_case_response_ns;	/* Worst-case response time (Ri) */
 	
-	/* CACHE LINE ALIGNMENT: Pad to 384 bytes (6 full cache lines)
+	/* CACHE LINE ALIGNMENT: Pad to 448 bytes (7 full cache lines)
 	 * Prevents this struct from straddling an extra cache line boundary.
-	 * Without this padding, task_ctx would be ~352 bytes, causing the last
-	 * fields to potentially share a cache line with adjacent data, leading
-	 * to false sharing and memory bus contention. */
-	u8 _cache_line_padding[32];	/* Pad to 384 bytes (6 × 64-byte cache lines) */
+	 * Added 40 bytes for LAVD behavioral fields (wake_freq, lat_cri, svc_time, etc.)
+	 * Previous: 352 bytes data + 32 bytes padding = 384 bytes (6 cache lines)
+	 * Current: 392 bytes data + 56 bytes padding = 448 bytes (7 cache lines) */
+	u8 _cache_line_padding[56];	/* Pad to 448 bytes (7 × 64-byte cache lines) */
 };
 
 /* LMAX DISRUPTOR: Verify cache-line alignment at compile time
- * Ensures structures don't span cache lines incorrectly, eliminating false sharing */
+ * Ensures structures don't span cache lines incorrectly, eliminating false sharing
+ * Note: Size increased from 384 to 448 bytes after adding LAVD behavioral fields */
 _Static_assert(sizeof(struct task_ctx) % 64 == 0, 
 	       "task_ctx must be cache-line aligned (multiple of 64 bytes)");
 
@@ -226,12 +272,13 @@ struct CACHE_ALIGNED cpu_ctx {
 	u64 local_edf_enq;		/* EDF enqueue counter */
 	u64 local_nr_shared_dispatches;	/* Shared DSQ dispatch counter */
 	
-	/* CACHE LINE ALIGNMENT: Pad to 128 bytes (2 full cache lines)
-	 * Prevents this struct from straddling an extra cache line boundary.
-	 * Without this padding, cpu_ctx would be ~112 bytes, causing the last
-	 * fields to potentially share a cache line with adjacent data, leading
-	 * to false sharing and memory bus contention. */
-	u8 _cache_line_padding[16];	/* Pad to 128 bytes (2 × 64-byte cache lines) */
+	/* ═══════════════════════════════════════════════════════════════════
+	 * KICK-BASED PREEMPTION SUPPORT (Phase 5 - Pure Hooks)
+	 * Track running task's boost_shift for victim CPU selection
+	 * SIMPLIFIED: Use boost_shift instead of lat_cri (no behavioral)
+	 * ═══════════════════════════════════════════════════════════════════ */
+	u8 running_boost_shift;		/* boost_shift of currently running task */
+	u8 _kick_pad[7];		/* Alignment padding */
 };
 
 /* LMAX DISRUPTOR: Verify cache-line alignment at compile time

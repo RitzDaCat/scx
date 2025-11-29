@@ -1,7 +1,8 @@
 ---
-alwaysApply: true
+description: what this scheduler is for, what is important to this scheduler, gaming performance, design decisions.
+alwaysApply: false
 ---
-- You do not have sudo access in the environment
+- You do not have sudo access in the environment.
 - You must ask for permission and get a response to build new documentation.
 - We do not want various .md files floating all over the place. The only acceptable .md
 files is the readme for the project root, errors.md which outlines errors and design.md which outlines the project structure. 
@@ -13,3 +14,16 @@ files is the readme for the project root, errors.md which outlines errors and de
 - Important performance metrics are 1% lows, average framerate and top 1% frametimings.
 - Competitive Esport games have user inputs, graphics, audio, disk IO, make sure that all interactions with a game are included when designing.
 - Framerate target has two settings. One is 4k resolution with 240fps, the esports mode on my monitor allows 480hz at 1080p. So our minimum frametime focus is 240fps.
+- OS is Arch Linux using CachyOS and the latest. Latest uname -r returned 6.17.9-2-cachyos so
+our Kernel is one of the latests.
+- Scheduler needs to be compared against the industry leads for sched ext such as scx_cosmos, scx_bpfland and scx_lavd.
+- Do not create brittle code, scheduler is used for 100s of different games.
+- Use tools.md under scx_gamer to see what tools we have created to check the performance of the scheduler and use those metrics to enhance scx_gamer.
+- With latency being a huge priority, kernel hooks or the fastest possible detection and patterns to schedule are ideal. However make sure detection is not brittle, we want robust coverage.
+- While the user has ideas they are not absolute, if you believe there is a better option pitch it.
+- We do not want to ever have to set a manual PID or string to match even with the arguments for the scheduler.
+- We use build.sh to build and start.sh to start
+- Polling is terrible for performance
+- We want nanosecond level latency not millisecond.
+- We do not want guesswork, we do not want fake heuristics, we want 100% proof.
+- When addressing these problems is there a kernal hook or anything that removes any guesswork of the functionality. Will it be robust and work across 100's of different games? Can we implement with no guesswork heuristics? We want 100% proof.

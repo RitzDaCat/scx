@@ -188,11 +188,6 @@ build_debug() {
     export SCX_GAMER_ENABLE_PROFILING=1
     cargo build -p scx_gamer
     
-    # Verify profiling was enabled (check if latency percentiles populate in API)
-    echo
-    echo "NOTE: To verify profiling is active, check debug API latency percentiles."
-    echo "      If select_cpu_latency_p50 > 0, profiling is working."
-    
     echo
     echo "================================================================================"
     echo "                         BUILD COMPLETE (DEBUG + PROFILING)"
@@ -202,7 +197,7 @@ build_debug() {
     echo "Size: $(du -h "${REPO_ROOT}/target/debug/scx_gamer" 2>/dev/null | cut -f1 || echo "unknown")"
     echo
     echo "Profiling enabled: Latency histograms will be populated."
-    echo "API metrics available: select_cpu_latency_p*, enqueue_latency_p*, dispatch_latency_p*"
+    echo "Use --stats <interval> to view scheduler metrics."
     echo
 }
 
