@@ -87,6 +87,67 @@ const CCD_CLASS_UNKNOWN: u8 = 0;
 const CCD_CLASS_CACHE: u8 = 1;
 const CCD_CLASS_FREQ: u8 = 2;
 
+/// PSI (Pressure Stall Information) values from /proc/pressure/*
+/// Linux 4.20+ provides this for CPU/memory/IO stall monitoring
+#[derive(Debug, Default, Clone, Copy)]
+struct PsiValues {
+    some_avg10: f64,
+    some_avg60: f64,
+    full_avg10: f64,
+    full_avg60: f64,
+}
+
+/// Read PSI metrics from /proc/pressure/{cpu,memory,io}
+/// Returns (cpu, memory, io) PSI values
+fn read_psi() -> (PsiValues, PsiValues, PsiValues) {
+    fn parse_psi_file(path: &str) -> PsiValues {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return PsiValues::default(),
+        };
+
+        let mut vals = PsiValues::default();
+        for line in content.lines() {
+            // Format: "some avg10=X.XX avg60=X.XX avg300=X.XX total=XXXXX"
+            // or:     "full avg10=X.XX avg60=X.XX avg300=X.XX total=XXXXX"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let is_some = parts[0] == "some";
+            let is_full = parts[0] == "full";
+
+            for part in &parts[1..] {
+                if let Some(val_str) = part.strip_prefix("avg10=") {
+                    if let Ok(v) = val_str.parse::<f64>() {
+                        if is_some {
+                            vals.some_avg10 = v;
+                        } else if is_full {
+                            vals.full_avg10 = v;
+                        }
+                    }
+                } else if let Some(val_str) = part.strip_prefix("avg60=") {
+                    if let Ok(v) = val_str.parse::<f64>() {
+                        if is_some {
+                            vals.some_avg60 = v;
+                        } else if is_full {
+                            vals.full_avg60 = v;
+                        }
+                    }
+                }
+            }
+        }
+        vals
+    }
+
+    (
+        parse_psi_file("/proc/pressure/cpu"),
+        parse_psi_file("/proc/pressure/memory"),
+        parse_psi_file("/proc/pressure/io"),
+    )
+}
+
 fn stats_interval_from_secs(value: f64) -> Option<Duration> {
     if !value.is_finite() || value <= 0.0 {
         None
@@ -170,21 +231,73 @@ impl DeviceInfo {
     }
 }
 
-#[derive(Debug, Clone, clap::Parser)]
+/// Scheduler profile presets optimized for different use cases.
+/// Profiles set sensible defaults that can be overridden by explicit flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Profile {
+    /// Default gaming profile: competitive settings with low latency.
+    /// slice=250us, input-window=8ms, keyboard-boost=300ms, mouse-boost=6ms,
+    /// avoid-smt=on, prefer-napi-on-input=on
+    #[default]
+    Esports,
+    /// Clean scheduler defaults with minimal tuning.
+    /// slice=1000us, no aggressive optimizations.
+    /// Good for general desktop use and light gaming.
+    Baseline,
+    /// Balanced performance for casual/single-player gaming.
+    /// slice=500us, keyboard-boost=1500ms, mouse-boost=10ms.
+    /// Good for RPGs, 60Hz monitors, menu-heavy games.
+    Casual,
+    /// Extreme low-latency for competitive play and aim trainers.
+    /// slice=5us, input-window=2ms, keyboard-boost=100ms, mouse-boost=4ms,
+    /// wakeup-timer=100us, mig-max=2.
+    /// Best for 360Hz+ displays, aim trainers.
+    Ultra,
+}
+
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Profile::Esports => write!(f, "esports"),
+            Profile::Baseline => write!(f, "baseline"),
+            Profile::Casual => write!(f, "casual"),
+            Profile::Ultra => write!(f, "ultra"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Parser)]
 #[command(
     name = "scx_gamer",
     version,
     disable_version_flag = true,
-    about = "Lightweight scheduler optimized for preserving task-to-CPU locality."
+    about = "Gaming-optimized scheduler for low-latency input and frame delivery.\n\n\
+             Default profile is 'esports' - competitive gaming with minimal overhead.\n\
+             Stats/monitoring are DISABLED by default for maximum performance.\n\
+             Use --monitoring to enable observability features."
 )]
 struct Opts {
+    /// Load a preset profile. Individual flags override profile defaults.
+    /// Profiles: esports (default), baseline, casual, ultra
+    #[clap(long, value_enum, default_value = "esports")]
+    profile: Profile,
+
+    /// Enable all monitoring/observability features.
+    /// Turns on: stats collection, detectors, runtime tracing, dispatch events.
+    /// Use this when debugging, profiling, or running with TUI/stats output.
+    /// Note: Adds ~0.6-1.2% overhead from BPF stats collection.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    monitoring: bool,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "10")]
-    slice_us: u64,
+    /// Lower values = more responsive but higher overhead.
+    /// Profile defaults: baseline=1000, casual=500, esports=250, ultra=5
+    #[clap(short = 's', long)]
+    slice_us: Option<u64>,
 
     /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.
     #[clap(short = 'l', long, default_value = "20000")]
@@ -243,8 +356,9 @@ struct Opts {
     /// When enabled, the scheduler aggressively avoids placing tasks on sibling SMT threads.
     /// This may increase task migrations and lower overall throughput, but can lead to more
     /// consistent performance by reducing contention on shared SMT cores.
-    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
-    avoid_smt: bool,
+    /// Enabled by default for esports/ultra profiles.
+    #[clap(short = 'S', long)]
+    avoid_smt: Option<bool>,
 
     /// Disable direct dispatch during synchronous wakeups.
     ///
@@ -275,36 +389,40 @@ struct Opts {
     mig_window_ms: u64,
 
     /// Migration limiter: maximum migrations allowed per task within the window.
-    #[clap(long, default_value = "3")]
-    mig_max: u32,
+    /// Profile defaults: baseline/casual/esports=3, ultra=2
+    #[clap(long)]
+    mig_max: Option<u32>,
 
     /// Input-active boost window in microseconds (0=disabled).
-    /// 5ms window covers Wine/Proton input translation layer delays (200-500µs)
-    /// plus game processing time (500-2000µs), ensuring full input pipeline is boosted.
-    #[clap(long, default_value = "5000")]
-    input_window_us: u64,
+    /// Covers Wine/Proton input translation layer delays (200-500µs)
+    /// plus game processing time (500-2000µs).
+    /// Profile defaults: baseline=5000, casual=5000, esports=8000, ultra=2000
+    #[clap(long)]
+    input_window_us: Option<u64>,
 
-    /// Keyboard boost duration in microseconds (default: 1000ms).
+    /// Keyboard boost duration in microseconds.
     /// Duration for which keyboard input extends the boost window.
-    /// Lower values (200-500µs) reduce background process penalty but may miss ability chains.
-    /// Higher values (1000-2000µs) better for casual gaming and menu navigation.
-    #[clap(long, default_value = "1000000")]
-    keyboard_boost_us: u64,
+    /// Lower values (100-300ms) optimal for competitive gaming - fast response, minimal boost bleed.
+    /// Higher values (500-1500ms) better for casual gaming and menu navigation.
+    /// Profile defaults: baseline=200000, casual=1500000, esports=300000, ultra=100000
+    #[clap(long)]
+    keyboard_boost_us: Option<u64>,
 
-    /// Mouse boost duration in microseconds (default: 8ms).
+    /// Mouse boost duration in microseconds.
     /// Duration for which mouse movement extends the boost window.
     /// Covers high-rate mouse polling (1000-8000Hz) and small movement bursts.
     /// Lower values (4-6ms) reduce latency variance for competitive FPS.
     /// Higher values (8-12ms) better for tracking and casual gaming.
-    #[clap(long, default_value = "8000")]
-    mouse_boost_us: u64,
+    /// Profile defaults: baseline=8000, casual=10000, esports=6000, ultra=4000
+    #[clap(long)]
+    mouse_boost_us: Option<u64>,
 
-    /// Controller boost duration in microseconds (default: 500ms).
+    /// Controller boost duration in microseconds.
     /// Duration for which controller input (thumbstick, triggers) extends the boost window.
     /// Covers analog input from gamepads and console-style games.
-    /// Lower values (200-300ms) for fighting games with precise inputs.
-    /// Higher values (500-1000ms) for open world games with sustained analog input.
-    #[clap(long, default_value = "500000")]
+    /// Lower values (100-200ms) for fighting games with precise inputs.
+    /// Higher values (300-500ms) for open world games with sustained analog input.
+    #[clap(long, default_value = "200000")]
     controller_boost_us: u64,
 
     /// Watchdog: if no dispatch progress is observed for N seconds, exit to restore CFS (0=off).
@@ -312,33 +430,25 @@ struct Opts {
     watchdog_secs: u64,
 
     /// Prefer NAPI/softirq CPUs briefly during input window.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    prefer_napi_on_input: bool,
+    /// Helps online games by keeping network processing close to input handling.
+    /// Enabled by default for esports/casual profiles, disabled for baseline/ultra.
+    #[clap(long)]
+    prefer_napi_on_input: Option<bool>,
 
     /// Enable extended detector hooks (network/storage/fs/memory).
+    /// Disabled by default. Use --monitoring to enable all observability.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_detectors: bool,
 
     /// Enable runtime tracing (track_thread_ru).
+    /// Disabled by default. Use --monitoring to enable all observability.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_runtime_trace: bool,
 
-    /// Disable runtime tracing explicitly (overrides --enable-runtime-trace).
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_runtime_trace: bool,
-
     /// Emit dispatch events to the ring buffer (for watchdog / diagnostics).
-    /// Disabled by default to avoid hot-path overhead.
+    /// Disabled by default. Use --monitoring to enable all observability.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_dispatch_events: bool,
-
-    /// Disable dispatch events explicitly (overrides --enable-dispatch-events).
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_dispatch_events: bool,
-
-    /// Disable optional detector tracepoints (overrides --enable-detectors).
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_detectors: bool,
 
     /// Disable per-mm recent CPU hint (cache affinity hinting, enabled by default).
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -353,10 +463,12 @@ struct Opts {
     foreground_pid: u32,
 
     /// Wakeup timer period in microseconds (min 250). 0=use slice_us.
-    #[clap(long, default_value = "500")]
-    wakeup_timer_us: u64,
+    /// Profile defaults: baseline/casual/esports=500, ultra=100
+    #[clap(long)]
+    wakeup_timer_us: Option<u64>,
 
     /// Enable stats monitoring with the specified interval.
+    /// Automatically enables --monitoring.
     #[clap(long)]
     stats: Option<f64>,
 
@@ -367,6 +479,7 @@ struct Opts {
 
     /// Run in TUI (Terminal UI) mode with the specified interval. Scheduler
     /// is not launched. Provides interactive dashboard.
+    /// Automatically enables --monitoring.
     #[clap(long)]
     tui: Option<f64>,
 
@@ -420,17 +533,93 @@ struct Opts {
     #[clap(long, default_value = "1000")]
     deadline_period_us: u64,
 
-    /// Disable BPF stats collection (reduces overhead by ~0.6-1.2%)
-    /// When enabled, per-CPU classification stats are not collected
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    no_stats: bool,
-
     /// Enable debug API server for external metric access (MCP integration, debugging)
     /// Exposes HTTP endpoint on localhost with current scheduler metrics as JSON
+    /// Automatically enables --monitoring.
     #[clap(long)]
     debug_api: Option<u16>,
-    // Thread learning CLI options removed - experimental feature not production-ready
-    // If needed in future, restore from git history
+}
+
+impl Opts {
+    /// Get the effective slice_us value based on profile and explicit override.
+    fn effective_slice_us(&self) -> u64 {
+        self.slice_us.unwrap_or(match self.profile {
+            Profile::Baseline => 1000,
+            Profile::Casual => 500,
+            Profile::Esports => 250,
+            Profile::Ultra => 5,
+        })
+    }
+
+    /// Get the effective input_window_us value based on profile and explicit override.
+    fn effective_input_window_us(&self) -> u64 {
+        self.input_window_us.unwrap_or(match self.profile {
+            Profile::Baseline => 5000,
+            Profile::Casual => 5000,
+            Profile::Esports => 8000,
+            Profile::Ultra => 2000,
+        })
+    }
+
+    /// Get the effective keyboard_boost_us value based on profile and explicit override.
+    fn effective_keyboard_boost_us(&self) -> u64 {
+        self.keyboard_boost_us.unwrap_or(match self.profile {
+            Profile::Baseline => 200_000,
+            Profile::Casual => 1_500_000,
+            Profile::Esports => 300_000,
+            Profile::Ultra => 100_000,
+        })
+    }
+
+    /// Get the effective mouse_boost_us value based on profile and explicit override.
+    fn effective_mouse_boost_us(&self) -> u64 {
+        self.mouse_boost_us.unwrap_or(match self.profile {
+            Profile::Baseline => 8000,
+            Profile::Casual => 10_000,
+            Profile::Esports => 6000,
+            Profile::Ultra => 4000,
+        })
+    }
+
+    /// Get the effective mig_max value based on profile and explicit override.
+    fn effective_mig_max(&self) -> u32 {
+        self.mig_max.unwrap_or(match self.profile {
+            Profile::Baseline | Profile::Casual | Profile::Esports => 3,
+            Profile::Ultra => 2,
+        })
+    }
+
+    /// Get the effective wakeup_timer_us value based on profile and explicit override.
+    fn effective_wakeup_timer_us(&self) -> u64 {
+        self.wakeup_timer_us.unwrap_or(match self.profile {
+            Profile::Baseline | Profile::Casual | Profile::Esports => 500,
+            Profile::Ultra => 100,
+        })
+    }
+
+    /// Get the effective avoid_smt value based on profile and explicit override.
+    fn effective_avoid_smt(&self) -> bool {
+        self.avoid_smt.unwrap_or(match self.profile {
+            Profile::Baseline | Profile::Casual => false,
+            Profile::Esports | Profile::Ultra => true,
+        })
+    }
+
+    /// Get the effective prefer_napi_on_input value based on profile and explicit override.
+    fn effective_prefer_napi_on_input(&self) -> bool {
+        self.prefer_napi_on_input.unwrap_or(match self.profile {
+            Profile::Baseline | Profile::Ultra => false,
+            Profile::Casual | Profile::Esports => true,
+        })
+    }
+
+    /// Check if monitoring is enabled (explicit flag or implied by stats/tui/debug-api).
+    fn is_monitoring_enabled(&self) -> bool {
+        self.monitoring
+            || self.stats.is_some()
+            || self.tui.is_some()
+            || self.debug_api.is_some()
+    }
 }
 
 // CPU parsing helpers moved to scx_utils::cpu_list
@@ -1113,7 +1302,7 @@ impl<'a> Scheduler<'a> {
             .rodata_data
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("BPF rodata not available"))?;
-        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.slice_ns = opts.effective_slice_us() * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.deferred_wakeups = !opts.no_deferred_wakeup;
@@ -1121,7 +1310,7 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = opts.enable_numa;
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.avoid_smt = opts.avoid_smt;
+        rodata.avoid_smt = opts.effective_avoid_smt();
         // MM affinity is ON by default for gaming workloads (cache locality).
         // Can be disabled with --no-mm-affinity if needed.
         rodata.mm_affinity = !opts.no_mm_affinity;
@@ -1367,25 +1556,22 @@ impl<'a> Scheduler<'a> {
             info!("CCD classification: single CCD detected; using default placement");
         }
         rodata.mig_window_ns = opts.mig_window_ms * 1_000_000;
-        rodata.mig_max_per_window = opts.mig_max;
-        rodata.input_window_ns = opts.input_window_us * 1000;
-        rodata.keyboard_boost_ns = opts.keyboard_boost_us * 1000;
-        rodata.mouse_boost_ns = opts.mouse_boost_us * 1000;
+        rodata.mig_max_per_window = opts.effective_mig_max();
+        rodata.input_window_ns = opts.effective_input_window_us() * 1000;
+        rodata.keyboard_boost_ns = opts.effective_keyboard_boost_us() * 1000;
+        rodata.mouse_boost_ns = opts.effective_mouse_boost_us() * 1000;
         rodata.controller_boost_ns = opts.controller_boost_us * 1000;
-        rodata.prefer_napi_on_input = opts.prefer_napi_on_input;
+        rodata.prefer_napi_on_input = opts.effective_prefer_napi_on_input();
         rodata.mm_hint_enabled = !opts.disable_mm_hint;
-        rodata.no_stats = opts.no_stats;
-        rodata.wakeup_timer_ns = if opts.wakeup_timer_us == 0 {
+        // Stats collection disabled by default for performance; enabled with --monitoring or consumers
+        rodata.no_stats = !opts.is_monitoring_enabled();
+        let effective_wakeup = opts.effective_wakeup_timer_us();
+        rodata.wakeup_timer_ns = if effective_wakeup == 0 {
             0
         } else {
-            opts.wakeup_timer_us.max(250) * 1000
+            effective_wakeup.max(250) * 1000
         };
         rodata.foreground_tgid = opts.foreground_pid;
-        // Enable stats collection when any consumer is active (stats, monitor, TUI, or debug API)
-        rodata.no_stats = !(opts.stats.is_some()
-            || opts.monitor.is_some()
-            || opts.tui.is_some()
-            || opts.debug_api.is_some());
 
         // MM hint removed - map configuration no longer needed
         // MM hint map (mm_last_cpu) removed for gaming workloads - low cache locality benefit, high overhead
@@ -1427,27 +1613,17 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, gamer_ops, uei)?;
 
-        let runtime_trace_enabled = if opts.disable_runtime_trace {
-            false
-        } else {
-            opts.enable_runtime_trace
-        };
+        // Tracing flags: enabled via --monitoring, --enable-*, or implicit consumers (stats/tui/debug-api)
+        let monitoring = opts.is_monitoring_enabled();
+        let runtime_trace_enabled = opts.enable_runtime_trace || monitoring;
         if let Err(err) = bpf_intf::set_runtime_trace(&mut skel, runtime_trace_enabled) {
             warn!("Failed to configure runtime trace flag: {}", err);
         }
-        let detector_trace_enabled = if opts.disable_detectors {
-            false
-        } else {
-            opts.enable_detectors
-        };
+        let detector_trace_enabled = opts.enable_detectors || monitoring;
         if let Err(err) = bpf_intf::set_detector_trace(&mut skel, detector_trace_enabled) {
             warn!("Failed to configure detector trace flag: {}", err);
         }
-        let dispatch_events_enabled = if opts.disable_dispatch_events {
-            false
-        } else {
-            opts.enable_dispatch_events
-        };
+        let dispatch_events_enabled = opts.enable_dispatch_events || monitoring;
         if let Err(err) =
             bpf_intf::set_dispatch_events(&mut skel, dispatch_events_enabled)
         {
@@ -1493,6 +1669,23 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, gamer_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        // Log profile and effective configuration
+        info!(
+            "Profile: {} | slice={}µs input={}µs kbd={}µs mouse={}µs | avoid-smt={} napi={}",
+            opts.profile,
+            opts.effective_slice_us(),
+            opts.effective_input_window_us(),
+            opts.effective_keyboard_boost_us(),
+            opts.effective_mouse_boost_us(),
+            opts.effective_avoid_smt(),
+            opts.effective_prefer_napi_on_input()
+        );
+        if opts.is_monitoring_enabled() {
+            info!("Monitoring: ENABLED (stats, detectors, tracing active)");
+        } else {
+            info!("Monitoring: DISABLED (maximum performance mode)");
+        }
+
         // Initialize event-driven audio server detector (inotify-based)
         // This eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
         let mut audio_detector =
@@ -1532,7 +1725,7 @@ impl<'a> Scheduler<'a> {
 
         let mut input_devs: Vec<evdev::Device> = Vec::new();
         let mut input_fd_info_vec: Vec<Option<DeviceInfo>> = Vec::new();
-        if opts.input_window_us > 0 {
+        if opts.effective_input_window_us() > 0 {
             if let Ok(dir) = std::fs::read_dir("/dev/input") {
                 for entry in dir.flatten() {
                     let path = entry.path();
@@ -1627,7 +1820,7 @@ impl<'a> Scheduler<'a> {
         // Select input trigger function at init time based on prefer_napi_on_input flag
         // This avoids runtime branching on every input event (saves 10-20ns per event)
         let input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane) =
-            if opts.prefer_napi_on_input {
+            if opts.effective_prefer_napi_on_input() {
                 |trig, skel, lane| match lane {
                     InputLane::Mouse => {
                         trig.trigger_input_with_napi_lane(skel, lane);
@@ -1663,7 +1856,7 @@ impl<'a> Scheduler<'a> {
         };
 
         // Initialize input ring buffer for ultra-low latency input processing
-        let input_ring_buffer = if opts.input_window_us > 0 {
+        let input_ring_buffer = if opts.effective_input_window_us() > 0 {
             match ring_buffer::InputRingBufferManager::new(&mut skel) {
                 Ok(manager) => {
                     info!("Input ring buffer: Initialized with BPF integration");
@@ -1790,6 +1983,9 @@ impl<'a> Scheduler<'a> {
         let current_migrations = bss.nr_migrations;
         let current_cpu_util = bss.cpu_util;
         let current_frame_interval = bss.frame_interval_ns;
+
+        // Read PSI (Pressure Stall Information) from /proc/pressure/*
+        let (psi_cpu, psi_mem, psi_io) = read_psi();
 
         // Read fentry raw input stats (kernel-level input detection)
         // This shows if fentry hooks are active vs falling back to userspace evdev
@@ -2525,6 +2721,16 @@ impl<'a> Scheduler<'a> {
                     0.0
                 }
             },
+
+            // PSI (Pressure Stall Information) - scheduler performance indicators
+            psi_cpu_some_avg10: psi_cpu.some_avg10,
+            psi_cpu_some_avg60: psi_cpu.some_avg60,
+            psi_mem_some_avg10: psi_mem.some_avg10,
+            psi_mem_some_avg60: psi_mem.some_avg60,
+            psi_mem_full_avg10: psi_mem.full_avg10,
+            psi_io_some_avg10: psi_io.some_avg10,
+            psi_io_some_avg60: psi_io.some_avg60,
+            psi_io_full_avg10: psi_io.full_avg10,
         }
     }
 

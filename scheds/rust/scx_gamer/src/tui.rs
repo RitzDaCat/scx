@@ -194,6 +194,11 @@ pub struct HistoricalData {
     edf_pct: CircularBuffer<f64>,
     timestamps: CircularBuffer<Instant>,
 
+    // PSI (Pressure Stall Information) history
+    psi_cpu: CircularBuffer<f64>,
+    psi_mem: CircularBuffer<f64>,
+    psi_io: CircularBuffer<f64>,
+
     // Cumulative totals (sum of deltas for lifetime stats)
     pub total_rr_enq: u64,
     pub total_edf_enq: u64,
@@ -223,6 +228,10 @@ impl HistoricalData {
             direct_pct: CircularBuffer::new(max_samples),
             edf_pct: CircularBuffer::new(max_samples),
             timestamps: CircularBuffer::new(max_samples),
+
+            psi_cpu: CircularBuffer::new(max_samples),
+            psi_mem: CircularBuffer::new(max_samples),
+            psi_io: CircularBuffer::new(max_samples),
 
             total_rr_enq: 0,
             total_edf_enq: 0,
@@ -274,6 +283,11 @@ impl HistoricalData {
         self.edf_pct.push(edf_pct);
         self.timestamps.push(Instant::now());
 
+        // PSI (Pressure Stall Information) - scheduler health tracking
+        self.psi_cpu.push(metrics.psi_cpu_some_avg10);
+        self.psi_mem.push(metrics.psi_mem_some_avg10);
+        self.psi_io.push(metrics.psi_io_some_avg10);
+
         // Accumulate cumulative totals (metrics are deltas)
         self.total_rr_enq = self.total_rr_enq.saturating_add(metrics.rr_enq);
         self.total_edf_enq = self.total_edf_enq.saturating_add(metrics.edf_enq);
@@ -293,6 +307,9 @@ impl HistoricalData {
             "fg_cpu_pct" => self.get_last_n_f64(&self.fg_cpu_pct, last_n),
             "direct_pct" => self.get_last_n_f64(&self.direct_pct, last_n),
             "edf_pct" => self.get_last_n_f64(&self.edf_pct, last_n),
+            "psi_cpu" => self.get_last_n_f64(&self.psi_cpu, last_n),
+            "psi_mem" => self.get_last_n_f64(&self.psi_mem, last_n),
+            "psi_io" => self.get_last_n_f64(&self.psi_io, last_n),
             _ => vec![],
         }
     }
@@ -524,9 +541,9 @@ pub struct ConfigSummary {
 impl ConfigSummary {
     pub fn from_opts(opts: &Opts) -> Self {
         Self {
-            slice_us: opts.slice_us,
-            input_window_us: opts.input_window_us,
-            wakeup_timer_us: opts.wakeup_timer_us,
+            slice_us: opts.effective_slice_us(),
+            input_window_us: opts.effective_input_window_us(),
+            wakeup_timer_us: opts.effective_wakeup_timer_us(),
         }
     }
 }
@@ -1795,6 +1812,60 @@ fn render_row4(f: &mut Frame, area: Rect, metrics: &Metrics, state: &TuiState) {
             Style::default().fg(Color::DarkGray),
         )));
     }
+
+    // PSI (Pressure Stall Information) section
+    lat_info.push(Line::from(""));
+    lat_info.push(Line::from(vec![Span::styled(
+        "PSI (Stall %):",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    // Color thresholds for PSI: Green <1%, Yellow 1-5%, Red >5%
+    let psi_color = |v: f64| -> Color {
+        if v > 5.0 {
+            Color::Red
+        } else if v > 1.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        }
+    };
+
+    lat_info.push(Line::from(vec![
+        Span::raw("  cpu:  "),
+        Span::styled(
+            format!("{:>5.2}%", metrics.psi_cpu_some_avg10),
+            Style::default().fg(psi_color(metrics.psi_cpu_some_avg10)),
+        ),
+    ]));
+    lat_info.push(Line::from(vec![
+        Span::raw("  mem:  "),
+        Span::styled(
+            format!("{:>5.2}%", metrics.psi_mem_some_avg10),
+            Style::default().fg(psi_color(metrics.psi_mem_some_avg10)),
+        ),
+        Span::raw(" / "),
+        Span::styled(
+            format!("{:>5.2}%", metrics.psi_mem_full_avg10),
+            Style::default().fg(psi_color(metrics.psi_mem_full_avg10)),
+        ),
+        Span::raw(" full"),
+    ]));
+    lat_info.push(Line::from(vec![
+        Span::raw("  io:   "),
+        Span::styled(
+            format!("{:>5.2}%", metrics.psi_io_some_avg10),
+            Style::default().fg(psi_color(metrics.psi_io_some_avg10)),
+        ),
+        Span::raw(" / "),
+        Span::styled(
+            format!("{:>5.2}%", metrics.psi_io_full_avg10),
+            Style::default().fg(psi_color(metrics.psi_io_full_avg10)),
+        ),
+        Span::raw(" full"),
+    ]));
 
     let lat_block = Paragraph::new(lat_info).block(
         Block::default()

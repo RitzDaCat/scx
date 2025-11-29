@@ -134,6 +134,14 @@ static __always_inline void register_storage_thread(u32 tid, u8 type)
 			u32 instant_freq = (u32)(1000000000ULL / delta_ns);
 			/* EMA smoothing: new = (old * 7 + new) / 8 */
 			info->io_freq_hz = (info->io_freq_hz * 7 + instant_freq) >> 3;
+			
+			/* BUG FIX: Detect hot path patterns based on frequency
+			 * High-frequency sequential I/O (>100 Hz with >50 ops) = asset streaming
+			 * Very high frequency (>500 Hz with >100 ops) = hot path memory-mapped I/O
+			 * This was never set before, leaving is_hot_path always 0! */
+			if (!info->is_hot_path && info->io_freq_hz > 500 && info->total_ios > 100) {
+				info->is_hot_path = 1;  /* Hot path: very high frequency I/O */
+			}
 		}
 	}
 

@@ -254,9 +254,9 @@ static __always_inline void fanout_set_input_lane(u8 lane, u64 now)
         mouse_boost = 2000000ULL;  /* 2ms for 8kHz mice */
     
     u64 boost_durations[INPUT_LANE_MAX] = {
-        [INPUT_LANE_KEYBOARD] = keyboard_boost_ns,  /* Tunable: default 1000ms */
+        [INPUT_LANE_KEYBOARD] = keyboard_boost_ns,  /* Tunable: default 200ms (was 1000ms, reduced for competitive) */
         [INPUT_LANE_MOUSE] = mouse_boost,           /* Tunable: default 8ms, 2ms for 8kHz */
-        [INPUT_LANE_CONTROLLER] = controller_boost_ns ? controller_boost_ns : 500000000ULL,  /* Tunable: default 500ms */
+        [INPUT_LANE_CONTROLLER] = controller_boost_ns ? controller_boost_ns : 200000000ULL,  /* Tunable: default 200ms (was 500ms, reduced for competitive) */
         [INPUT_LANE_OTHER] = 0,                     /* No boost for other devices */
     };
 

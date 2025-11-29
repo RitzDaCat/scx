@@ -37,9 +37,12 @@ struct ThreadPreset {
 
 const PRESETS: &[ThreadPreset] = &[
     // Unreal Engine main threads
+    // BUG FIX: GameThread was boost=7 (INPUT HANDLER level) - this competes with mice/keyboards!
+    // GameThread should be boost=6 (GPU/render level) - it processes game logic, not raw input.
+    // Input handlers (boost=7) must have absolute priority for low-latency mouse/keyboard.
     ThreadPreset {
         comm: "GameThread",
-        last_boost: 7,
+        last_boost: 6,  // Was 7 - fixed to not compete with input handlers
         avg_exec_ns: 220_000,
         avg_wakeup_freq: 600,
     },

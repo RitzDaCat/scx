@@ -63,6 +63,7 @@ struct CACHE_ALIGNED task_ctx {
 	u8 is_wine_input:1;		/* Wine/Proton input handler (xinput, dinput, rawinput, wginput) */
 	u8 is_sdl_event:1;		/* SDL event loop thread */
 	u8 is_network_tx:1;		/* Network TX thread (for online gaming input→server latency) */
+	u8 is_ue5_worker:1;		/* UE5 async worker (Background Work, IOThreadPool) - NOT system background */
 
 	/* Precomputed deadline boost shift (byte 1) - used in deadline calculation */
 	u8 boost_shift;			/* 0=no boost, 7=10x boost for input handlers */
