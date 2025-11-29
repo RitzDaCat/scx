@@ -147,146 +147,89 @@ run_standard() {
 
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
-1) Baseline            Clean scheduler defaults, no instrumentation
-                       - Slice: 1000us (1ms)
-                       - No stats, no detectors, no tracing overhead
-                       - Use for: General desktop use, light gaming
-
-2) Casual Gaming       Balanced performance for general gaming
-                       - Slice: 500us, MM affinity, NAPI preference
-                       - Keyboard boost: 1500ms (ability chains)
-                       - Mouse boost: 10ms (forgiving tracking)
-                       - Use for: Single-player, RPGs, 60Hz monitors
-
-3) Esports             Competitive gaming with aggressive tuning
-                       - Slice: 250us, avoid SMT, NAPI-aware, no stats
-                       - Keyboard boost: 300ms (tight, less background penalty)
-                       - Mouse boost: 6ms (covers 8000Hz polling)
+1) Esports (DEFAULT)   Competitive gaming with aggressive tuning
+                       - Slice: 250us, input-window: 8ms
+                       - Keyboard boost: 300ms, mouse boost: 6ms
+                       - avoid-smt: ON, prefer-napi: ON
                        - Use for: Valorant, CS2, LoL, 144Hz-240Hz (RECOMMENDED)
 
-4) NAPI Preference     Network-aware scheduling testing
-                       - Slice: 500us, prefer-napi-on-input
-                       - Use for: Online gaming optimization testing
+2) Baseline            Clean scheduler defaults, minimal tuning
+                       - Slice: 1000us (1ms)
+                       - No aggressive optimizations
+                       - Use for: General desktop use, light gaming
 
-5) Ultra-Latency       Extreme low-latency for competitive play
-                       - Slice: 5us, real-time scheduling, 1-5us latency
-                       - Keyboard boost: 100ms (minimal overhead)
-                       - Mouse boost: 4ms (covers highest polling rates)
+3) Casual Gaming       Balanced performance for general gaming
+                       - Slice: 500us
+                       - Keyboard boost: 1500ms, mouse boost: 10ms
+                       - prefer-napi: ON
+                       - Use for: Single-player, RPGs, 60Hz monitors
+
+4) Ultra-Latency       Extreme low-latency for competitive play
+                       - Slice: 5us, real-time scheduling (SCHED_FIFO)
+                       - Keyboard boost: 100ms, mouse boost: 4ms
+                       - wakeup-timer: 100us, mig-max: 2
                        - Use for: Aim trainers, 360Hz+, <5% CPU usage
 
-6) SCHED_DEADLINE      Hard real-time with guaranteed time bounds
+5) SCHED_DEADLINE      Hard real-time with guaranteed time bounds
                        - Kernel admission control, no starvation risk
                        - Use for: Maximum consistency and stability
 
 PROFILE HIERARCHY:
-  Baseline       → General desktop, light gaming (minimal overhead)
-  Casual Gaming  → Single-player, RPGs, 60Hz (balanced optimizations)
-  Esports        → Competitive FPS/MOBA, 144Hz+ (aggressive tuning)
-  Ultra-Latency  → Aim trainers, 360Hz+ (extreme low-latency)
+  Baseline       -> General desktop, light gaming (minimal overhead)
+  Casual Gaming  -> Single-player, RPGs, 60Hz (balanced optimizations)
+  Esports        -> Competitive FPS/MOBA, 144Hz+ (aggressive tuning)
+  Ultra-Latency  -> Aim trainers, 360Hz+ (extreme low-latency)
 
 NOTE: All profiles run WITHOUT monitoring for maximum performance.
-      Use TUI Dashboard (option 3) if you need visual monitoring.
+      Use TUI Dashboard (option 2 from main menu) if you need visual monitoring.
 
 q) Back to main menu
 
 ================================================================================
 PROFILE
-        read -rp "Select profile [1-6, q]: " profile_choice
+        read -rp "Select profile [1-5, q]: " profile_choice
         case "${profile_choice}" in
             1)
+                echo
+                echo "Profile: Esports (Default)"
+                echo "Purpose: Competitive gaming with aggressive optimizations"
+                echo
+                echo "This is the DEFAULT profile - no flags needed!"
+                echo "Effective settings: slice=250us input=8ms kbd=300ms mouse=6ms avoid-smt=on napi=on"
+                echo
+                launch_scx "Esports" \
+                    --env "RUST_LOG=warn"
+                return
+                ;;
+            2)
                 echo
                 echo "Profile: Baseline"
                 echo "Purpose: Clean scheduler defaults for general desktop and light gaming"
                 echo
                 echo "Active Flags:"
-                echo "  --slice-us 1000                (1ms scheduling slice)"
-                echo "  --no-stats                     (No stats collection overhead)"
-                echo "  Instrumentation: OFF (no detectors, no tracing)"
+                echo "  --profile baseline             (minimal tuning, slice=1000us)"
                 echo
                 launch_scx "Baseline" \
                     --env "RUST_LOG=warn" \
-                    --arg "--slice-us" \
-                    --arg "1000" \
-                    --arg "--disable-runtime-trace" \
-                    --arg "--disable-detectors" \
-                    --arg "--disable-dispatch-events" \
-                    --arg "--no-stats"
+                    --arg "--profile" \
+                    --arg "baseline"
                 return
                 ;;
-            2)
+            3)
                 echo
                 echo "Profile: Casual Gaming"
                 echo "Purpose: Balanced performance for general gaming scenarios"
                 echo
                 echo "Active Flags:"
-                echo "  --slice-us 500                 (500us scheduling slice)"
-                echo "  --keyboard-boost-us 1500000    (1500ms - covers ability chains)"
-                echo "  --mouse-boost-us 10000         (10ms - forgiving tracking)"
-                echo "  --prefer-napi-on-input         (Network-aware scheduling)"
-                echo "  --no-stats                     (Minimal overhead)"
-                echo "  (preferred-idle-scan and mm-affinity are ON by default)"
+                echo "  --profile casual               (slice=500us, kbd=1500ms, mouse=10ms)"
                 echo
                 launch_scx "Casual Gaming" \
                     --env "RUST_LOG=warn" \
-                    --arg "--slice-us" \
-                    --arg "500" \
-                    --arg "--keyboard-boost-us" \
-                    --arg "1500000" \
-                    --arg "--mouse-boost-us" \
-                    --arg "10000" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--no-stats"
-                return
-                ;;
-            3)
-                echo
-                echo "Profile: Esports"
-                echo "Purpose: Competitive gaming with aggressive optimizations"
-                echo
-                echo "Active Flags:"
-                echo "  --slice-us 250                 (250us aggressive preemption)"
-                echo "  --input-window-us 8000         (8ms input boost window)"
-                echo "  --keyboard-boost-us 300000     (300ms - tight, less background penalty)"
-                echo "  --mouse-boost-us 6000          (6ms - covers 8000Hz polling)"
-                echo "  --prefer-napi-on-input         (Network-aware for online games)"
-                echo "  --avoid-smt                    (Prevents SMT contention)"
-                echo "  --no-stats                     (Disables stats collection)"
-                echo
-                launch_scx "Esports" \
-                    --env "RUST_LOG=warn" \
-                    --arg "--slice-us" \
-                    --arg "250" \
-                    --arg "--input-window-us" \
-                    --arg "8000" \
-                    --arg "--keyboard-boost-us" \
-                    --arg "300000" \
-                    --arg "--mouse-boost-us" \
-                    --arg "6000" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--avoid-smt" \
-                    --arg "--no-stats"
+                    --arg "--profile" \
+                    --arg "casual"
                 return
                 ;;
             4)
-                echo
-                echo "Profile: NAPI Preference"
-                echo "Purpose: Testing network-aware scheduling optimizations"
-                echo
-                echo "Active Flags:"
-                echo "  --slice-us 500                 (500us scheduling slice)"
-                echo "  --prefer-napi-on-input         (Prefer NAPI-handling CPUs)"
-                echo "  --no-stats                     (Minimal overhead)"
-                echo "  (preferred-idle-scan and mm-affinity are ON by default)"
-                echo
-                launch_scx "NAPI Preference" \
-                    --env "RUST_LOG=warn" \
-                    --arg "--slice-us" \
-                    --arg "500" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--no-stats"
-                return
-                ;;
-            5)
                 echo
                 echo "================================================================================"
                 echo "                         ULTRA-LATENCY MODE (ADVANCED)"
@@ -301,20 +244,10 @@ PROFILE
                 echo "  - CPU usage: <5% (95-98% savings vs old busy polling method)"
                 echo "  - Scheduling slice: 5us (extremely aggressive preemption)"
                 echo "  - Input boost window: 2ms (sustained for rapid input)"
-                echo "  - Performance: Ring buffer write skipped (no monitoring) for ~20µs faster latency"
                 echo
                 echo "Active Flags:"
+                echo "  --profile ultra                (slice=5us, input=2ms, kbd=100ms, mouse=4ms)"
                 echo "  --realtime-scheduling          (SCHED_FIFO real-time policy)"
-                echo "  --rt-priority 50               (Mid-range RT priority)"
-                echo "  --slice-us 5                   (5us ultra-aggressive slice)"
-                echo "  --input-window-us 2000         (2ms input boost window)"
-                echo "  --keyboard-boost-us 100000     (100ms - minimal overhead)"
-                echo "  --mouse-boost-us 4000          (4ms - covers highest polling rates)"
-                echo "  --wakeup-timer-us 100          (100us BPF timer)"
-                echo "  --avoid-smt                    (Avoids hyperthread contention)"
-                echo "  --mig-max 2                    (Minimal migrations)"
-                echo "  --no-stats                     (Disables stats collection)"
-                echo "  (preferred-idle-scan and mm-affinity are ON by default)"
                 echo
                 echo "Best For:"
                 echo "  - Aim trainers (Kovaak's, Aimlab)"
@@ -332,23 +265,9 @@ PROFILE
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
                     launch_scx "Ultra-Latency" \
                         --env "RUST_LOG=warn" \
-                        --arg "--realtime-scheduling" \
-                        --arg "--rt-priority" \
-                        --arg "50" \
-                        --arg "--slice-us" \
-                        --arg "5" \
-                        --arg "--input-window-us" \
-                        --arg "2000" \
-                        --arg "--keyboard-boost-us" \
-                        --arg "100000" \
-                        --arg "--mouse-boost-us" \
-                        --arg "4000" \
-                        --arg "--wakeup-timer-us" \
-                        --arg "100" \
-                        --arg "--avoid-smt" \
-                        --arg "--mig-max" \
-                        --arg "2" \
-                        --arg "--no-stats"
+                        --arg "--profile" \
+                        --arg "ultra" \
+                        --arg "--realtime-scheduling"
                 else
                     echo
                     echo "Ultra-Latency mode cancelled."
@@ -356,7 +275,7 @@ PROFILE
                 fi
                 return
                 ;;
-            6)
+            5)
                 echo
                 echo "================================================================================"
                 echo "                      SCHED_DEADLINE MODE (HARD REAL-TIME)"
@@ -373,17 +292,9 @@ PROFILE
                 echo "  - Most consistent latency profile available"
                 echo
                 echo "Active Flags:"
+                echo "  --profile ultra                (aggressive base settings)"
                 echo "  --deadline-scheduling          (Enable SCHED_DEADLINE policy)"
                 echo "  --deadline-runtime-us 800      (CPU time budget per period)"
-                echo "  --deadline-deadline-us 1000    (Relative deadline)"
-                echo "  --deadline-period-us 1000      (Scheduling period)"
-                echo "  --input-window-us 2000         (2ms input boost window)"
-                echo "  --keyboard-boost-us 300000     (300ms - competitive tight window)"
-                echo "  --mouse-boost-us 6000          (6ms - covers high-rate polling)"
-                echo "  --wakeup-timer-us 250          (250us BPF timer)"
-                echo "  --avoid-smt                    (Avoids hyperthread contention)"
-                echo "  --mig-max 4                    (Migration rate limiting)"
-                echo "  --no-stats                     (Disables stats collection for <1% overhead)"
                 echo
                 echo "Best For:"
                 echo "  - Maximum latency consistency and stability"
@@ -400,29 +311,11 @@ PROFILE
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
                     launch_scx "SCHED_DEADLINE" \
                         --env "RUST_LOG=warn" \
-                        --env "SCX_GAMER_INPUT_LATENCY=0" \
+                        --arg "--profile" \
+                        --arg "ultra" \
                         --arg "--deadline-scheduling" \
                         --arg "--deadline-runtime-us" \
-                        --arg "800" \
-                        --arg "--deadline-deadline-us" \
-                        --arg "1000" \
-                        --arg "--deadline-period-us" \
-                        --arg "1000" \
-                        --arg "--input-window-us" \
-                        --arg "2000" \
-                        --arg "--keyboard-boost-us" \
-                        --arg "300000" \
-                        --arg "--mouse-boost-us" \
-                        --arg "6000" \
-                        --arg "--wakeup-timer-us" \
-                        --arg "250" \
-                        --arg "--avoid-smt" \
-                        --arg "--mig-max" \
-                        --arg "4" \
-                        --arg "--disable-runtime-trace" \
-                        --arg "--disable-detectors" \
-                        --arg "--disable-dispatch-events" \
-                        --arg "--no-stats"
+                        --arg "800"
                 else
                     echo
                     echo "SCHED_DEADLINE mode cancelled."
@@ -440,20 +333,6 @@ PROFILE
     done
 }
 
-run_verbose() {
-    echo
-    echo "Mode: Verbose Statistics"
-    echo "Statistics output interval: 1.0 seconds"
-    echo
-    launch_scx "Verbose Mode" \
-        --env "RUST_LOG=info" \
-        --arg "--stats" \
-        --arg "1.0" \
-        --arg "--enable-runtime-trace" \
-        --arg "--enable-detectors" \
-        --arg "--enable-dispatch-events"
-}
-
 run_tui() {
     ensure_binary
     echo
@@ -467,20 +346,21 @@ run_tui() {
 
 TUI profiles include real-time visual monitoring with your selected settings.
 Update interval: 0.1 seconds (100ms refresh rate)
+Note: --monitoring is automatically enabled with --tui
 
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
-1) Baseline TUI        Clean scheduler defaults with TUI monitoring
-                       - Basic scheduling, good for debugging/testing
-
-2) Casual Gaming TUI   Balanced settings with visual monitoring
-                       - Preferred idle scan, MM affinity, NAPI preference
-
-3) Esports TUI         Aggressive competitive tuning with monitoring
+1) Esports TUI         Competitive gaming profile with monitoring (DEFAULT)
                        - Full optimization suite, recommended for gaming
 
-4) NAPI Preference TUI Network-aware scheduling with monitoring
-                       - Testing prefer-napi-on-input behavior
+2) Baseline TUI        Clean scheduler defaults with TUI monitoring
+                       - Basic scheduling, good for debugging/testing
+
+3) Casual Gaming TUI   Balanced settings with visual monitoring
+                       - Good for single-player and RPG gaming
+
+4) Ultra TUI           Ultra low-latency with monitoring
+                       - For extreme performance analysis
 
 q) Back to main menu
 
@@ -490,67 +370,48 @@ TUI_PROFILE
         case "${profile_choice}" in
             1)
                 echo
-                echo "Launching: TUI Dashboard - Baseline"
-                echo
-                launch_scx "TUI Baseline" \
-                    --env "RUST_LOG=info" \
-                    --arg "--tui" \
-                    --arg "${interval}" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
-                return
-                ;;
-            2)
-                echo
-                echo "Launching: TUI Dashboard - Casual Gaming"
-                echo "Active optimizations: Default (preferred-idle-scan, mm-affinity ON)"
-                echo
-                launch_scx "TUI Casual Gaming" \
-                    --env "RUST_LOG=info" \
-                    --arg "--tui" \
-                    --arg "${interval}" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
-                return
-                ;;
-            3)
-                echo
-                echo "Launching: TUI Dashboard - Esports"
-                echo "Active optimizations: Competitive tuning with monitoring"
+                echo "Launching: TUI Dashboard - Esports (Default profile)"
                 echo
                 launch_scx "TUI Esports" \
                     --env "RUST_LOG=info" \
                     --arg "--tui" \
-                    --arg "${interval}" \
-                    --arg "--slice-us" \
-                    --arg "250" \
-                    --arg "--avoid-smt" \
-                    --arg "--input-window-us" \
-                    --arg "8000" \
-                    --arg "--keyboard-boost-us" \
-                    --arg "300000" \
-                    --arg "--mouse-boost-us" \
-                    --arg "6000" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "${interval}"
+                return
+                ;;
+            2)
+                echo
+                echo "Launching: TUI Dashboard - Baseline"
+                echo
+                launch_scx "TUI Baseline" \
+                    --env "RUST_LOG=info" \
+                    --arg "--profile" \
+                    --arg "baseline" \
+                    --arg "--tui" \
+                    --arg "${interval}"
+                return
+                ;;
+            3)
+                echo
+                echo "Launching: TUI Dashboard - Casual Gaming"
+                echo
+                launch_scx "TUI Casual Gaming" \
+                    --env "RUST_LOG=info" \
+                    --arg "--profile" \
+                    --arg "casual" \
+                    --arg "--tui" \
+                    --arg "${interval}"
                 return
                 ;;
             4)
                 echo
-                echo "Launching: TUI Dashboard - NAPI Preference"
-                echo "Active optimizations: Network-aware scheduling"
+                echo "Launching: TUI Dashboard - Ultra"
                 echo
-                launch_scx "TUI NAPI Preference" \
+                launch_scx "TUI Ultra" \
                     --env "RUST_LOG=info" \
+                    --arg "--profile" \
+                    --arg "ultra" \
                     --arg "--tui" \
-                    --arg "${interval}" \
-                    --arg "--prefer-napi-on-input" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "${interval}"
                 return
                 ;;
             q|Q|0)
@@ -563,64 +424,16 @@ TUI_PROFILE
     done
 }
 
-run_ml_collect() {
+run_verbose() {
     echo
-    echo "Mode: Machine Learning Data Collection"
-    echo "Sample interval: 5.0 seconds"
-    echo "Data directory: ml_data/"
+    echo "Mode: Verbose Statistics"
+    echo "Statistics output interval: 1.0 seconds"
+    echo "Note: --monitoring is automatically enabled with --stats"
     echo
-    echo "This mode collects scheduler performance metrics for training."
-    echo "Let it run during gaming sessions for best results."
-    echo
-    launch_scx "ML Data Collection" \
+    launch_scx "Verbose Mode" \
         --env "RUST_LOG=info" \
-        --arg "--ml-collect" \
-        --arg "--ml-sample-interval" \
-        --arg "5.0" \
         --arg "--stats" \
-        --arg "2.0" \
-        --arg "--enable-runtime-trace" \
-        --arg "--enable-detectors" \
-        --arg "--enable-dispatch-events"
-}
-
-run_ml_profiles() {
-    echo
-    echo "Mode: Machine Learning Profile Manager"
-    echo
-    echo "This mode automatically loads optimized configurations based on"
-    echo "the detected game. Requires previously collected ML data."
-    echo
-    launch_scx "ML Profile Manager" \
-        --env "RUST_LOG=info" \
-        --arg "--ml-profiles" \
-        --arg "--enable-runtime-trace" \
-        --arg "--enable-detectors" \
-        --arg "--enable-dispatch-events"
-}
-
-run_ml_full() {
-    echo
-    echo "Mode: Complete ML Pipeline"
-    echo
-    echo "Enables all ML features simultaneously:"
-    echo "  - Data collection (saves to ml_data/)"
-    echo "  - Auto-load per-game profiles"
-    echo "  - Bayesian optimization"
-    echo "  - Verbose statistics output"
-    echo
-    launch_scx "ML Full Pipeline" \
-        --env "RUST_LOG=info" \
-        --arg "--ml-collect" \
-        --arg "--ml-profiles" \
-        --arg "--ml-autotune" \
-        --arg "--ml-bayesian" \
-        --arg "--stats" \
-        --arg "2.0" \
-        --arg "--verbose" \
-        --arg "--enable-runtime-trace" \
-        --arg "--enable-detectors" \
-        --arg "--enable-dispatch-events"
+        --arg "1.0"
 }
 
 run_debug() {
@@ -641,10 +454,7 @@ run_debug() {
         --env "SCX_BPF_LOG=trace" \
         --arg "--stats" \
         --arg "1.0" \
-        --arg "--verbose" \
-        --arg "--enable-runtime-trace" \
-        --arg "--enable-detectors" \
-        --arg "--enable-dispatch-events"
+        --arg "--verbose"
 }
 
 run_debug_api() {
@@ -660,6 +470,7 @@ run_debug_api() {
 
 The Debug API exposes scheduler metrics via HTTP for debugging and monitoring.
 Metrics update every 1 second and are available as JSON.
+Note: --monitoring is automatically enabled with --debug-api
 
 API Endpoints:
   - http://127.0.0.1:PORT/metrics  - Get current scheduler metrics
@@ -671,11 +482,11 @@ You can query metrics using curl:
 
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
-1) Baseline + API       Default settings with debug API enabled
-                       - Good for testing and debugging
-
-2) Esports + API        Competitive gaming profile with API
+1) Esports + API        Competitive gaming profile with API (DEFAULT)
                        - Full optimizations + metric access
+
+2) Baseline + API       Default settings with debug API enabled
+                       - Good for testing and debugging
 
 3) TUI + API            TUI Dashboard with debug API enabled
                        - Visual monitoring + HTTP access
@@ -691,50 +502,33 @@ DEBUG_API_MENU
         case "${profile_choice}" in
             1)
                 echo
-                echo "Launching: Baseline Profile with Debug API (port ${port})"
-                echo
-                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
-                echo
-                launch_scx "Baseline + Debug API" \
-                    --env "RUST_LOG=info" \
-                    --arg "--debug-api" \
-                    --arg "${port}" \
-                    --arg "--slice-us" \
-                    --arg "1000" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
-                return
-                ;;
-            2)
-                echo
                 echo "Launching: Esports Profile with Debug API (port ${port})"
-                echo "Active optimizations: Competitive tuning with debug API"
                 echo
                 echo "Access metrics at: http://127.0.0.1:${port}/metrics"
                 echo
                 launch_scx "Esports + Debug API" \
                     --env "RUST_LOG=info" \
                     --arg "--debug-api" \
-                    --arg "${port}" \
-                    --arg "--slice-us" \
-                    --arg "250" \
-                    --arg "--input-window-us" \
-                    --arg "8000" \
-                    --arg "--keyboard-boost-us" \
-                    --arg "300000" \
-                    --arg "--mouse-boost-us" \
-                    --arg "6000" \
-                    --arg "--avoid-smt" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "${port}"
+                return
+                ;;
+            2)
+                echo
+                echo "Launching: Baseline Profile with Debug API (port ${port})"
+                echo
+                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
+                echo
+                launch_scx "Baseline + Debug API" \
+                    --env "RUST_LOG=info" \
+                    --arg "--profile" \
+                    --arg "baseline" \
+                    --arg "--debug-api" \
+                    --arg "${port}"
                 return
                 ;;
             3)
                 echo
                 echo "Launching: TUI Dashboard with Debug API (port ${port})"
-                echo "Active optimizations: Default (preferred-idle-scan, mm-affinity ON)"
                 echo
                 echo "Access metrics at: http://127.0.0.1:${port}/metrics"
                 echo
@@ -743,10 +537,7 @@ DEBUG_API_MENU
                     --arg "--tui" \
                     --arg "0.1" \
                     --arg "--debug-api" \
-                    --arg "${port}" \
-                    --arg "--enable-runtime-trace" \
-                    --arg "--enable-detectors" \
-                    --arg "--enable-dispatch-events"
+                    --arg "${port}"
                 return
                 ;;
             4)
@@ -758,7 +549,7 @@ DEBUG_API_MENU
                 echo "Enter your custom scx_gamer command-line arguments."
                 echo "The --debug-api ${port} flag will be added automatically."
                 echo
-                echo "Example: --slice-us 250 --input-window-us 8000 --avoid-smt"
+                echo "Example: --profile ultra --realtime-scheduling"
                 echo
                 local line
                 read -rp "Custom flags: " line
@@ -798,19 +589,26 @@ run_custom() {
     echo "================================================================================"
     echo
     echo "Enter your custom scx_gamer command-line arguments."
-    echo "Example: --slice-us 100 --input-window-us 1000 --keyboard-boost-us 300000 --mouse-boost-us 6000 --verbose"
     echo
-    echo "Available flags: Run 'scx_gamer --help' for complete list"
-    echo "Key options:"
-    echo "  --keyboard-boost-us <us>   Keyboard boost duration (default: 1000000 = 1000ms)"
-    echo "                            Lower values (200-500ms) reduce background penalty"
-    echo "  --mouse-boost-us <us>      Mouse boost duration (default: 8000 = 8ms)"
-    echo "                            Lower values (4-6ms) reduce latency variance"
-    echo "  --input-window-us <us>      Global input window (default: 5000 = 5ms)"
-    echo ""
-    echo "Performance Note:"
-    echo "  When running WITHOUT --stats/--monitor/--tui, ring buffer write is"
-    echo "  automatically skipped, saving ~20µs per event for maximum performance."
+    echo "Available profiles: --profile [esports|baseline|casual|ultra]"
+    echo "  esports (default): slice=250us, input=8ms, kbd=300ms, mouse=6ms, avoid-smt, napi"
+    echo "  baseline:          slice=1000us, minimal tuning"
+    echo "  casual:            slice=500us, kbd=1500ms, mouse=10ms, napi"
+    echo "  ultra:             slice=5us, input=2ms, kbd=100ms, mouse=4ms, mig-max=2"
+    echo
+    echo "Monitoring: --monitoring (enables stats/detectors/tracing)"
+    echo "            Or use --stats/--tui/--debug-api which auto-enable monitoring"
+    echo
+    echo "Override any profile setting with explicit flags:"
+    echo "  --slice-us <us>           Override slice duration"
+    echo "  --input-window-us <us>    Override input window"
+    echo "  --keyboard-boost-us <us>  Override keyboard boost"
+    echo "  --mouse-boost-us <us>     Override mouse boost"
+    echo "  --avoid-smt <true|false>  Override SMT avoidance"
+    echo "  --prefer-napi-on-input <true|false>  Override NAPI preference"
+    echo
+    echo "Example: --profile ultra --realtime-scheduling"
+    echo "Example: --profile casual --slice-us 250 --avoid-smt true"
     echo
     local line
     read -rp "Custom flags: " line
@@ -835,34 +633,28 @@ show_menu() {
                               SCX_GAMER LAUNCHER
 ================================================================================
 
+Default profile is ESPORTS - competitive gaming with minimal overhead.
+Stats/monitoring are DISABLED by default for maximum performance.
+
 MODE                   DESCRIPTION
 --------------------------------------------------------------------------------
 1) Standard Profiles   Choose from preset gaming configurations
-                       - Baseline, Casual, Esports, Ultra-Latency, etc.
+                       - Esports (default), Baseline, Casual, Ultra-Latency
 
-2) Verbose Mode        Run with statistics output every 1 second
-                       - Clean output, no extra logging
-
-3) TUI Dashboard       Interactive terminal UI with real-time stats
+2) TUI Dashboard       Interactive terminal UI with real-time stats
                        - Visual performance monitoring (recommended)
 
-4) ML Data Collection  Collect scheduler metrics for machine learning
-                       - Saves performance data to ml_data/ directory
+3) Verbose Mode        Run with statistics output every 1 second
+                       - Clean output, monitoring auto-enabled
 
-5) ML Profile Manager  Auto-load optimized configs per game
-                       - Uses previously trained ML data
-
-6) ML Full Pipeline    Complete ML workflow (collect + profiles + stats)
-                       - Comprehensive machine learning optimization
-
-7) Debug Mode          Maximum logging for troubleshooting
+4) Debug Mode          Maximum logging for troubleshooting
                        - RUST_LOG=debug, LIBBPF_LOG=debug
 
-8) Debug API Mode      Start with HTTP API for metric access
+5) Debug API Mode      Start with HTTP API for metric access
                        - Exposes metrics at http://127.0.0.1:8080/metrics
                        - Useful for debugging with AI assistants
 
-9) Custom Flags        Manually enter scheduler command-line arguments
+6) Custom Flags        Manually enter scheduler command-line arguments
                        - For advanced users and testing
 
 q) Quit                Exit launcher
@@ -885,17 +677,14 @@ while true; do
         echo "Current build mode: Debug (${BIN_PATH})"
     fi
     echo
-    read -rp "Select mode [1-9, q]: " choice
+    read -rp "Select mode [1-6, q]: " choice
     case "${choice}" in
         1) run_standard ;;
-        2) run_verbose ;;
-        3) run_tui ;;
-        4) run_ml_collect ;;
-        5) run_ml_profiles ;;
-        6) run_ml_full ;;
-        7) run_debug ;;
-        8) run_debug_api ;;
-        9) run_custom ;;
+        2) run_tui ;;
+        3) run_verbose ;;
+        4) run_debug ;;
+        5) run_debug_api ;;
+        6) run_custom ;;
         q|Q|0) 
             echo
             echo "Exiting scx_gamer launcher."
@@ -905,7 +694,7 @@ while true; do
         *) 
             echo
             echo "Invalid selection: ${choice}"
-            echo "Please choose 1-9 or q to quit."
+            echo "Please choose 1-6 or q to quit."
             echo
             ;;
     esac

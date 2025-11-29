@@ -214,15 +214,17 @@ static __always_inline bool is_network_name(const char *comm)
 	    comm[4] == '_' && comm[5] == 'w' && comm[6] == 'i' && comm[7] == 'n')
 		return true;  /* wine_win* (wininet) */
 
-	/* ntdll threadpool - handles async network I/O in Wine/Proton */
-	if (comm[0] == 'n' && comm[1] == 't' && comm[2] == 'd' && comm[3] == 'l' &&
-	    comm[4] == 'l' && comm[5] == '_')
-		return true;  /* ntdll_* (ntdll threadpool workers) */
+	/* BUG FIX: ntdll_* REMOVED - these are general-purpose Wine threadpool workers
+	 * that handle EVERYTHING (GPU, audio, input, timers), not just network I/O.
+	 * Classifying all ntdll threads as network caused misclassification of:
+	 * - GPU submit threads (should be boost=6, not boost=3)
+	 * - Audio threads (should be boost=2, not boost=3)
+	 * - Input handlers (should be boost=7, not boost=3)
+	 * See: https://wiki.winehq.org/ThreadPoolAPI */
 
-	/* Wine server - can be involved in network synchronization */
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == 's' && comm[5] == 'e' && comm[6] == 'r' && comm[7] == 'v')
-		return true;  /* wineserv* */
+	/* BUG FIX: wineserv* REMOVED - Wine server handles IPC synchronization,
+	 * not network I/O. Misclassifying wineserver as network thread caused
+	 * unnecessary priority elevation for a system service. */
 
 	/* Wine I/O completion port threads (async network I/O) */
 	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
@@ -240,26 +242,23 @@ static __always_inline bool is_network_name(const char *comm)
 	    comm[8] == '.' && comm[9] == 'x' && comm[10] == '6' && comm[11] == '4')
 		return true;  /* Warframe.x64.ex */
 
-	/* Wine game threads - common Wine thread patterns */
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 't' && comm[6] == 'h' && comm[7] == 'r')
-		return true;  /* wine_threadpool */
-
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'x' && comm[6] == 'i' && comm[7] == 'n')
-		return true;  /* wine_xinput_hid */
-
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 's' && comm[6] == 'e' && comm[7] == 'c')
-		return true;  /* wine_sechost_de */
-
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'm' && comm[6] == 'm' && comm[7] == 'd')
-		return true;  /* wine_mmdevapi_n */
-
-	if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'e' &&
-	    comm[4] == '_' && comm[5] == 'd' && comm[6] == 'i' && comm[7] == 'n')
-		return true;  /* wine_dinput_wor */
+	/* BUG FIX: Removed several Wine thread patterns that were INCORRECTLY classified as network:
+	 * 
+	 * REMOVED: wine_threadpool - TOO BROAD, handles GPU/audio/input/timers, not just network
+	 * REMOVED: wine_xinput_hid - This is INPUT HANDLER (controller input), NOT network!
+	 *          Should get boost=7 as input handler, was incorrectly getting boost=3 as network.
+	 * REMOVED: wine_dinput_wor - This is DirectInput (mouse/keyboard), NOT network!
+	 *          Should get boost=7 as input handler.
+	 * REMOVED: wine_mmdevapi_n - This is AUDIO (Windows Multimedia Device API), NOT network!
+	 *          Should get boost=2 as audio thread.
+	 * REMOVED: wine_sechost_de - This is security/services, NOT network!
+	 *          Was incorrectly boosted for no reason.
+	 *
+	 * These threads are now correctly classified by their proper handlers:
+	 * - Input handlers: is_input_handler_name() → is_wine_input_thread()
+	 * - Audio threads: is_game_audio_name() → wine audio patterns
+	 * - GPU threads: is_gpu_submit_name() → dxvk/vkd3d patterns
+	 */
 
 	/* proton-* threads (Proton compatibility layer helpers) */
 	if (comm[0] == 'p' && comm[1] == 'r' && comm[2] == 'o' && comm[3] == 't' &&
@@ -306,13 +305,16 @@ static __always_inline bool is_network_name(const char *comm)
  */
 static __always_inline bool is_gaming_network_thread(const char *comm)
 {
-	/* Game client/server threads */
-	if (comm[0] == 'C' && comm[1] == 'l' && comm[2] == 'i' && comm[3] == 'e')
-		return true;  /* Client */
+	/* BUG FIX: Removed overly broad patterns that matched non-gaming threads:
+	 * - "Client" matched ServiceWorker, DatabaseClient, etc.
+	 * - "Server" matched any daemon/service (PostgresServer, WebServer, etc.)
+	 * - "Mult" matched Multithread, MultiProcess, etc.
+	 * - "Voice" matched non-gaming voice apps
+	 * - "Chat" matched any chat application
+	 * 
+	 * Now only match GAME-SPECIFIC prefixes to avoid false positives. */
 
-	if (comm[0] == 'S' && comm[1] == 'e' && comm[2] == 'r' && comm[3] == 'v')
-		return true;  /* Server */
-
+	/* Game-prefixed client/server threads (more specific) */
 	if (comm[0] == 'G' && comm[1] == 'a' && comm[2] == 'm' && comm[3] == 'e') {
 		if (comm[4] == 'C' && comm[5] == 'l' && comm[6] == 'i' && comm[7] == 'e')
 			return true;  /* GameClient */
@@ -320,21 +322,23 @@ static __always_inline bool is_gaming_network_thread(const char *comm)
 			return true;  /* GameServer */
 		if (comm[4] == 'N' && comm[5] == 'e' && comm[6] == 't')
 			return true;  /* GameNet*, GameNetworking */
+		if (comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r' && comm[7] == 'e')
+			return true;  /* GameThread */
 	}
 
-	/* Multiplayer/netcode threads */
-	if (comm[0] == 'M' && comm[1] == 'u' && comm[2] == 'l' && comm[3] == 't')
-		return true;  /* Multiplayer */
+	/* Netcode threads (specific to game networking) */
+	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'c' &&
+	    comm[4] == 'o' && comm[5] == 'd' && comm[6] == 'e')
+		return true;  /* Netcode (full match required) */
 
-	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'c')
-		return true;  /* Netcode */
-
-	/* Real-time communication (voice chat, etc.) */
-	if (comm[0] == 'V' && comm[1] == 'o' && comm[2] == 'i' && comm[3] == 'c')
-		return true;  /* Voice */
-
-	if (comm[0] == 'C' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't')
-		return true;  /* Chat */
+	/* NetworkClient/NetworkServer (Unity/Unreal pattern - more specific than just "Client") */
+	if (comm[0] == 'N' && comm[1] == 'e' && comm[2] == 't' && comm[3] == 'w' &&
+	    comm[4] == 'o' && comm[5] == 'r' && comm[6] == 'k') {
+		if (comm[7] == 'C' && comm[8] == 'l')
+			return true;  /* NetworkClient */
+		if (comm[7] == 'S' && comm[8] == 'e')
+			return true;  /* NetworkServer */
+	}
 
 	/* ============================================
 	 * GAMING NETWORKING LIBRARIES
@@ -722,9 +726,20 @@ static __always_inline bool is_game_audio_name(const char *comm)
 			return true;  /* AudioThread, AudioMixerRende, AudioDevice */
 	}
 
-	/* FAudio (Wine/Proton XAudio2 implementation) - THE key audio layer for Proton */
+	/* FAudio (Wine/Proton XAudio2 implementation) - THE key audio layer for Proton
+	 * AUDIO FIX: More patterns to catch FAudio_AudioClient variants (Palworld).
+	 * Thread names may be truncated to 15 chars by kernel. */
 	if (comm[0] == 'F' && comm[1] == 'A' && comm[2] == 'u' && comm[3] == 'd')
 		return true;  /* FAudio* */
+	if (comm[0] == 'F' && comm[1] == 'A' && comm[2] == 'u' && comm[3] == 'D')
+		return true;  /* FAuDio* (case variant) */
+
+	/* audio_client - Wine/Proton audio client threads (e.g., audio_client_ma, audio_client_re)
+	 * These are the actual threads doing audio work in Proton games like Palworld.
+	 * CRITICAL: Palworld's audio_client_ma had 49.7% wait time without detection. */
+	if (comm[0] == 'a' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' &&
+	    comm[4] == 'o' && comm[5] == '_' && comm[6] == 'c' && comm[7] == 'l')
+		return true;  /* audio_client_*, audio_client_ma, audio_client_re, etc. */
 
 	/* Wine/Proton audio threads - CRITICAL for Linux gaming
 	 * Wine translates Windows audio APIs, these are the actual threads doing the work.
@@ -944,6 +959,76 @@ static __always_inline bool is_taskgraph_thread(const char *comm)
 	return false;
 }
 #endif
+
+/**
+ * is_ue5_worker_thread - Check if thread is a UE5 async worker (NOT system background)
+ * @comm: Thread name (comm field from task_struct)
+ *
+ * UE5 uses FRunnable/AsyncTask workers named "Background Work" for game tasks like:
+ * - Asset decompression and streaming
+ * - Physics calculations  
+ * - AI pathfinding
+ * - Shader compilation
+ * - Level streaming
+ *
+ * These are GAME threads that should NOT get the 8x background penalty.
+ * They should be treated similarly to TaskGraph workers - lower priority than
+ * GameThread/RenderThread but still responsive.
+ *
+ * Also detects other common UE5 worker patterns:
+ * - "ForegroundWork" - UE5 foreground async tasks
+ * - "PoolThread" - Generic thread pool workers (Unity, UE4/5)
+ * - "JobThread" - Job system workers (various engines)
+ * - "AsyncTask" - Async task workers
+ * - "IOThreadPool" - IO workers (important for asset loading)
+ *
+ * NOTE: This is always enabled (not behind CONFIG_GAMER_ENABLE_LEGACY_CLASSIFY)
+ * because UE5 worker detection is critical for modern game performance.
+ *
+ * TIER 0: Optimized character-by-character comparison (~10-40ns)
+ */
+static __always_inline bool is_ue5_worker_thread(const char *comm)
+{
+	/* "Background Work" - UE5 FRunnable async workers (Palworld, etc.)
+	 * Note: 15 chars = "Background Work" */
+	if (comm[0] == 'B' && comm[1] == 'a' && comm[2] == 'c' && comm[3] == 'k' &&
+	    comm[4] == 'g' && comm[5] == 'r' && comm[6] == 'o' && comm[7] == 'u' &&
+	    comm[8] == 'n' && comm[9] == 'd' && comm[10] == ' ' && comm[11] == 'W' &&
+	    comm[12] == 'o' && comm[13] == 'r' && comm[14] == 'k')
+		return true;
+
+	/* "ForegroundWork" - UE5 foreground async tasks */
+	if (comm[0] == 'F' && comm[1] == 'o' && comm[2] == 'r' && comm[3] == 'e' &&
+	    comm[4] == 'g' && comm[5] == 'r' && comm[6] == 'o' && comm[7] == 'u' &&
+	    comm[8] == 'n' && comm[9] == 'd' && comm[10] == 'W')
+		return true;
+
+	/* "IOThreadPool" - UE5 IO workers (asset loading, critical for no-hitch streaming) */
+	if (comm[0] == 'I' && comm[1] == 'O' && comm[2] == 'T' && comm[3] == 'h' &&
+	    comm[4] == 'r' && comm[5] == 'e' && comm[6] == 'a' && comm[7] == 'd' &&
+	    comm[8] == 'P' && comm[9] == 'o' && comm[10] == 'o' && comm[11] == 'l')
+		return true;
+
+	/* "PoolThread" - Generic thread pool workers */
+	if (comm[0] == 'P' && comm[1] == 'o' && comm[2] == 'o' && comm[3] == 'l' &&
+	    comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r' && comm[7] == 'e' &&
+	    comm[8] == 'a' && comm[9] == 'd')
+		return true;
+
+	/* "AsyncTask" - Async task workers */
+	if (comm[0] == 'A' && comm[1] == 's' && comm[2] == 'y' && comm[3] == 'n' &&
+	    comm[4] == 'c' && comm[5] == 'T' && comm[6] == 'a' && comm[7] == 's' &&
+	    comm[8] == 'k')
+		return true;
+
+	/* "JobThread" - Job system workers (Godot, custom engines) */
+	if (comm[0] == 'J' && comm[1] == 'o' && comm[2] == 'b' && comm[3] == 'T' &&
+	    comm[4] == 'h' && comm[5] == 'r' && comm[6] == 'e' && comm[7] == 'a' &&
+	    comm[8] == 'd')
+		return true;
+
+	return false;
+}
 
 static __always_inline bool comm_contains(const char *comm, const char *needle, int needle_len)
 {
@@ -1245,31 +1330,24 @@ static __always_inline bool is_compiler_name(const char *comm)
 
 static __always_inline bool is_background_name(const char *comm)
 {
+	/* BUG FIX: Exclude GPU submission threads from background classification FIRST.
+	 * RenderThread, vkd3d-*, dxvk-*, RHIThread are GPU submission threads that need
+	 * high priority. Without this check, is_background_name() could misclassify them
+	 * as background during thread initialization, causing 8x penalty and frame spikes.
+	 * 
+	 * This check runs before any background patterns to ensure GPU threads are never
+	 * accidentally penalized. Cost: ~5-30ns (same pattern matching as is_gpu_submit_name) */
+	if (is_gpu_submit_name(comm))
+		return false;
+	
 	/* COMPILERS: Highest priority for background detection
 	 * These are extremely CPU-intensive and should be heavily penalized */
 	if (is_compiler_name(comm))
 		return true;
 
-	/* GPU render threads often treated as background when they go idle */
-	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd' &&
-	    comm[4] == 'e' && comm[5] == 'r' && comm[6] == 'T')
-		return true;
-
-	if (comm[0] == 'v' && comm[1] == 'k' && comm[2] == 'd' && comm[3] == '3')
-		return true;
-
-	if (comm[0] == '[' && comm[1] == 'v' && comm[2] == 'k')
-		return true;
-
-	if (comm[0] == 'U' && comm[1] == 'n' && comm[2] == 'i' && comm[3] == 't' &&
-	    comm[4] == 'y' && comm[5] == 'G' && comm[6] == 'f' && comm[7] == 'x')
-		return true;
-
-	if (comm[0] == 'r' && comm[1] == 'e' && comm[2] == 'n' && comm[3] == 'd')
-		return true;
-
-	if (comm[0] == 'g' && comm[1] == 'p' && comm[2] == 'u')
-		return true;
+	/* NOTE: GPU render thread patterns removed - now handled by is_gpu_submit_name check above.
+	 * Previous code incorrectly classified RenderThread, vkd3d, dxvk, UnityGfx, etc. as
+	 * background, causing frame spikes during game startup and level transitions. */
 
 	/* Steam WebHelper - CPU-intensive browser component that should be throttled */
 	if (comm[0] == 's' && comm[1] == 't' && comm[2] == 'e' && comm[3] == 'a' &&
@@ -1458,21 +1536,28 @@ static __always_inline bool is_audio_pipeline_thread(const char *comm)
 		if (comm[5] == 'M' && comm[6] == 'i' && comm[7] == 'x') return true;  /* AudioMixer */
 	}
 
-	/* Real-time audio processing */
+	/* Real-time audio processing
+	 * BUG FIX: Removed overly broad "RealTime" pattern - matched any real-time thread
+	 * "RealTime" alone matched: RealTimeThread, RealTimePriority, etc.
+	 * Now only matches "RTAudio*" which is specific to audio */
 	if (comm[0] == 'R' && comm[1] == 'T' && comm[2] == 'A' && comm[3] == 'u') return true;  /* RTAudio */
-	if (comm[0] == 'R' && comm[1] == 'e' && comm[2] == 'a' && comm[3] == 'l' && comm[4] == 'T') return true;  /* RealTime */
 
-	/* Audio effects processing */
+	/* Audio effects processing
+	 * BUG FIX: Removed overly broad "Effect" pattern - matched any effect (visual, game, etc.)
+	 * "Effect" alone matched: EffectThread, VisualEffect, ParticleEffect, etc.
+	 * Now only matches "AudioEffect*" which is specific to audio */
 	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o' && comm[5] == 'E') return true;  /* AudioEffect */
-	if (comm[0] == 'E' && comm[1] == 'f' && comm[2] == 'f' && comm[3] == 'e' && comm[4] == 'c' && comm[5] == 't') return true;  /* Effect */
 
-	/* Audio codec processing */
+	/* Audio codec processing
+	 * BUG FIX: Removed overly broad "Codec" pattern - matched any codec (video, audio, etc.)
+	 * Now only matches "AudioCodec*" which is specific to audio */
 	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o' && comm[5] == 'C') return true;  /* AudioCodec */
-	if (comm[0] == 'C' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'c') return true;  /* Codec */
 
-	/* Audio streaming */
+	/* Audio streaming
+	 * BUG FIX: Removed overly broad "Stream" pattern - matched any stream (video, file, network)
+	 * "Stream" alone matched: StreamClient, StreamHelper, FileStream, NetworkStream, etc.
+	 * Now only matches "AudioStream*" which is specific to audio */
 	if (comm[0] == 'A' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'i' && comm[4] == 'o' && comm[5] == 'S') return true;  /* AudioStream */
-	if (comm[0] == 'S' && comm[1] == 't' && comm[2] == 'r' && comm[3] == 'e' && comm[4] == 'a' && comm[5] == 'm') return true;  /* Stream */
 
 	return false;
 }
@@ -1741,21 +1826,36 @@ static __always_inline bool is_discord_name(const char *comm)
 
 static __always_inline void classify_discord(struct task_struct *p, struct task_ctx *tctx)
 {
-	if (!tctx->is_background && is_discord_name(p->comm)) {
-		/* AUDIO IMPROVEMENT: Check if this is a voice/audio thread first
-		 * Voice threads should NOT be classified as background */
+	/* BUG FIX: Check voice threads FIRST, BEFORE background check.
+	 * 
+	 * Previous logic: if (!tctx->is_background && is_discord_name())
+	 * Problem: If thread was pre-classified as background, voice check was skipped entirely.
+	 * This could cause Discord voice threads to get 8x penalty instead of audio boost.
+	 * 
+	 * New logic: Always check for voice threads first, then apply background penalty only
+	 * to non-voice Discord threads. */
+	if (is_discord_name(p->comm)) {
+		/* STEP 1: Check if this is a voice/audio thread FIRST (before any background check)
+		 * Voice threads should NEVER be classified as background */
 		if (is_voice_chat_audio_thread(p->comm)) {
 			/* This is a Discord voice thread - give it system audio priority */
 			if (!tctx->is_system_audio) {
 				tctx->is_system_audio = 1;
 				apply_class_boost(tctx, 2);  /* Same boost as USB audio */
 			}
+			/* BUG FIX: Clear background flag if it was incorrectly set */
+			if (tctx->is_background) {
+				tctx->is_background = 0;
+			}
 			return;  /* Don't mark as background! */
 		}
 		
-		tctx->is_background = 1;
-		/* Discord UI/renderer gets background penalty (8x slower) when not in foreground */
-		/* This prevents Discord from competing with games for CPU time */
+		/* STEP 2: Non-voice Discord threads get background penalty */
+		if (!tctx->is_background) {
+			tctx->is_background = 1;
+			/* Discord UI/renderer gets background penalty (8x slower) when not in foreground */
+			/* This prevents Discord from competing with games for CPU time */
+		}
 	}
 }
 
@@ -1827,6 +1927,11 @@ static __always_inline void classify_background(struct task_struct *p, struct ta
  */
 static __always_inline void classify_task(struct task_struct *p, struct task_ctx *tctx)
 {
+    /* BUG FIX: Classify voice chat audio FIRST before any background checks.
+     * This ensures TeamSpeak, Mumble, WebRTC audio threads get priority
+     * before they can be incorrectly marked as background processes. */
+    classify_voice_chat_audio(p, tctx);
+    
     classify_input_handler(p, tctx);
     classify_gpu_submit(p, tctx);
     classify_audio(p, tctx);

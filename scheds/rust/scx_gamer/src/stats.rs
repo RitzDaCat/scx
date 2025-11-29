@@ -436,6 +436,24 @@ pub struct Metrics {
     pub background_pct: f64,
     #[stat(desc = "Total classified threads")]
     pub total_classified_threads: u64,
+
+    /* PSI (Pressure Stall Information) - Linux 4.20+ */
+    #[stat(desc = "CPU pressure avg10 (% tasks waiting for CPU)")]
+    pub psi_cpu_some_avg10: f64,
+    #[stat(desc = "CPU pressure avg60 (% tasks waiting for CPU)")]
+    pub psi_cpu_some_avg60: f64,
+    #[stat(desc = "Memory pressure avg10 (% tasks stalled on memory)")]
+    pub psi_mem_some_avg10: f64,
+    #[stat(desc = "Memory pressure avg60 (% tasks stalled on memory)")]
+    pub psi_mem_some_avg60: f64,
+    #[stat(desc = "Memory full pressure avg10 (% all tasks stalled on memory)")]
+    pub psi_mem_full_avg10: f64,
+    #[stat(desc = "IO pressure avg10 (% tasks stalled on IO)")]
+    pub psi_io_some_avg10: f64,
+    #[stat(desc = "IO pressure avg60 (% tasks stalled on IO)")]
+    pub psi_io_some_avg60: f64,
+    #[stat(desc = "IO full pressure avg10 (% all tasks stalled on IO)")]
+    pub psi_io_full_avg10: f64,
 }
 
 impl Metrics {
@@ -566,6 +584,17 @@ impl Metrics {
                 self.prof_deadline_avg_ns
             )?;
         }
+        // Show PSI (Pressure Stall Information) - scheduler health indicators
+        // CPU <5% = good, Memory/IO <1% = good for gaming
+        writeln!(
+            w,
+            "│ psi: cpu {:>5.2}%  mem {:>5.2}%/{:>5.2}%  io {:>5.2}%/{:>5.2}%",
+            self.psi_cpu_some_avg10,
+            self.psi_mem_some_avg10,
+            self.psi_mem_full_avg10,
+            self.psi_io_some_avg10,
+            self.psi_io_full_avg10
+        )?;
         writeln!(w, "└─")?;
         Ok(())
     }
@@ -843,6 +872,16 @@ impl Metrics {
             network_pct: self.network_pct,
             background_pct: self.background_pct,
             total_classified_threads: self.total_classified_threads,
+
+            // PSI - live values (not deltas)
+            psi_cpu_some_avg10: self.psi_cpu_some_avg10,
+            psi_cpu_some_avg60: self.psi_cpu_some_avg60,
+            psi_mem_some_avg10: self.psi_mem_some_avg10,
+            psi_mem_some_avg60: self.psi_mem_some_avg60,
+            psi_mem_full_avg10: self.psi_mem_full_avg10,
+            psi_io_some_avg10: self.psi_io_some_avg10,
+            psi_io_some_avg60: self.psi_io_some_avg60,
+            psi_io_full_avg10: self.psi_io_full_avg10,
         }
     }
 }

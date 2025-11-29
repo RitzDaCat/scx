@@ -112,18 +112,27 @@ static __always_inline void register_interrupt_thread(u32 tid, u8 interrupt_type
 			info->interrupt_freq_hz = (info->interrupt_freq_hz + freq_hz) >> 1;
 		}
 		
-		/* TIER 0: Detect input interrupt patterns (threshold checks) */
-		if (likely(info->interrupt_freq_hz > 100 && info->total_interrupts > 50)) {
+		/* TIER 0: Detect input interrupt patterns (threshold checks)
+		 * BUG FIX: Raised threshold from 100 Hz to 500 Hz to avoid false positives.
+		 * 8kHz mice generate thousands of interrupts/sec, but system timers and
+		 * other periodic interrupts can also hit 100 Hz. 500 Hz is more selective.
+		 * Also require more samples (100 instead of 50) for confidence. */
+		if (likely(info->interrupt_freq_hz > 500 && info->total_interrupts > 100)) {
 			info->is_input_interrupt = 1;
 		}
 		
-		/* TIER 0: Detect GPU interrupt patterns */
-		if (likely(info->interrupt_freq_hz > 60 && info->total_interrupts > 100)) {
+		/* TIER 0: Detect GPU interrupt patterns
+		 * BUG FIX: For 240Hz+ displays, GPU interrupts can be 240-480 Hz (frame completion).
+		 * Keep threshold at 60 Hz but require more samples (200) to avoid false positives
+		 * from other 60Hz periodic interrupts. */
+		if (likely(info->interrupt_freq_hz > 60 && info->total_interrupts > 200)) {
 			info->is_gpu_interrupt = 1;
 		}
 		
-		/* TIER 0: Detect USB interrupt patterns */
-		if (likely(info->interrupt_freq_hz > 10 && info->total_interrupts > 20)) {
+		/* TIER 0: Detect USB interrupt patterns
+		 * USB polling occurs at device-specific rates (125Hz for USB2, 1kHz+ for USB3).
+		 * 10 Hz is too low - many system interrupts hit this. Raised to 50 Hz minimum. */
+		if (likely(info->interrupt_freq_hz > 50 && info->total_interrupts > 50)) {
 			info->is_usb_interrupt = 1;
 		}
 		

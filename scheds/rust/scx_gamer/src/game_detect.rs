@@ -547,25 +547,35 @@ fn calculate_score(game: &GameInfo) -> i32 {
         );
     }
 
-    // **RESOURCE USAGE HEURISTICS**: Distinguish real games from launchers
-    // Real games: 50+ threads, 500MB+ memory
-    // Launchers: <10 threads, <100MB memory
+    // BUG FIX: INCREASED RESOURCE THRESHOLDS
+    // Previous: 20+ threads, 100MB+ memory could match Discord, VS Code, browsers
+    // New: 50+ threads, 300MB+ memory for "definitely game" signal
+    //      30+ threads, 200MB+ memory for "likely game" signal
+    // This prevents false positives from heavy Electron apps
     if let Some(stats) = get_process_stats(game.tgid) {
-        // Thread count is a VERY strong signal
-        if stats.threads >= 50 {
+        // Thread count is a VERY strong signal - RAISED THRESHOLDS
+        if stats.threads >= 80 {
+            score += 400; // Very many threads = almost certainly a AAA game
+        } else if stats.threads >= 50 {
             score += 300; // Many threads = definitely the actual game
-        } else if stats.threads >= 20 {
-            score += 150; // Moderate threads = likely game, not launcher
+        } else if stats.threads >= 30 {
+            score += 150; // Moderate-high threads = likely game
+        } else if stats.threads >= 15 {
+            score += 50;  // BUG FIX: Reduced from 150 - too many non-games have 15-30 threads
         } else if stats.threads < 5 {
             score -= 200; // Few threads = likely launcher/wrapper
         }
 
-        // Memory usage (in MB)
+        // Memory usage (in MB) - RAISED THRESHOLDS
         let mem_mb = stats.vmrss_kb / 1024;
-        if mem_mb >= 500 {
+        if mem_mb >= 1000 {
+            score += 300; // Very high memory (1GB+) = almost certainly a game
+        } else if mem_mb >= 500 {
             score += 200; // High memory = actual game
-        } else if mem_mb >= 100 {
-            score += 50; // Moderate memory
+        } else if mem_mb >= 300 {
+            score += 100; // Moderate-high memory = likely game
+        } else if mem_mb >= 150 {
+            score += 25;  // BUG FIX: Reduced from 50 - too many apps use 100-300MB
         } else if mem_mb < 50 {
             score -= 100; // Low memory = likely launcher
         }
@@ -579,6 +589,22 @@ fn calculate_score(game: &GameInfo) -> i32 {
     }
 
     let name_lower = game.name.to_lowercase();
+
+    // BUG FIX: ADDED NEGATIVE SCORING FOR KNOWN NON-GAME APPS
+    // These are common high-resource apps that could be mistaken for games
+    if matches!(
+        name_lower.as_str(),
+        // Electron apps (high threads/memory but NOT games)
+        "discord" | "code" | "cursor" | "slack" | "teams" | "spotify" |
+        "chromium" | "chrome" | "firefox" | "brave" | "vivaldi" | "edge" |
+        "electron" | "obsidian" | "notion" | "vscode" | "atom" |
+        // Streaming/recording (high resource but NOT games)
+        "obs" | "obs-studio" | "vlc" | "mpv" | "ffmpeg" |
+        // System monitors
+        "htop" | "btop" | "plasma-systemmo"
+    ) {
+        score -= 800; // Very strong penalty - these are NEVER games
+    }
 
     // Strongly deprioritize wrapper processes and system utilities
     // These are typically launchers, not the actual game process
@@ -694,6 +720,21 @@ fn check_process(pid: u32) -> Option<GameInfo> {
         return None;
     }
 
+    // BUG FIX: Added exclusions for known non-game apps BEFORE resource check
+    // Discord, VS Code, Chrome etc. have high thread/memory but are NOT games
+    let is_known_non_game = matches!(
+        comm_lower.as_str(),
+        "discord" | "code" | "cursor" | "slack" | "teams" | "spotify" |
+        "chromium" | "chrome" | "firefox" | "brave" | "vivaldi" | "edge" |
+        "electron" | "obsidian" | "notion" | "vscode" | "atom" |
+        "obs" | "obs-studio" | "vlc" | "mpv" | "ffmpeg" |
+        "htop" | "btop" | "plasma-systemmo"
+    );
+
+    if is_known_non_game {
+        return None; // Early exit - these are NEVER games
+    }
+
     // ROBUST DETECTION: Accept any process that matches game characteristics
     // This works for ANY launcher (Steam, Battle.net, Epic, GOG, native Linux games, etc.)
     //
@@ -704,13 +745,17 @@ fn check_process(pid: u32) -> Option<GameInfo> {
     // 4. Name patterns (.exe, game/client keywords, MangohHUD)
     //
     // This ensures Battle.net (WoW), Epic Games, GOG, native Linux games all work.
+    // BUG FIX: RAISED RESOURCE THRESHOLDS from 20 threads/100MB to 40 threads/300MB
+    // Old thresholds matched too many Electron apps (Discord: 30+ threads, 200MB+)
     let is_likely_game = is_wine || 
 		(is_steam && (cmdline_lower.contains("steam") || cmdline_lower.contains("reaper"))) ||
-		// Resource-based detection: High resource usage = likely game (not launcher)
+		// Resource-based detection: RAISED thresholds to avoid false positives
 		{
 			if let Some(stats) = get_process_stats(pid) {
-				// High thread count + high memory = game (not launcher)
-				stats.threads >= 20 && stats.vmrss_kb >= 100 * 1024  // 20+ threads, 100MB+ memory
+				// BUG FIX: High thread count + high memory = game (not launcher)
+				// Old: 20+ threads, 100MB+ (matched Discord, Chrome, VS Code)
+				// New: 40+ threads, 300MB+ (only matches actual games)
+				stats.threads >= 40 && stats.vmrss_kb >= 300 * 1024  // 40+ threads, 300MB+ memory
 			} else {
 				false
 			}
