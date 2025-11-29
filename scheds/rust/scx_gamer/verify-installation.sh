@@ -5,7 +5,7 @@
 set -e  # Exit on error
 
 SCHEDULER_NAME="scx_gamer"
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 INSTALL_DIR="/usr/bin"
 CONFIG_FILE="/etc/default/scx"

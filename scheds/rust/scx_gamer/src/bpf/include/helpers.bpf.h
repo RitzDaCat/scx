@@ -332,14 +332,9 @@ static __always_inline void update_task_utilization(struct task_ctx *tctx)
 	if (unlikely(!tctx->is_periodic || tctx->detected_period_ns == 0))
 		return;
 	
-	/* TIER 0: Use exec_avg as worst-case execution time estimate
-	 * exec_avg is EMA of execution time per wake cycle */
-	u64 exec_time = tctx->exec_avg;
-	if (unlikely(exec_time == 0)) {
-		/* Fallback: Use exec_runtime if exec_avg not available
-		 * exec_runtime is accumulated execution time since last sleep */
-		exec_time = tctx->exec_runtime;
-	}
+	/* PHASE 5: Use exec_runtime directly - exec_avg EMA removed
+	 * exec_runtime is accumulated execution time since last sleep */
+	u64 exec_time = tctx->exec_runtime;
 	
 	/* TIER 0: Calculate utilization: (Ci / Pi) * 100
 	 * Fixed-point: 100 = 1%, 10000 = 100%

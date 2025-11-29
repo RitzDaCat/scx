@@ -6,6 +6,61 @@ This document outlines the diagnostic, analysis, and development tools used for 
 
 ## Performance Monitoring Tools
 
+### game_perf_monitor.sh (RECOMMENDED)
+
+**Location:** `scripts/game_perf_monitor.sh`
+
+**Purpose:** Delta-based game performance monitor that measures ACTUAL scheduler behavior over a time window. Unlike cumulative stats, this shows CURRENT performance.
+
+**Why This Tool Exists:**
+- `/proc/[pid]/schedstat` shows CUMULATIVE stats (includes all scheduler history)
+- We need DELTA measurements to see how the CURRENT scheduler is performing
+- Provides clear per-thread metrics with status assessment
+
+**Key Metrics (all delta-based):**
+- **WAIT%** - Time thread spent waiting for CPU (lower = better)
+- **MIG/s** - CPU migrations per second (lower = better cache locality)
+- **SW/s** - Context switches per second
+- **INVOL/s** - Involuntary preemptions (scheduler forced switch)
+
+**Usage:**
+
+```bash
+# Basic usage - auto-detect game, 10s measurement
+./scripts/game_perf_monitor.sh
+
+# Specific PID
+./scripts/game_perf_monitor.sh --pid 1737800
+
+# Custom duration
+./scripts/game_perf_monitor.sh --duration 30
+
+# Continuous monitoring
+./scripts/game_perf_monitor.sh --continuous
+
+# Save baseline for A/B comparison
+./scripts/game_perf_monitor.sh --baseline
+./scripts/game_perf_monitor.sh --compare
+```
+
+**Thread Categories:**
+- **CRITICAL** (GameThread, MainThread) - Should have WAIT% < 5%, MIG/s < 100
+- **GPU** (dxvk, Render, RHI) - Should have WAIT% < 10%, MIG/s < 200
+- **WORKERS** (Background, Pool) - Should have WAIT% < 30%, MIG/s < 500
+
+**Status Indicators:**
+- GOOD (green) - Thread is healthy
+- MODERATE (yellow) - Acceptable but could improve
+- HIGH WAIT (red) - Problem, thread starving for CPU
+- HIGH MIG (yellow) - Too many migrations, cache thrashing
+
+**Pro Tip:** If foreground detection isn't working, restart scheduler with:
+```bash
+sudo scx_gamer --foreground-pid $(pgrep -f "YourGame")
+```
+
+---
+
 ### thread_pressure_monitor.sh
 
 **Location:** `scripts/thread_pressure_monitor.sh`

@@ -333,84 +333,85 @@ PROFILE
     done
 }
 
-run_tui() {
+# TUI mode removed - was 3334 lines of bloat
+# Use --stats for monitoring instead
+run_stats_monitor() {
     ensure_binary
     echo
-    local interval="0.1"
+    local interval="1.0"
     while true; do
-        cat <<'TUI_PROFILE'
+        cat <<'STATS_PROFILE'
 
 ================================================================================
-                         SCX_GAMER TUI DASHBOARD PROFILES
+                         SCX_GAMER STATS MONITORING
 ================================================================================
 
-TUI profiles include real-time visual monitoring with your selected settings.
-Update interval: 0.1 seconds (100ms refresh rate)
-Note: --monitoring is automatically enabled with --tui
+Stats monitoring outputs scheduler metrics to the terminal at regular intervals.
+Update interval: 1.0 seconds (configurable)
 
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
-1) Esports TUI         Competitive gaming profile with monitoring (DEFAULT)
-                       - Full optimization suite, recommended for gaming
+1) Esports + Stats     Competitive gaming profile with stats output (DEFAULT)
+                       - Full optimization suite + monitoring
 
-2) Baseline TUI        Clean scheduler defaults with TUI monitoring
+2) Baseline + Stats    Clean scheduler defaults with stats output
                        - Basic scheduling, good for debugging/testing
 
-3) Casual Gaming TUI   Balanced settings with visual monitoring
+3) Casual + Stats      Balanced settings with stats output
                        - Good for single-player and RPG gaming
 
-4) Ultra TUI           Ultra low-latency with monitoring
+4) Ultra + Stats       Ultra low-latency with stats output
                        - For extreme performance analysis
 
 q) Back to main menu
 
 ================================================================================
-TUI_PROFILE
-        read -rp "Select TUI profile [1-4, q]: " profile_choice
+STATS_PROFILE
+        read -rp "Select profile [1-4, q]: " profile_choice
         case "${profile_choice}" in
             1)
                 echo
-                echo "Launching: TUI Dashboard - Esports (Default profile)"
+                echo "Launching: Esports with Stats Monitoring"
                 echo
-                launch_scx "TUI Esports" \
+                launch_scx "Esports + Stats" \
                     --env "RUST_LOG=info" \
-                    --arg "--tui" \
+                    --arg "--stats" \
                     --arg "${interval}"
                 return
                 ;;
             2)
                 echo
-                echo "Launching: TUI Dashboard - Baseline"
+                echo "Launching: Baseline with Stats Monitoring"
                 echo
-                launch_scx "TUI Baseline" \
+                launch_scx "Baseline + Stats" \
                     --env "RUST_LOG=info" \
                     --arg "--profile" \
                     --arg "baseline" \
-                    --arg "--tui" \
+                    --arg "--stats" \
                     --arg "${interval}"
                 return
                 ;;
             3)
                 echo
-                echo "Launching: TUI Dashboard - Casual Gaming"
+                echo "Launching: Casual Gaming with Stats Monitoring"
                 echo
-                launch_scx "TUI Casual Gaming" \
+                launch_scx "Casual + Stats" \
                     --env "RUST_LOG=info" \
                     --arg "--profile" \
                     --arg "casual" \
-                    --arg "--tui" \
+                    --arg "--stats" \
                     --arg "${interval}"
                 return
                 ;;
             4)
                 echo
-                echo "Launching: TUI Dashboard - Ultra"
+                echo "Launching: Ultra with Stats Monitoring"
                 echo
-                launch_scx "TUI Ultra" \
+                launch_scx "Ultra + Stats" \
                     --env "RUST_LOG=info" \
                     --arg "--profile" \
                     --arg "ultra" \
-                    --arg "--tui" \
+                    --arg "--stats" \
                     --arg "${interval}"
                 return
                 ;;
@@ -457,129 +458,8 @@ run_debug() {
         --arg "--verbose"
 }
 
-run_debug_api() {
-    ensure_binary
-    echo
-    local port="8080"
-    while true; do
-        cat <<'DEBUG_API_MENU'
-
-================================================================================
-                         DEBUG API MODE
-================================================================================
-
-The Debug API exposes scheduler metrics via HTTP for debugging and monitoring.
-Metrics update every 1 second and are available as JSON.
-Note: --monitoring is automatically enabled with --debug-api
-
-API Endpoints:
-  - http://127.0.0.1:PORT/metrics  - Get current scheduler metrics
-  - http://127.0.0.1:PORT/health    - Health check
-  - http://127.0.0.1:PORT/          - API information
-
-You can query metrics using curl:
-  curl http://127.0.0.1:PORT/metrics | jq .
-
-PROFILE                DESCRIPTION
---------------------------------------------------------------------------------
-1) Esports + API        Competitive gaming profile with API (DEFAULT)
-                       - Full optimizations + metric access
-
-2) Baseline + API       Default settings with debug API enabled
-                       - Good for testing and debugging
-
-3) TUI + API            TUI Dashboard with debug API enabled
-                       - Visual monitoring + HTTP access
-
-4) Custom + API         Custom flags with debug API enabled
-                       - Use your own flags + API
-
-q) Back to main menu
-
-================================================================================
-DEBUG_API_MENU
-        read -rp "Select profile [1-4, q]: " profile_choice
-        case "${profile_choice}" in
-            1)
-                echo
-                echo "Launching: Esports Profile with Debug API (port ${port})"
-                echo
-                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
-                echo
-                launch_scx "Esports + Debug API" \
-                    --env "RUST_LOG=info" \
-                    --arg "--debug-api" \
-                    --arg "${port}"
-                return
-                ;;
-            2)
-                echo
-                echo "Launching: Baseline Profile with Debug API (port ${port})"
-                echo
-                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
-                echo
-                launch_scx "Baseline + Debug API" \
-                    --env "RUST_LOG=info" \
-                    --arg "--profile" \
-                    --arg "baseline" \
-                    --arg "--debug-api" \
-                    --arg "${port}"
-                return
-                ;;
-            3)
-                echo
-                echo "Launching: TUI Dashboard with Debug API (port ${port})"
-                echo
-                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
-                echo
-                launch_scx "TUI + Debug API" \
-                    --env "RUST_LOG=info" \
-                    --arg "--tui" \
-                    --arg "0.1" \
-                    --arg "--debug-api" \
-                    --arg "${port}"
-                return
-                ;;
-            4)
-                echo
-                echo "================================================================================"
-                echo "                         CUSTOM FLAGS + DEBUG API"
-                echo "================================================================================"
-                echo
-                echo "Enter your custom scx_gamer command-line arguments."
-                echo "The --debug-api ${port} flag will be added automatically."
-                echo
-                echo "Example: --profile ultra --realtime-scheduling"
-                echo
-                local line
-                read -rp "Custom flags: " line
-                if [[ -z "${line}" ]]; then
-                    echo
-                    echo "No flags provided. Cancelled."
-                    echo
-                    return
-                fi
-                read -ra CUSTOM_ARGS <<<"${line}"
-                echo
-                echo "Launching with custom arguments + Debug API:"
-                echo "  Custom: ${CUSTOM_ARGS[*]}"
-                echo "  API: --debug-api ${port}"
-                echo
-                echo "Access metrics at: http://127.0.0.1:${port}/metrics"
-                echo "================================================================================"
-                echo
-                sudo "${BIN_PATH}" "${CUSTOM_ARGS[@]}" --debug-api "${port}"
-                return
-                ;;
-            q|Q|0)
-                return
-                ;;
-            *)
-                echo "Invalid profile: ${profile_choice}"
-                ;;
-        esac
-    done
-}
+# Debug API mode removed - HTTP server added unnecessary overhead
+# Use --stats for monitoring instead
 
 run_custom() {
     ensure_binary
@@ -596,8 +476,7 @@ run_custom() {
     echo "  casual:            slice=500us, kbd=1500ms, mouse=10ms, napi"
     echo "  ultra:             slice=5us, input=2ms, kbd=100ms, mouse=4ms, mig-max=2"
     echo
-    echo "Monitoring: --monitoring (enables stats/detectors/tracing)"
-    echo "            Or use --stats/--tui/--debug-api which auto-enable monitoring"
+    echo "Monitoring: --stats <interval> (enables stats output)"
     echo
     echo "Override any profile setting with explicit flags:"
     echo "  --slice-us <us>           Override slice duration"
@@ -641,20 +520,16 @@ MODE                   DESCRIPTION
 1) Standard Profiles   Choose from preset gaming configurations
                        - Esports (default), Baseline, Casual, Ultra-Latency
 
-2) TUI Dashboard       Interactive terminal UI with real-time stats
-                       - Visual performance monitoring (recommended)
+2) Stats Monitoring    Run with statistics output (1 second interval)
+                       - Terminal-based performance monitoring
 
-3) Verbose Mode        Run with statistics output every 1 second
+3) Verbose Mode        Run with statistics + verbose logging
                        - Clean output, monitoring auto-enabled
 
 4) Debug Mode          Maximum logging for troubleshooting
                        - RUST_LOG=debug, LIBBPF_LOG=debug
 
-5) Debug API Mode      Start with HTTP API for metric access
-                       - Exposes metrics at http://127.0.0.1:8080/metrics
-                       - Useful for debugging with AI assistants
-
-6) Custom Flags        Manually enter scheduler command-line arguments
+5) Custom Flags        Manually enter scheduler command-line arguments
                        - For advanced users and testing
 
 q) Quit                Exit launcher
@@ -677,14 +552,13 @@ while true; do
         echo "Current build mode: Debug (${BIN_PATH})"
     fi
     echo
-    read -rp "Select mode [1-6, q]: " choice
+    read -rp "Select mode [1-5, q]: " choice
     case "${choice}" in
         1) run_standard ;;
-        2) run_tui ;;
+        2) run_stats_monitor ;;
         3) run_verbose ;;
         4) run_debug ;;
-        5) run_debug_api ;;
-        6) run_custom ;;
+        5) run_custom ;;
         q|Q|0) 
             echo
             echo "Exiting scx_gamer launcher."
@@ -694,7 +568,7 @@ while true; do
         *) 
             echo
             echo "Invalid selection: ${choice}"
-            echo "Please choose 1-6 or q to quit."
+            echo "Please choose 1-5 or q to quit."
             echo
             ;;
     esac

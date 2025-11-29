@@ -478,9 +478,10 @@ static __always_inline s32 __attribute__((unused)) pick_idle_cpu(struct task_str
 	}
 
 	/* TIER 1: Determine if this is a critical GPU thread requiring physical core
-	 * Map lookup: ~20-50ns, name check: ~5-10ns */
+	 * Map lookup: ~20-50ns
+	 * PHASE 3: Name-based check REMOVED - use fentry-detected flag only */
 	tctx = try_lookup_task_ctx(p);
-	is_critical_gpu = (likely(tctx) && tctx->is_gpu_submit) || is_gpu_submit_name(p->comm);
+	is_critical_gpu = (likely(tctx) && tctx->is_gpu_submit);
 
 	/* TIER 0/1: CRITICAL PATH: GPU threads must use physical cores for minimal latency
 	 *

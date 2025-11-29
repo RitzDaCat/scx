@@ -29,9 +29,19 @@ extern struct hotpath_signals hotpath_signals;
 extern volatile u32 detected_fg_tgid;
 extern const volatile u32 foreground_tgid;
 
-/* Gaming traffic frequency threshold (Hz) - above this = gaming pattern */
-#define GAMING_FREQ_THRESHOLD_HZ 20  /* 20 Hz = 50ms between packets, typical gaming */
-#define GAMING_FREQ_HIGH_HZ 60       /* 60 Hz = high-frequency gaming (competitive) */
+/*
+ * REMOVED: Frequency-based gaming detection thresholds
+ * 
+ * The following were removed because they're arbitrary guesses:
+ * - GAMING_FREQ_THRESHOLD_HZ (20 Hz)
+ * - GAMING_FREQ_HIGH_HZ (60 Hz)
+ * - GAMING_TCP_FREQ_THRESHOLD_HZ (30 Hz)
+ * 
+ * Gaming network detection is now 100% KNOWN DATA based:
+ * - Kernel hook fires (fentry/tcp_*, fentry/udp_*) → thread does network I/O
+ * - Thread's TGID matches foreground_tgid → thread belongs to the game
+ * - Combined → gaming network (no frequency guessing needed)
+ */
 
 /* Network wake chain window (ns) - how long the signal stays valid */
 #define NETWORK_WAKE_CHAIN_WINDOW_NS 5000000ULL  /* 5ms window for game to wake */
@@ -98,25 +108,30 @@ volatile u64 network_wake_chain_signals;    /* Wake chain signals sent */
 volatile u64 network_map_full_errors;       /* Failed updates due to map full */
 
 /**
- * register_network_thread - Register network thread with auto-gaming detection
+ * register_network_thread - Register network thread with foreground-based gaming detection
  * @tid: Thread ID to register
  * @type: Network type (NETWORK_TYPE_*)
  * @is_recv: true if this is a receive operation (for wake chain)
  *
  * Called on first network I/O detection.
  * Tracks network threads for priority boosting in scheduler.
- * AUTO-UPGRADES to gaming traffic when frequency exceeds threshold.
+ *
+ * GAMING DETECTION (100% KNOWN DATA, NO HEURISTICS):
+ * - If thread's TGID == foreground_tgid → thread belongs to the game
+ * - If thread belongs to game + does network I/O → gaming network
+ * - No frequency thresholds, no guessing, no arbitrary numbers
+ *
+ * This works for ALL games regardless of network tick rate:
+ * - FPS at 128 tick → gaming network
+ * - MMO at 10 tick → gaming network  
+ * - The game's network is gaming network. Period.
  *
  * TIER 1: Optimized for fentry hook hot path
  * - Timestamp: Tier 1 (~10-15ns, bpf_ktime_get_ns)
  * - Map lookup: Tier 1 (~50-100ns, hash map)
  * - Map update: Tier 1 (~100-200ns, only for new threads)
- * - Struct field updates: Tier 0 (~1-2ns per field)
- * - Atomic operations: Tier 0 (~1-2ns)
- * - Total: ~160-315ns (new thread) or ~60-115ns (existing thread)
- *
- * Frequency: 10-1000 calls/sec (network patterns)
- * Net overhead: ~600μs-315ms/sec (acceptable for network detection)
+ * - TGID check: Tier 0 (~2-5ns, bpf_get_current_task_btf)
+ * - Total: ~165-320ns (new thread) or ~65-120ns (existing thread)
  */
 static __always_inline void register_network_thread_ex(u32 tid, u8 type, bool is_recv)
 {
@@ -125,6 +140,23 @@ static __always_inline void register_network_thread_ex(u32 tid, u8 type, bool is
 	
 	/* TIER 1: Get current timestamp */
 	u64 now = bpf_ktime_get_ns();
+	
+	/* TIER 0: Get foreground TGID once (KNOWN DATA from userspace) */
+	u32 fg = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
+	
+	/* TIER 0: Check if this thread belongs to the foreground game
+	 * This is KNOWN DATA - not a heuristic:
+	 * - Userspace detected which window is focused (X11/Wayland)
+	 * - Userspace identified the game process (foreground_tgid)
+	 * - Kernel knows this thread's TGID (task->tgid)
+	 * Combined = we KNOW if this thread is part of the game */
+	bool is_game_thread = false;
+	if (fg != 0) {
+		struct task_struct *task = (void *)bpf_get_current_task_btf();
+		if (task && (u32)task->tgid == fg) {
+			is_game_thread = true;
+		}
+	}
 
 	/* TIER 1: Lookup existing thread info (hash map lookup) */
 	info = bpf_map_lookup_elem(&network_threads_map, &tid);
@@ -134,24 +166,35 @@ static __always_inline void register_network_thread_ex(u32 tid, u8 type, bool is
 		new_info.last_net_ts = now;
 		new_info.total_ops = 1;
 		new_info.network_type = type;
-		new_info.is_gaming_traffic = (type == NETWORK_TYPE_GAMING);
-		new_info.is_low_latency = (type == NETWORK_TYPE_GAMING);
+		
+		/* GAMING DETECTION: Pure foreground-based, no frequency heuristics
+		 * If thread belongs to game AND does network I/O → gaming network */
+		new_info.is_gaming_traffic = is_game_thread || (type == NETWORK_TYPE_GAMING);
+		new_info.is_low_latency = new_info.is_gaming_traffic;
 
 		/* TIER 1: Insert new thread (map update, ~100-200ns) */
 		if (unlikely(bpf_map_update_elem(&network_threads_map, &tid, &new_info, BPF_ANY) < 0)) {
-			/* TIER 0: Track error (atomic increment, ~1-2ns) */
 			__atomic_fetch_add(&network_map_full_errors, 1, __ATOMIC_RELAXED);
-			return;  /* Map full, can't track this thread */
+			return;
 		}
-		/* TIER 0: Track new thread (atomic increment, ~1-2ns) */
 		__atomic_fetch_add(&network_detect_new_threads, 1, __ATOMIC_RELAXED);
-	} else {
-		/* Update existing thread (common case, ~60-115ns) */
-		u64 delta_ns = now - info->last_net_ts;
 		
-		/* TIER 0: Update counters (struct field writes, ~1-2ns each) */
+		if (is_game_thread) {
+			__atomic_fetch_add(&network_detect_gaming_upgrades, 1, __ATOMIC_RELAXED);
+		}
+		
+		/* NETWORK WAKE CHAIN: Signal on first gaming network receive */
+		if (is_recv && new_info.is_gaming_traffic && fg != 0) {
+			hotpath_signals.network_recv_ns = now;
+			hotpath_signals.network_recv_cpu = (u32)bpf_get_smp_processor_id();
+			__atomic_fetch_add(&network_wake_chain_signals, 1, __ATOMIC_RELAXED);
+		}
+	} else {
+		/* Update existing thread */
 		info->total_ops++;
 		info->last_net_ts = now;
+		
+		/* Update type if we have better info */
 		if (type == NETWORK_TYPE_GAMING) {
 			info->is_gaming_traffic = 1;
 			info->is_low_latency = 1;
@@ -160,39 +203,28 @@ static __always_inline void register_network_thread_ex(u32 tid, u8 type, bool is
 			info->network_type = type;
 		}
 
-		/* TIER 0: Estimate network I/O frequency (Hz) - EMA smoothing
-		 * Only calculate if delta is reasonable (< 1 second) */
+		/* GAMING UPGRADE: If thread belongs to game, mark as gaming
+		 * This catches threads that weren't gaming before but the game
+		 * came into foreground, or threads that spawn late */
+		if (!info->is_gaming_traffic && is_game_thread) {
+			info->is_gaming_traffic = 1;
+			info->is_low_latency = 1;
+			__atomic_fetch_add(&network_detect_gaming_upgrades, 1, __ATOMIC_RELAXED);
+		}
+		
+		/* Frequency tracking (for stats only, NOT used for gaming detection) */
+		u64 delta_ns = now - info->last_net_ts;
 		if (likely(delta_ns > 0 && delta_ns < 1000000000ULL)) {
 			u32 instant_freq = (u32)(1000000000ULL / delta_ns);
-			/* EMA smoothing: new = (old * 7 + new) / 8 */
 			info->net_freq_hz = (info->net_freq_hz * 7 + instant_freq) >> 3;
-			
-			/* ESPORTS: Auto-upgrade to gaming traffic based on frequency
-			 * High-frequency network I/O (>20 Hz) with UDP = gaming pattern
-			 * This catches games that weren't detected by thread name */
-			if (!info->is_gaming_traffic && info->net_freq_hz >= GAMING_FREQ_THRESHOLD_HZ) {
-				/* Only upgrade UDP traffic or unknown high-freq traffic */
-				if (info->network_type == NETWORK_TYPE_UDP || 
-				    info->network_type == NETWORK_TYPE_GAMING ||
-				    (info->network_type == NETWORK_TYPE_UNKNOWN && info->net_freq_hz >= GAMING_FREQ_HIGH_HZ)) {
-					info->is_gaming_traffic = 1;
-					info->is_low_latency = 1;
-					info->network_type = NETWORK_TYPE_GAMING;
-					__atomic_fetch_add(&network_detect_gaming_upgrades, 1, __ATOMIC_RELAXED);
-				}
-			}
 		}
 		
 		/* NETWORK WAKE CHAIN: Signal game threads on gaming traffic receive
-		 * When we receive gaming traffic, set the wake chain signal so game
-		 * threads can force-dispatch when they wake to process the packet.
-		 * 
-		 * Conditions for signaling:
-		 * 1. This is a receive operation (packet arrived)
-		 * 2. Thread is gaming traffic OR high-frequency UDP
-		 * 3. A game is currently in foreground
-		 */
-		u32 fg = detected_fg_tgid ? detected_fg_tgid : foreground_tgid;
+		 * Pure KNOWN DATA decision:
+		 * - is_recv: kernel hook told us this is a receive operation
+		 * - is_gaming_traffic: thread belongs to foreground game
+		 * - fg != 0: a game is in foreground
+		 * All three are facts, not heuristics. */
 		if (is_recv && info->is_gaming_traffic && fg != 0) {
 			hotpath_signals.network_recv_ns = now;
 			hotpath_signals.network_recv_cpu = (u32)bpf_get_smp_processor_id();
@@ -200,7 +232,7 @@ static __always_inline void register_network_thread_ex(u32 tid, u8 type, bool is
 		}
 	}
 
-	/* TIER 0: Track total operations (atomic increment, ~1-2ns) */
+	/* TIER 0: Track total operations */
 	__atomic_fetch_add(&network_detect_operations, 1, __ATOMIC_RELAXED);
 }
 

@@ -15,22 +15,20 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod affinity_override; // CPU affinity override system (proactive)
-mod audio_detect;
-mod debug_api;
-mod engine_presets;
+// REMOVED: mod audio_detect - redundant with fentry-based BPF detection
+// REMOVED: mod debug_api - HTTP server adds unnecessary overhead
+// REMOVED: mod engine_presets - brittle name-based thread classification
 mod game_detect;
 mod game_detect_bpf; // BPF LSM-based game detection (modern, kernel-level)
 mod gpu_queue_monitor;
-mod power_monitor;
+// REMOVED: mod power_monitor - power efficiency contradicts gaming performance goal
 mod ring_buffer;
 mod stats;
 mod trigger;
-mod tui;
-use crate::engine_presets::seed_engine_presets;
+// REMOVED: mod tui - bloat (3334 lines), use --stats for monitoring
 use crate::game_detect::GameDetector;
 use crate::game_detect_bpf::BpfGameDetector;
 use crate::gpu_queue_monitor::{monotonic_nanos, GpuQueueMonitor};
-use crate::power_monitor::{PowerHint, PowerMonitor};
 use crate::trigger::TriggerOps;
 use rustc_hash::FxHashSet;
 use std::ffi::c_int;
@@ -458,10 +456,6 @@ struct Opts {
     #[clap(long, default_value = "8192")]
     mm_hint_size: u32,
 
-    /// Foreground application TGID (PID of the game's process group). 0=disable gating.
-    #[clap(long, default_value = "0")]
-    foreground_pid: u32,
-
     /// Wakeup timer period in microseconds (min 250). 0=use slice_us.
     /// Profile defaults: baseline/casual/esports=500, ultra=100
     #[clap(long)]
@@ -532,12 +526,7 @@ struct Opts {
     /// SCHED_DEADLINE period in microseconds (default: 1000)
     #[clap(long, default_value = "1000")]
     deadline_period_us: u64,
-
-    /// Enable debug API server for external metric access (MCP integration, debugging)
-    /// Exposes HTTP endpoint on localhost with current scheduler metrics as JSON
-    /// Automatically enables --monitoring.
-    #[clap(long)]
-    debug_api: Option<u16>,
+    // REMOVED: debug_api - HTTP server removed for leaner scheduler
 }
 
 impl Opts {
@@ -618,7 +607,7 @@ impl Opts {
         self.monitoring
             || self.stats.is_some()
             || self.tui.is_some()
-            || self.debug_api.is_some()
+            // REMOVED: debug_api check - HTTP server removed
     }
 }
 
@@ -641,19 +630,19 @@ struct Scheduler<'a> {
     game_detector: Option<GameDetector>,        // Fallback inotify detection (if BPF unavailable)
     input_ring_buffer: Option<ring_buffer::InputRingBufferManager>, // Interrupt-driven ring buffer for ultra-low latency input
     dispatch_event_ringbuf: Option<libbpf_rs::RingBuffer<'a>>, // Event-driven dispatch events for watchdog (eliminates polling)
-    debug_api_state: Option<Arc<debug_api::DebugApiState>>, // Debug API state for external metric access
-    audio_detector: Option<audio_detect::AudioServerDetector>, // Event-driven audio server detection (inotify)
-    audio_update_buffer: Vec<(u32, bool)>,
+    // REMOVED: debug_api_state - HTTP server removed for leaner scheduler
+    // REMOVED: audio_detector - redundant with fentry-based BPF detection
+    // REMOVED: audio_update_buffer - userspace audio detection removed
     #[allow(dead_code)] // Held for Drop behavior - keeps affinity override thread running
     affinity_override: Option<affinity_override::AffinityOverride>, // CPU affinity override system (proactive)
     #[allow(dead_code)]
     // Used by macros (uei_exited!, uei_report!) which use identifier name, not direct access
     uei: UserExitInfo, // User exit info for BPF communication
-    power_monitor: Option<PowerMonitor>,
+    // REMOVED: power_monitor - power efficiency contradicts gaming performance goal
     gpu_queue_monitor: Option<GpuQueueMonitor>,
-    power_hint_rx: Option<Receiver<PowerHint>>,
+    // REMOVED: power_hint_rx - power monitoring removed
     gpu_busy_rx: Option<Receiver<u32>>,
-    power_monitor_worker: Option<thread::JoinHandle<()>>,
+    // REMOVED: power_monitor_worker - power monitoring removed
     gpu_monitor_worker: Option<thread::JoinHandle<()>>,
 
     // AI Analytics: Temporal pattern tracking (rolling windows)
@@ -1179,17 +1168,8 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    #[inline]
-    fn apply_system_audio_update(&mut self, pid: u32, register: bool) -> bool {
-        let map = &self.skel.maps.system_audio_tgids_map;
-        let marker: u8 = if register { 1 } else { 0 };
-        if register {
-            map.update(&pid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY)
-                .is_ok()
-        } else {
-            map.delete(&pid.to_ne_bytes()).is_ok()
-        }
-    }
+    // REMOVED: apply_system_audio_update - userspace audio detection removed
+    // Audio threads are now detected via fentry hooks in audio_detect.bpf.h
 
     #[inline]
     fn auto_event_loop_cpu() -> Option<usize> {
@@ -1571,7 +1551,9 @@ impl<'a> Scheduler<'a> {
         } else {
             effective_wakeup.max(250) * 1000
         };
-        rodata.foreground_tgid = opts.foreground_pid;
+        // Automatic game detection only - no manual PID setting
+        // The game detector will update detected_fg_tgid_staging in BPF
+        rodata.foreground_tgid = 0;
 
         // MM hint removed - map configuration no longer needed
         // MM hint map (mm_last_cpu) removed for gaming workloads - low cache locality benefit, high overhead
@@ -1687,9 +1669,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize event-driven audio server detector (inotify-based)
-        // This eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
-        let mut audio_detector =
-            audio_detect::AudioServerDetector::new(Arc::new(AtomicBool::new(false))); // shutdown set in run()
+        // REMOVED: audio_detector - redundant with fentry-based BPF detection
 
         // Initialize CPU affinity override system (proactive)
         // Detects and resets custom affinities for optimal task placement
@@ -1709,19 +1689,8 @@ impl<'a> Scheduler<'a> {
             }
         };
 
-        // Initial scan for already-running audio servers
-        audio_detector.initial_scan(|pid, register| {
-            let system_audio_tgids_map = &skel.maps.system_audio_tgids_map;
-            let marker: u8 = if register { 1 } else { 0 };
-            if register {
-                system_audio_tgids_map
-                    .update(&pid.to_ne_bytes(), &[marker], libbpf_rs::MapFlags::ANY)
-                    .is_ok()
-            } else {
-                // DELETE: Remove from map
-                system_audio_tgids_map.delete(&pid.to_ne_bytes()).is_ok()
-            }
-        });
+        // REMOVED: audio_detector.initial_scan - userspace audio detection removed
+        // Audio threads are now detected via fentry hooks in audio_detect.bpf.h
 
         let mut input_devs: Vec<evdev::Device> = Vec::new();
         let mut input_fd_info_vec: Vec<Option<DeviceInfo>> = Vec::new();
@@ -1871,15 +1840,11 @@ impl<'a> Scheduler<'a> {
             None
         };
 
-        let power_monitor = PowerMonitor::new();
+        // REMOVED: power_monitor - power efficiency contradicts gaming performance goal
         let gpu_queue_monitor = GpuQueueMonitor::new();
 
-        if let Err(err) = seed_engine_presets(&mut skel) {
-            warn!("Engine presets: failed to seed defaults: {}", err);
-        }
-
-        // Debug API state is initialized in main() and injected after init()
-        // This avoids double initialization and ensures proper Arc sharing
+        // REMOVED: seed_engine_presets - brittle name-based thread presets
+        // Behavioral detection (lat_cri, fentry hooks) now handles thread classification
 
         let scheduler = Self {
             skel,
@@ -1896,16 +1861,16 @@ impl<'a> Scheduler<'a> {
             game_detector: game_detector_fallback,
             input_ring_buffer,
             dispatch_event_ringbuf: None, // Initialized after epoll setup
-            debug_api_state: None,        // Injected from main() if enabled
-            audio_detector: Some(audio_detector),
-            audio_update_buffer: Vec::with_capacity(32),
+            // REMOVED: debug_api_state - HTTP server removed
+            // REMOVED: audio_detector - redundant with fentry-based BPF detection
+            // REMOVED: audio_update_buffer - userspace audio detection removed
             affinity_override, // CPU affinity override system (proactive)
             uei: UserExitInfo::default(),
-            power_monitor,
+            // REMOVED: power_monitor - power monitoring removed
             gpu_queue_monitor,
-            power_hint_rx: None,
+            // REMOVED: power_hint_rx - power monitoring removed
             gpu_busy_rx: None,
-            power_monitor_worker: None,
+            // REMOVED: power_monitor_worker - power monitoring removed
             gpu_monitor_worker: None,
 
             // AI Analytics: Initialize temporal pattern tracking
@@ -2268,8 +2233,6 @@ impl<'a> Scheduler<'a> {
                     "bpf_lsm".to_string()
                 } else if self.game_detector.is_some() {
                     "inotify".to_string()
-                } else if self.opts.foreground_pid > 0 {
-                    "manual".to_string()
                 } else {
                     "none".to_string()
                 }
@@ -2856,27 +2819,7 @@ impl<'a> Scheduler<'a> {
             info!("Provides ultra-low latency without starvation risk");
         }
 
-        if self.power_monitor.is_some() && self.power_hint_rx.is_none() {
-            let (tx, rx) = mpsc::channel();
-            if let Some(mut monitor) = self.power_monitor.take() {
-                let shutdown_clone = Arc::clone(&shutdown);
-                let handle = thread::Builder::new()
-                    .name("scx-power-monitor".into())
-                    .spawn(move || {
-                        while !shutdown_clone.load(Ordering::Relaxed) {
-                            if let Some(hint) = monitor.poll() {
-                                if tx.send(hint).is_err() {
-                                    break;
-                                }
-                            }
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                    })
-                    .ok();
-                self.power_hint_rx = Some(rx);
-                self.power_monitor_worker = handle;
-            }
-        }
+        // REMOVED: power_monitor worker thread - power monitoring removed for gaming performance
 
         if self.gpu_queue_monitor.is_some() && self.gpu_busy_rx.is_none() {
             let (tx, rx) = mpsc::channel();
@@ -2934,7 +2877,7 @@ impl<'a> Scheduler<'a> {
         // This provides ~1-5µs latency with 95-98% CPU savings vs busy polling
         const RING_BUFFER_TAG: u64 = u64::MAX - 1; // Special tag for ring buffer events
         const DISPATCH_EVENT_TAG: u64 = u64::MAX - 3; // Special tag for dispatch events
-        const AUDIO_DETECTOR_TAG: u64 = u64::MAX - 2; // Special tag for audio detector events
+        // REMOVED: AUDIO_DETECTOR_TAG - userspace audio detection removed
 
         // Watchdog state (default to 5s when RT scheduling enabled and unset by user)
         let effective_watchdog_secs: u64 =
@@ -3024,24 +2967,8 @@ impl<'a> Scheduler<'a> {
 
         self.dispatch_event_ringbuf = dispatch_event_ringbuf;
 
-        // Register audio detector inotify FD with epoll for event-driven audio server detection
-        // This eliminates periodic /proc scans (0ms overhead vs 5-20ms every 30s)
-        if let Some(ref mut audio_det) = self.audio_detector {
-            if let Some(audio_fd) = audio_det.fd() {
-                // Update shutdown reference
-                audio_det.shutdown = shutdown.clone();
-                // SAFETY: Audio detector FD is valid for the lifetime of the detector
-                let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(audio_fd) };
-                epfd.add(
-                    bfd,
-                    EpollEvent::new(EpollFlags::EPOLLIN, AUDIO_DETECTOR_TAG),
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to register audio detector with epoll: {}", e)
-                })?;
-                info!("Audio detector registered with epoll for event-driven detection");
-            }
-        }
+        // REMOVED: audio_detector epoll registration - userspace audio detection removed
+        // Audio threads are now detected via fentry hooks in audio_detect.bpf.h
 
         // Userspace CPU util sampling deprecated: rely on BPF-side sampling.
         // Store fds
@@ -3089,15 +3016,7 @@ impl<'a> Scheduler<'a> {
         // Every mouse/keyboard event triggers fanout_set_input_window() synchronously
         // BPF input window (default 2ms) provides natural priority boost coalescing
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            if let Some(ref rx) = self.power_hint_rx {
-                while let Ok(hint) = rx.try_recv() {
-                    if let Err(err) =
-                        bpf_intf::set_power_hint(&mut self.skel, hint.level, hint.duration_ms)
-                    {
-                        warn!("Power monitor: failed to apply power hint (err={})", err);
-                    }
-                }
-            }
+            // REMOVED: power_hint_rx processing - power monitoring removed for gaming performance
 
             if let Some(ref rx) = self.gpu_busy_rx {
                 while let Ok(busy_percent) = rx.try_recv() {
@@ -3119,25 +3038,8 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            if let Some(mut audio_det) = self.audio_detector.take() {
-                if audio_det.fd().is_none() {
-                    self.audio_update_buffer.clear();
-                    {
-                        let buffer = &mut self.audio_update_buffer;
-                        audio_det.process_events(|pid, register| {
-                            buffer.push((pid, register));
-                            true
-                        });
-                    }
-                    let mut updates = Vec::new();
-                    std::mem::swap(&mut updates, &mut self.audio_update_buffer);
-                    for (pid, register) in updates.drain(..) {
-                        let _ = self.apply_system_audio_update(pid, register);
-                    }
-                    self.audio_update_buffer = updates;
-                }
-                self.audio_detector = Some(audio_det);
-            }
+            // REMOVED: audio_detector processing - userspace audio detection removed
+            // Audio threads are now detected via fentry hooks in audio_detect.bpf.h
 
             // Watchdog: auto-demote RT/DEADLINE if no scheduler progress
             if watchdog_enabled && !rt_demoted && last_watchdog_check.elapsed().as_secs() >= 1 {
@@ -3173,14 +3075,7 @@ impl<'a> Scheduler<'a> {
             // Early: service pending stats requests to avoid starvation during heavy input
             while stats_request_rx.try_recv().is_ok() {
                 let metrics = self.get_metrics();
-
-                // Update debug API state if enabled
-                // PERF: Pass reference to avoid clone - update_metrics clones internally and wraps in Arc
-                // This is still better than double-cloning (one for API, one for stats)
-                if let Some(ref api_state) = self.debug_api_state {
-                    api_state.update_metrics(&metrics);
-                }
-
+                // REMOVED: debug_api_state update - HTTP server removed for leaner scheduler
                 stats_response_tx.send(metrics)?;
             }
             // Interrupt-driven input processing with epoll (replaces busy polling)
@@ -3303,27 +3198,9 @@ impl<'a> Scheduler<'a> {
                     continue; // Move to next epoll event
                 }
 
-                // Handle audio detector events (event-driven audio server detection)
-                if tag == AUDIO_DETECTOR_TAG {
-                    if let Some(mut audio_det) = self.audio_detector.take() {
-                        self.audio_update_buffer.clear();
-                        {
-                            let buffer = &mut self.audio_update_buffer;
-                            audio_det.process_events(|pid, register| {
-                                buffer.push((pid, register));
-                                true
-                            });
-                        }
-                        let mut updates = Vec::new();
-                        std::mem::swap(&mut updates, &mut self.audio_update_buffer);
-                        for (pid, register) in updates.drain(..) {
-                            let _ = self.apply_system_audio_update(pid, register);
-                        }
-                        self.audio_update_buffer = updates;
-                        self.audio_detector = Some(audio_det);
-                    }
-                    continue; // Move to next epoll event
-                }
+                // REMOVED: audio_detector epoll handling - userspace audio detection removed
+                // Audio threads are now detected via fentry hooks in audio_detect.bpf.h
+                // Skip AUDIO_DETECTOR_TAG handling entirely
 
                 // OPTIMIZATION: Memory prefetching for better cache performance
                 // Prefetches next event to reduce cache miss latency
@@ -3446,14 +3323,7 @@ impl<'a> Scheduler<'a> {
             // Service any pending stats requests without blocking
             while stats_request_rx.try_recv().is_ok() {
                 let metrics = self.get_metrics();
-
-                // Update debug API state if enabled
-                // PERF: Pass reference to avoid clone - update_metrics clones internally and wraps in Arc
-                // This is still better than double-cloning (one for API, one for stats)
-                if let Some(ref api_state) = self.debug_api_state {
-                    api_state.update_metrics(&metrics);
-                }
-
+                // REMOVED: debug_api_state update - HTTP server removed for leaner scheduler
                 stats_response_tx.send(metrics)?;
             }
 
@@ -3635,9 +3505,7 @@ impl<'a> Scheduler<'a> {
         }
 
         info!("Scheduler main loop exited, cleaning up...");
-        if let Some(handle) = self.power_monitor_worker.take() {
-            let _ = handle.join();
-        }
+        // REMOVED: power_monitor_worker cleanup - power monitoring removed
         if let Some(handle) = self.gpu_monitor_worker.take() {
             let _ = handle.join();
         }
@@ -3691,17 +3559,7 @@ impl Drop for Scheduler<'_> {
     }
 }
 
-fn collect_input_devices(opts: &Opts) -> Vec<String> {
-    let mut open_object = MaybeUninit::uninit();
-    let result = Scheduler::init(opts, &mut open_object).map(|sched| {
-        sched
-            .input_devs
-            .iter()
-            .filter_map(|dev| dev.name().map(|s| s.to_string()))
-            .collect::<Vec<_>>()
-    });
-    result.unwrap_or_default()
-}
+// REMOVED: collect_input_devices - was only used for TUI
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
@@ -3754,30 +3612,11 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    let input_device_names = opts
-        .tui
-        .map(|_| collect_input_devices(&opts))
-        .unwrap_or_else(Vec::new);
-
-    let tui_thread = if let Some(intv) = opts.tui {
-        let shutdown_copy = shutdown.clone();
-        let opts_copy = opts.clone();
-        let devices_copy = input_device_names.clone();
-        Some(std::thread::spawn(move || {
-            let tui_interval = Duration::from_secs_f64(intv);
-            let result = tui::monitor_tui(tui_interval, shutdown_copy, &opts_copy, devices_copy);
-            match result {
-                Ok(_) => {
-                    info!("TUI exited normally");
-                }
-                Err(e) => {
-                    log::warn!("TUI monitor thread finished because of an error {}", e)
-                }
-            }
-        }))
-    } else {
-        None
-    };
+    // REMOVED: TUI mode (--tui) - 3334 lines of bloat removed
+    // Use --stats for monitoring instead
+    if opts.tui.is_some() {
+        log::warn!("TUI mode has been removed. Use --stats <interval> for monitoring.");
+    }
 
     let stats_thread = match opts.monitor.or(opts.stats) {
         Some(raw_intv) => match stats_interval_from_secs(raw_intv) {
@@ -3824,75 +3663,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Start debug API server if enabled
-    // Also spawn a periodic stats collection thread to ensure metrics update regularly
-    let debug_api_thread = if let Some(port) = opts.debug_api {
-        let api_state = Arc::new(debug_api::DebugApiState::new());
-        let shutdown_for_api = shutdown.clone();
-
-        // Spawn periodic stats collection thread (5s interval) to keep metrics updated
-        // This ensures the debug API always has fresh data even without other consumers
-        // PERF: Increased interval from 1s to 5s for 80% reduction in polling frequency
-        let shutdown_for_stats = shutdown.clone();
-        let stats_collector_thread = std::thread::Builder::new()
-            .name("debug-api-stats".into())
-            .spawn(move || {
-                let stats_interval = Duration::from_secs(5); // 5 second updates (was 1s)
-                let _ = scx_utils::monitor_stats::<Metrics>(
-                    &[],
-                    stats_interval,
-                    || shutdown_for_stats.load(Ordering::Relaxed),
-                    |_metrics| {
-                        // Metrics are updated in the scheduler's stats request handler
-                        // This thread just triggers periodic requests
-                        Ok(())
-                    },
-                );
-            });
-
-        if let Err(e) = stats_collector_thread {
-            warn!("Failed to start debug API stats collector thread: {}", e);
-        }
-
-        match debug_api::start_debug_api(port, Arc::clone(&api_state), shutdown_for_api) {
-            Ok(handle) => Some((handle, api_state)),
-            Err(e) => {
-                warn!("Failed to start debug API server: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // REMOVED: debug_api_thread - HTTP server removed for leaner scheduler
+    // Use --stats for monitoring instead
 
     // (Input polling handled within Scheduler::run loop.)
 
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
-        // If debug API is enabled, inject the shared state
-        if let Some((_, ref api_state)) = debug_api_thread {
-            sched.debug_api_state = Some(Arc::clone(api_state));
-        }
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
     }
 
-    // Wait for debug API thread to finish
-    if let Some((handle, _)) = debug_api_thread {
-        info!("Waiting for debug API thread to finish...");
-        let _ = handle.join();
-    }
-
-    // Wait for TUI thread to finish cleanup (if it was running)
-    // This ensures terminal is properly restored before we exit
-    if let Some(jh) = tui_thread {
-        info!("Waiting for TUI thread to finish cleanup...");
-        let _ = jh.join();
-        // Give terminal a moment to fully restore
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    // REMOVED: TUI thread cleanup (TUI has been removed)
 
     // Wait for stats thread to finish (with timeout)
     if let Some(jh) = stats_thread {

@@ -5,7 +5,7 @@
 set -e  # Exit on error
 
 SCHEDULER_NAME="scx_gamer"
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 # Detect SCX repository root (script is in scheds/rust/scx_gamer/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
