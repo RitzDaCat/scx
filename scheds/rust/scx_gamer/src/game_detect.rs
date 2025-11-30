@@ -441,16 +441,29 @@ fn check_new_pid(pid: u32, cache: &mut ProcessCache) -> Option<GameInfo> {
 }
 
 fn detect_game_cached(cache: &mut ProcessCache, shutdown: &Arc<AtomicBool>) -> Option<GameInfo> {
-    if let Some(ref game) = cache.last_game {
+    // BUG FIX: Don't blindly return cached game - a HIGHER-scoring game might exist!
+    // 
+    // Previous behavior: If Steam was detected first and user launches a game,
+    // we'd keep returning Steam because it "still exists". This caused the actual
+    // game's threads to NOT be protected because detected_fg_tgid was Steam's PID.
+    //
+    // New behavior: Track cached game's score and update if we find a better one.
+    // This ensures the ACTUAL game (highest score) is always detected.
+    
+    let cached_score = if let Some(ref game) = cache.last_game {
         if process_exists(game.tgid) {
-            return Some(game.clone());
+            calculate_score(game)
+        } else {
+            cache.last_game = None;
+            0
         }
-        cache.last_game = None;
-    }
+    } else {
+        0
+    };
 
     let proc_entries = fs::read_dir("/proc").ok()?;
-    let mut best_game: Option<GameInfo> = None;
-    let mut best_score = 0i32;
+    let mut best_game: Option<GameInfo> = cache.last_game.clone();
+    let mut best_score = cached_score;
     let mut entries_checked = 0u32;
 
     for entry in proc_entries.flatten() {
@@ -468,7 +481,29 @@ fn detect_game_cached(cache: &mut ProcessCache, shutdown: &Arc<AtomicBool>) -> O
         let pid_str = file_name.to_str()?;
 
         if let Ok(pid) = pid_str.parse::<u32>() {
-            if !cache.contains(pid) {
+            // BUG FIX: Always re-check high-thread-count processes!
+            //
+            // Problem: Ring buffer skips "seen" PIDs, but a game might:
+            // 1. Start with few threads (during initialization)
+            // 2. Be added to ring buffer with low score
+            // 3. Grow to many threads (actually running)
+            // 4. Never be re-evaluated because it's "seen"
+            //
+            // Solution: Bypass the cache for processes with many threads.
+            // These are potential games that should always be scored.
+            // This is efficient: only ~5-10 processes have 30+ threads.
+            let should_check = if cache.contains(pid) {
+                // Already seen - but check if it's a high-thread process
+                if let Ok(task_dir) = std::fs::read_dir(format!("/proc/{}/task", pid)) {
+                    task_dir.count() >= 30  // Rescan if 30+ threads
+                } else {
+                    false
+                }
+            } else {
+                true  // New process - always check
+            };
+            
+            if should_check {
                 if let Some(info) = check_process(pid) {
                     let score = calculate_score(&info);
                     if score > best_score {

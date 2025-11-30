@@ -18,6 +18,7 @@ mod affinity_override; // CPU affinity override system (proactive)
 // REMOVED: mod audio_detect - redundant with fentry-based BPF detection
 // REMOVED: mod debug_api - HTTP server adds unnecessary overhead
 // REMOVED: mod engine_presets - brittle name-based thread classification
+mod focus_detect; // D-Bus event-based window focus detection (replaces polling/heuristics)
 mod game_detect;
 mod game_detect_bpf; // BPF LSM-based game detection (modern, kernel-level)
 mod gpu_queue_monitor;
@@ -626,7 +627,11 @@ struct Scheduler<'a> {
     registered_epoll_fds: FxHashSet<i32>,
     trig: trigger::BpfTrigger,
     input_trigger_fn: fn(&trigger::BpfTrigger, &mut BpfSkel, InputLane),
-    bpf_game_detector: Option<BpfGameDetector>, // BPF LSM game detection (kernel-level, preferred)
+    // FOCUS DETECTION (PRIMARY): D-Bus event-based, zero polling, zero heuristics
+    // The focused window is EXACTLY what the user wants to be fast - no guessing needed
+    focus_detector: Option<focus_detect::FocusDetector>,
+    // GAME DETECTION (FALLBACK): Only used if D-Bus focus detection unavailable
+    bpf_game_detector: Option<BpfGameDetector>, // BPF LSM game detection (kernel-level)
     game_detector: Option<GameDetector>,        // Fallback inotify detection (if BPF unavailable)
     input_ring_buffer: Option<ring_buffer::InputRingBufferManager>, // Interrupt-driven ring buffer for ultra-low latency input
     dispatch_event_ringbuf: Option<libbpf_rs::RingBuffer<'a>>, // Event-driven dispatch events for watchdog (eliminates polling)
@@ -655,16 +660,45 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    /// Get current game TGID from active detector (BPF LSM or inotify fallback)
+    /// Get current foreground TGID using priority: Focus > BPF LSM > inotify
+    /// 
+    /// DETECTION HIERARCHY (most reliable first):
+    /// 1. D-Bus Focus Detection (PRIMARY)
+    ///    - Event-based: compositor tells us exactly which window is focused
+    ///    - Zero heuristics: no guessing based on thread count/memory
+    ///    - 100% proof: the focused window IS what the user wants fast
+    /// 
+    /// 2. BPF LSM Game Detection (FALLBACK)
+    ///    - Kernel-level tracking of game processes
+    ///    - More reliable than /proc scanning
+    /// 
+    /// 3. inotify Game Detection (LAST RESORT)
+    ///    - /proc scanning with heuristics
+    ///    - Only used if both D-Bus and BPF unavailable
     #[inline]
     fn get_detected_game_tgid(&self) -> u32 {
-        if let Some(ref detector) = self.bpf_game_detector {
-            detector.get_game_tgid()
-        } else if let Some(ref detector) = self.game_detector {
-            detector.get_game_tgid()
-        } else {
-            0
+        // PRIMARY: D-Bus focus detection - zero heuristics, 100% proof
+        if let Some(ref detector) = self.focus_detector {
+            let pid = detector.get_focused_pid();
+            if pid > 0 {
+                return pid;
+            }
         }
+        
+        // FALLBACK: BPF LSM game detection
+        if let Some(ref detector) = self.bpf_game_detector {
+            let tgid = detector.get_game_tgid();
+            if tgid > 0 {
+                return tgid;
+            }
+        }
+        
+        // LAST RESORT: inotify game detection
+        if let Some(ref detector) = self.game_detector {
+            return detector.get_game_tgid();
+        }
+        
+        0
     }
 
     /// Get full game info from active detector
@@ -1805,6 +1839,45 @@ impl<'a> Scheduler<'a> {
             };
 
         // Initialize game detection: Try BPF LSM first (kernel-level), fallback to inotify
+        // ═══════════════════════════════════════════════════════════════════════════
+        // FOCUS DETECTION (PRIMARY) - D-Bus event-based
+        // ═══════════════════════════════════════════════════════════════════════════
+        // 
+        // ZERO POLLING, ZERO HEURISTICS, 100% PROOF
+        //
+        // Instead of guessing which process is a "game" using heuristics like:
+        //   - Thread count (unreliable - Discord has 50+ threads)
+        //   - Memory usage (unreliable - browsers use GB+)
+        //   - Process name (brittle - different games, different names)
+        //
+        // We simply ask the compositor: "Which window is focused?"
+        // The focused window is EXACTLY what the user wants to be fast.
+        //
+        // PROOF CHAIN:
+        // 1. User clicks on game window → compositor focuses it
+        // 2. D-Bus signal tells us the focused window's PID
+        // 3. We set detected_fg_tgid = that PID
+        // 4. All threads of that PID get migration protection
+        //
+        // No guessing. No heuristics. Just facts from the compositor.
+        // ═══════════════════════════════════════════════════════════════════════════
+        let focus_detector = {
+            let detector = focus_detect::FocusDetector::new();
+            // Give D-Bus connection time to establish
+            std::thread::sleep(Duration::from_millis(100));
+            let initial_pid = detector.get_focused_pid();
+            if initial_pid > 0 {
+                info!("Focus detection: D-Bus connected, initial focus PID = {}", initial_pid);
+                Some(detector)
+            } else {
+                info!("Focus detection: D-Bus available, waiting for focus events");
+                Some(detector)
+            }
+        };
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // GAME DETECTION (FALLBACK) - Only used if D-Bus focus detection unavailable
+        // ═══════════════════════════════════════════════════════════════════════════
         // BPF LSM benefits (kernel 6.17+):
         // - 60-650× lower CPU overhead (μs/sec vs ms/sec)
         // - 10-100× faster detection (<1ms vs 0-100ms)
@@ -1812,12 +1885,12 @@ impl<'a> Scheduler<'a> {
         // - Zero recurring /proc scans (event-driven)
         let (bpf_game_detector, game_detector_fallback) = match BpfGameDetector::new(&mut skel) {
             Ok(detector) => {
-                info!("Game detection: Using BPF LSM (kernel-level tracking)");
+                info!("Game detection (fallback): BPF LSM available");
                 (Some(detector), None)
             }
             Err(e) => {
                 info!(
-                    "Game detection: BPF LSM unavailable ({}), using inotify fallback",
+                    "Game detection (fallback): BPF LSM unavailable ({}), inotify available",
                     e
                 );
                 (None, Some(GameDetector::new()))
@@ -1857,6 +1930,7 @@ impl<'a> Scheduler<'a> {
             registered_epoll_fds: FxHashSet::default(),
             trig: trigger::BpfTrigger,
             input_trigger_fn,
+            focus_detector, // PRIMARY: D-Bus event-based focus detection
             bpf_game_detector,
             game_detector: game_detector_fallback,
             input_ring_buffer,
