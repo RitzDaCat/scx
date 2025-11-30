@@ -130,6 +130,17 @@ launch_scx() {
     echo "================================================================================"
     echo
 
+    # CRITICAL: Pass D-Bus environment to sudo for focus detection
+    # Without this, the scheduler (running as root) cannot connect to user's D-Bus session
+    # This enables 100% proof event-based focus detection via KWin
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        env_vars+=("DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}")
+    fi
+    # XDG_RUNTIME_DIR is also needed for D-Bus socket access
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        env_vars+=("XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}")
+    fi
+
     if (( ${#env_vars[@]} > 0 )); then
         sudo env "${env_vars[@]}" "${BIN_PATH}" "${base_args[@]}" "${EXTRA_FLAGS[@]}"
     else
@@ -502,7 +513,20 @@ run_custom() {
     echo "Launching with custom arguments: ${CUSTOM_ARGS[*]}"
     echo "================================================================================"
     echo
-    sudo "${BIN_PATH}" "${CUSTOM_ARGS[@]}"
+    # Pass D-Bus environment for focus detection
+    local -a dbus_env=()
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        dbus_env+=("DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}")
+    fi
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        dbus_env+=("XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}")
+    fi
+    
+    if (( ${#dbus_env[@]} > 0 )); then
+        sudo env "${dbus_env[@]}" "${BIN_PATH}" "${CUSTOM_ARGS[@]}"
+    else
+        sudo "${BIN_PATH}" "${CUSTOM_ARGS[@]}"
+    fi
 }
 
 show_menu() {

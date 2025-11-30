@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "scx_gamer"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "ahash",
  "anyhow",

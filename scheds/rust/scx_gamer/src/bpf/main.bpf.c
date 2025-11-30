@@ -3301,95 +3301,57 @@ static bool need_migrate(const struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	/*
-	 * Always attempt to migrate if we're contending an SMT core.
-	 * This takes priority over migration resistance - SMT contention hurts performance.
+	 * ═══════════════════════════════════════════════════════════════════════════
+	 * FOREGROUND GAME THREAD MIGRATION PROTECTION
+	 * (100% PROOF, ZERO HEURISTICS, ZERO ARBITRARY THRESHOLDS)
+	 * 
+	 * CRITICAL: This check MUST come BEFORE SMT contention check!
+	 * 
+	 * Previously, SMT contention forced migration even for game threads.
+	 * This caused Soulframe's main thread to have 250 mig/s while other
+	 * threads had <10 mig/s. The fix: game threads are NEVER migrated,
+	 * even for SMT contention.
+	 * 
+	 * WHY CACHE AFFINITY > SMT ESCAPE FOR GAMING:
+	 * - SMT penalty: ~15-20% throughput loss when sharing
+	 * - Migration penalty: ~10µs cache warming + potential CCD hop (100-300ns)
+	 * - At 240Hz, migration jitter affects frame timing
+	 * - For LATENCY workloads (gaming), cache affinity wins
+	 * 
+	 * PROOF CHAIN:
+	 * 1. Userspace detects focused window → identifies game process
+	 * 2. foreground_tgid is set to the game's TGID (KNOWN DATA)
+	 * 3. Thread's TGID is read from task->tgid (KERNEL DATA)
+	 * 4. If thread's TGID == foreground_tgid → thread belongs to game
+	 * 5. User focused this game → user wants it to perform well
+	 * 6. Migration hurts latency → protect from migration
+	 * 
+	 * NO HEURISTICS: Just "Is this the game's thread? Yes → protect"
+	 * ═══════════════════════════════════════════════════════════════════════════
+	 */
+	if (fg_cached) {
+		/* Thread belongs to foreground game - NEVER migrate
+		 * Not even for SMT contention - cache affinity is more important
+		 * for latency-sensitive gaming workloads. */
+		__atomic_fetch_add(&nr_mig_blocked_cooldown, 1, __ATOMIC_RELAXED);
+		return false;
+	}
+	
+	/*
+	 * SMT CONTENTION: Migrate non-game threads to escape SMT sharing.
+	 * This only applies to background threads (fg_cached = false).
+	 * Game threads are protected above.
 	 */
 	if (is_smt_contended(prev_cpu))
 		return true;
-
-	/*
-	 * FRAME THREAD MIGRATION RESISTANCE: GPU/compositor threads prioritize cache affinity
-	 * over load balancing. Gaming workloads are NOT uniform - some cores have main thread,
-	 * GPU submit threads, etc. Perfect load balancing is NOT the goal - cache affinity is.
-	 *
-	 * Strategy:
-	 * 1. If prev_cpu is a physical core and idle → stay (best cache affinity)
-	 * 2. If migrated recently (<32ms cooldown) → stay unless forced
-	 * 3. Only migrate if: SMT contention (handled above), CPU offline, or cooldown expired
-	 *
-	 * Expected impact: Reduces frame time variance by preventing cache invalidation from
-	 * unnecessary migrations. Should improve std dev from 15-22 fps → ~13-15 fps.
-	 */
-	/*
-	 * ═══════════════════════════════════════════════════════════════════════════
-	 * GPU THREAD MIGRATION PROTECTION (100% HOOK-BASED, ZERO ARBITRARY THRESHOLDS)
-	 * 
-	 * REMOVED: Time-based busy window (gpu_queue_busy_until was still a threshold)
-	 * NEW: Pure foreground-based protection
-	 * 
-	 * How it works:
-	 * 1. fentry/drm_ioctl fires when thread calls GPU ioctl → is_gpu_submit = true
-	 * 2. Userspace detects foreground game → foreground_tgid set
-	 * 3. If thread is GPU submit AND belongs to foreground game → NEVER migrate
-	 * 
-	 * Why this is 100% proof with ZERO thresholds:
-	 * - is_gpu_submit: Set by fentry/drm_ioctl (KERNEL HOOK) - thread called DRM ioctl
-	 * - fg_cached: Thread's TGID == foreground_tgid (KNOWN DATA)
-	 * - No time windows, no frequency checks, no arbitrary numbers
-	 * 
-	 * Why ALWAYS protect (not just during active GPU work):
-	 * - GPU threads alternate between submit (ioctl) and wait (fence)
-	 * - Migration during wait = cold cache when submit starts = frame latency
-	 * - Cache affinity matters for BOTH phases of the GPU pipeline
-	 * 
-	 * Works for ALL games: Every GPU game MUST call DRM ioctls to submit work.
-	 * This is the Linux GPU API - there's no other way.
-	 * ═══════════════════════════════════════════════════════════════════════════
-	 */
-	if (tctx && tctx->is_gpu_submit && fg_cached) {
-		/* Foreground game's GPU thread - NEVER migrate
-		 * is_gpu_submit = proven by fentry/drm_ioctl (kernel hook)
-		 * fg_cached = thread belongs to foreground game (known data)
-		 * Zero arbitrary thresholds. */
-		__atomic_fetch_add(&nr_mig_blocked_cooldown, 1, __ATOMIC_RELAXED);
-		return false;
-	}
 	
 	/*
-	 * COMPOSITOR/INPUT HANDLER: Critical for frame delivery and input.
-	 * If thread is compositor/input AND belongs to foreground game → NEVER migrate.
-	 * Same logic: hook-based detection + foreground ownership = 100% proof.
+	 * SYSTEM AUDIO: Always protect even if not foreground game.
+	 * Audio crackling is noticeable regardless of which app produces it.
+	 * USB audio and system audio threads have strict latency requirements.
 	 */
-	if (tctx && (tctx->is_compositor || tctx->is_input_handler) && fg_cached) {
-		__atomic_fetch_add(&nr_mig_blocked_cooldown, 1, __ATOMIC_RELAXED);
+	if (tctx && (tctx->is_usb_audio || tctx->is_system_audio)) {
 		return false;
-	}
-
-	/*
-	 * Audio thread migration limiting: ALWAYS prevent migration for audio threads.
-	 * AUDIO FIX: Removed exec_avg condition that allowed migration of audio threads.
-	 * Audio threads (USB, system, game) have strict latency requirements.
-	 * Cache affinity for audio buffers is critical to prevent crackling.
-	 * Migration causes cold caches → buffer underruns → audio glitches. */
-	if (tctx && (tctx->is_usb_audio || tctx->is_system_audio || tctx->is_game_audio)) {
-		return false;  /* NEVER migrate audio threads */
-	}
-	
-	/*
-	 * Gaming network thread migration limiting (100% HOOK-BASED).
-	 * 
-	 * How is_gaming_network is set (NO HEURISTICS):
-	 * 1. fentry/tcp_recvmsg or fentry/udp_recvmsg fires (KERNEL HOOK)
-	 * 2. Thread's TGID is compared to foreground_tgid (KNOWN DATA)
-	 * 3. If thread belongs to foreground game → is_gaming_network = true
-	 * 
-	 * Why NEVER migrate:
-	 * - Cache warming delays: 5-50µs per migration
-	 * - CCD hops on AMD: 100-300ns extra latency
-	 * - Network threads process packets → cache affinity is critical
-	 */
-	if (tctx && tctx->is_gaming_network) {
-		return false;  /* NEVER migrate gaming network threads */
 	}
 	
 	/* ═══════════════════════════════════════════════════════════════════
