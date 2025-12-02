@@ -142,11 +142,12 @@ struct CACHE_ALIGNED task_ctx {
 
 	/* MM hint removed for gaming workloads - low cache locality benefit, high overhead */
 
-	/* Thread classification metrics */
-	u16 low_cpu_samples;		/* Consecutive wakes with <100μs exec */
-	u16 high_cpu_samples;		/* Consecutive wakes with >5ms exec */
+	/* Thread classification metrics
+	 * REMOVED: low_cpu_samples, high_cpu_samples (heuristic thresholds eliminated)
+	 * Detection is now 100% event-driven via fentry hooks. */
 	u16 input_window_wakeups;	/* Wakes during input windows (for behavioral detection) */
 	u16 total_wakeups_sampled;	/* Total wakeups sampled (for ratio calculation) */
+	u16 _classification_removed_pad[2]; /* Padding for removed fields */
 	u64 last_classification_update;/* Timestamp of last slow-path classification */
 	u8 classification_stable_runs;	/* Consecutive slow-path passes with no changes */
 	u8 classification_backoff_shift;/* Dynamic refresh backoff exponent */

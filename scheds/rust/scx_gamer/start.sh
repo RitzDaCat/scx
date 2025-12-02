@@ -159,7 +159,7 @@ run_standard() {
 PROFILE                DESCRIPTION
 --------------------------------------------------------------------------------
 1) Esports (DEFAULT)   Competitive gaming with aggressive tuning
-                       - Slice: 250us, input-window: 8ms
+                       - Slice: 10us (cosmos-level responsiveness)
                        - Keyboard boost: 300ms, mouse boost: 6ms
                        - avoid-smt: ON, prefer-napi: ON
                        - Use for: Valorant, CS2, LoL, 144Hz-240Hz (RECOMMENDED)
@@ -205,11 +205,13 @@ PROFILE
                 echo "Profile: Esports (Default)"
                 echo "Purpose: Competitive gaming with aggressive optimizations"
                 echo
-                echo "This is the DEFAULT profile - no flags needed!"
-                echo "Effective settings: slice=250us input=8ms kbd=300ms mouse=6ms avoid-smt=on napi=on"
+                echo "Effective settings: slice=10us kbd=300ms mouse=6ms avoid-smt=on napi=on"
+                echo "Slice hierarchy: Input=2.5us, Game=10us, Background=20us"
                 echo
                 launch_scx "Esports" \
-                    --env "RUST_LOG=warn"
+                    --env "RUST_LOG=warn" \
+                    --arg "--slice-us" \
+                    --arg "10"
                 return
                 ;;
             2)
@@ -383,9 +385,12 @@ STATS_PROFILE
             1)
                 echo
                 echo "Launching: Esports with Stats Monitoring"
+                echo "Slice hierarchy: Input=2.5us, Game=10us, Background=20us"
                 echo
                 launch_scx "Esports + Stats" \
                     --env "RUST_LOG=info" \
+                    --arg "--slice-us" \
+                    --arg "10" \
                     --arg "--stats" \
                     --arg "${interval}"
                 return
@@ -482,7 +487,8 @@ run_custom() {
     echo "Enter your custom scx_gamer command-line arguments."
     echo
     echo "Available profiles: --profile [esports|baseline|casual|ultra]"
-    echo "  esports (default): slice=250us, input=8ms, kbd=300ms, mouse=6ms, avoid-smt, napi"
+    echo "  esports (default): slice=10us, kbd=300ms, mouse=6ms, avoid-smt, napi"
+    echo "                     Slice hierarchy: Input=2.5us, Game=10us, Background=20us"
     echo "  baseline:          slice=1000us, minimal tuning"
     echo "  casual:            slice=500us, kbd=1500ms, mouse=10ms, napi"
     echo "  ultra:             slice=5us, input=2ms, kbd=100ms, mouse=4ms, mig-max=2"

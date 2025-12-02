@@ -27,3 +27,6 @@ our Kernel is one of the latests.
 - We want nanosecond level latency not millisecond.
 - We do not want guesswork, we do not want fake heuristics, we want 100% proof.
 - When addressing these problems is there a kernal hook or anything that removes any guesswork of the functionality. Will it be robust and work across 100's of different games? Can we implement with no guesswork heuristics? We want 100% proof.
+- A.B.C always be casting, if we have fentry hooks to detect and know something is coming up are we preparing for what we know is going to happen? We should analyze the scheduler and make sure we aren't just waiting at any time if theres something we can be doing. Can also explore async or other items to use that time wisely.
+- Think on solutions or bug fixes, come up with at least 3 designs or ideas and then discuss and explore. Being studious and creative we could come up with better solutions then the current implementation or designs currently in discussion. Make sure to think about pros and cons and explore.
+- Code should follow DRY, we should create reusable code to reduce complexity, file size and make it easier for humans and AI to understand code flow and design. We should not have duplicate code. We should have maintainable code. We should have performant and well thought out and organized code. 

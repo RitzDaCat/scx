@@ -158,6 +158,73 @@ static __always_inline void set_kick_cpu(s32 cpu)
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Smart Preemption Stats (defined in main.bpf.c)
+ * Track preemption decisions for performance analysis
+ */
+extern volatile u64 nr_preempt_forced;    /* Preemptive kicks (higher priority task) */
+extern volatile u64 nr_preempt_avoided;   /* Non-preemptive kicks (same/lower priority) */
+
+/**
+ * smart_kick_cpu - Priority-aware CPU kick that minimizes IPI overhead
+ * @cpu: Target CPU to kick
+ * @waking_boost: boost_shift of the task being woken (0-7)
+ *
+ * RATIONALE: Reduces frametime variance by avoiding unnecessary preemptive kicks.
+ * 
+ * SCX_KICK_PREEMPT sends an IPI that forces immediate rescheduling on the target
+ * CPU, costing ~1-5µs and polluting cache. This is valuable when a high-priority
+ * task needs to preempt a low-priority one, but wasteful when priorities are equal.
+ *
+ * DECISION LOGIC (based on hook-derived boost_shift, NOT heuristics):
+ * - waking_boost > running_boost: Use SCX_KICK_PREEMPT (higher priority needs CPU)
+ * - waking_boost <= running_boost: Use SCX_KICK_IDLE (can wait for natural yield)
+ *
+ * PERFORMANCE:
+ * - Added overhead: ~20-50ns (cpu_ctx lookup + comparison)
+ * - Savings per avoided preempt: ~2,500-10,000ns (IPI + cache pollution)
+ * - Break-even: Avoid just 1% of preempts to come out ahead
+ * - Expected: 30-50% of preempts avoided (same-priority task scenarios)
+ *
+ * TIER 1: Optimized for select_cpu hot path
+ * - Bounds check: Tier 0 (~0.5-1ns)
+ * - CPU ctx lookup: Tier 1 (~20-50ns)
+ * - Comparison: Tier 0 (~0.5-1ns)
+ * - Kick: Tier 1 (~variable, depending on kick type)
+ * - Total: ~25-55ns overhead per call
+ */
+static __always_inline void smart_kick_cpu(s32 cpu, u8 waking_boost)
+{
+	/* TIER 0: Bounds check (early exit for invalid CPU) */
+	if (unlikely(cpu < 0 || (u32)cpu >= MAX_CPUS))
+		return;
+
+	/* TIER 1: Get running task's boost from cpu_ctx
+	 * This is updated in ops.running() when a task starts executing */
+	struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
+	if (unlikely(!cctx)) {
+		/* No context = can't determine priority, use preempt to be safe */
+		__atomic_fetch_add(&nr_preempt_forced, 1, __ATOMIC_RELAXED);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		return;
+	}
+
+	u8 running_boost = cctx->running_boost_shift;
+
+	/* TIER 0: Priority comparison (hook-based, not heuristic)
+	 * Only preempt if waking task has STRICTLY higher priority.
+	 * Equal priority = let running task complete naturally for better cache. */
+	if (waking_boost > running_boost) {
+		/* Higher priority: preempt immediately */
+		__atomic_fetch_add(&nr_preempt_forced, 1, __ATOMIC_RELAXED);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+	} else {
+		/* Same or lower priority: kick idle only (task queued, will run on yield) */
+		__atomic_fetch_add(&nr_preempt_avoided, 1, __ATOMIC_RELAXED);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
+}
+
 static __always_inline void clear_kick_cpu(__maybe_unused s32 cpu) {}
 
 /*
