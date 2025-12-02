@@ -417,15 +417,40 @@ static __always_inline void update_crtc_timing(struct drm_crtc *crtc, u64 now)
 			 * VRR changes are gradual (monitor has physical limits).
 			 * Scheduler-induced jitter causes SUDDEN jumps.
 			 * 
-			 * Critical for: flick shots, target tracking, motion sync mice.
+			 * RELATIVE THRESHOLDS (not absolute):
+			 * Previous implementation used hardcoded 1.5ms threshold which failed
+			 * at high refresh rates (480Hz = 2.08ms frame, so 1.5ms = 72% tolerance).
 			 * 
-			 * Thresholds:
-			 * - JITTER_ACTIVATE_NS: 1.5ms jump activates stabilization
-			 * - JITTER_DEACTIVATE_NS: 0.5ms sustained clears stabilization
+			 * Now uses percentage of detected frame interval from drm_atomic_commit:
+			 * - Activation: 25% of frame interval (>> 2)
+			 * - Deactivation: 12.5% of frame interval (>> 3)
+			 * 
+			 * At 480Hz (2.08ms): activate at 520us, deactivate at 260us
+			 * At 240Hz (4.17ms): activate at 1.04ms, deactivate at 520us
+			 * At 60Hz (16.67ms): activate at 4.17ms, deactivate at 2.08ms
+			 * 
+			 * Sanity bounds prevent edge cases:
+			 * - Min 200us activation (prevents noise triggering at ultra-high refresh)
+			 * - Max 2ms activation (ensures responsiveness even at low refresh)
 			 * - Stabilization lasts 4 frame intervals minimum (hysteresis)
 			 */
-			#define JITTER_ACTIVATE_NS   1500000ULL  /* 1.5ms frame-to-frame delta */
-			#define JITTER_DEACTIVATE_NS  500000ULL  /* 0.5ms to clear */
+			
+			/* Calculate relative jitter thresholds from kernel-detected frame interval */
+			u64 detected_interval = timing->frame_interval_ns;
+			
+			/* Activation threshold: 25% of frame interval */
+			u64 jitter_activate = detected_interval >> 2;
+			if (jitter_activate < 200000ULL)
+				jitter_activate = 200000ULL;   /* Min 200us - prevents noise at 480Hz+ */
+			if (jitter_activate > 2000000ULL)
+				jitter_activate = 2000000ULL;  /* Max 2ms - ensures detection at 60Hz */
+			
+			/* Deactivation threshold: 12.5% of frame interval */
+			u64 jitter_deactivate = detected_interval >> 3;
+			if (jitter_deactivate < 100000ULL)
+				jitter_deactivate = 100000ULL; /* Min 100us */
+			if (jitter_deactivate > 1000000ULL)
+				jitter_deactivate = 1000000ULL; /* Max 1ms */
 			
 			u64 last_frame = hotpath_signals.last_frame_time_ns;
 			if (last_frame > 0) {
@@ -436,16 +461,15 @@ static __always_inline void update_crtc_timing(struct drm_crtc *crtc, u64 now)
 				
 				hotpath_signals.frame_jitter_ns = delta;
 				
-				if (delta > JITTER_ACTIVATE_NS) {
-					/* JITTER DETECTED: Activate stabilization mode
-					 * Boost all render threads, lock migrations, crush background */
+				if (delta > jitter_activate) {
+					/* Jitter exceeds threshold - activate stabilization mode */
 					hotpath_signals.frame_stabilization_active = 1;
 					/* Hold stabilization for 4 frame intervals (hysteresis) */
-					u64 hold_duration = timing->frame_interval_ns << 2;
+					u64 hold_duration = detected_interval << 2;
 					if (hold_duration < 16000000ULL)
 						hold_duration = 16000000ULL;  /* Min 16ms */
 					hotpath_signals.frame_stabilization_until = now + hold_duration;
-				} else if (delta < JITTER_DEACTIVATE_NS && 
+				} else if (delta < jitter_deactivate && 
 				           hotpath_signals.frame_stabilization_active &&
 				           now > hotpath_signals.frame_stabilization_until) {
 					/* Jitter cleared and hold time expired - deactivate */

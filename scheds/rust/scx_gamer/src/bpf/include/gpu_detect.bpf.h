@@ -615,22 +615,37 @@ int BPF_PROG(detect_frame_present, void *state, bool nonblock)
 		 * The scheduler can use this to predict next frame deadline */
 		hotpath_signals.last_frame_time_ns = interval;
 		
-		/* VRR JITTER DETECTION: Check for sudden frame time changes */
+		/* VRR JITTER DETECTION: Check for sudden frame time changes
+		 * 
+		 * Uses relative thresholds based on detected frame interval to work
+		 * correctly at all refresh rates (60Hz to 480Hz+).
+		 * 
+		 * Detection: >25% deviation from expected frame time
+		 * Activation: >25% of frame interval (relative, not absolute)
+		 * 
+		 * Sanity bounds prevent edge cases at extreme refresh rates. */
 		if (timing->frame_count > 10) {  /* After warmup */
 			u64 expected = timing->frame_interval_ns;
 			u64 delta = interval > expected ? 
 			            interval - expected : 
 			            expected - interval;
 			
-			/* Jitter threshold: >20% deviation from expected */
-			if (delta > (expected >> 2)) {  /* >25% deviation */
+			/* Calculate relative activation threshold (25% of frame interval) */
+			u64 jitter_activate = expected >> 2;
+			if (jitter_activate < 200000ULL)
+				jitter_activate = 200000ULL;   /* Min 200us */
+			if (jitter_activate > 2000000ULL)
+				jitter_activate = 2000000ULL;  /* Max 2ms */
+			
+			/* Jitter threshold: >25% deviation from expected */
+			if (delta > (expected >> 2)) {
 				hotpath_signals.frame_jitter_ns = delta;
 				
-				/* Activate stabilization if jitter is severe (>2ms) */
-				if (delta > 2000000ULL) {
+				/* Activate stabilization if jitter exceeds relative threshold */
+				if (delta > jitter_activate) {
 					hotpath_signals.frame_stabilization_active = 1;
 					/* Hold for 4 frame intervals */
-					u64 hold = timing->frame_interval_ns << 2;
+					u64 hold = expected << 2;
 					if (hold < 16000000ULL) hold = 16000000ULL;
 					hotpath_signals.frame_stabilization_until = now + hold;
 				}

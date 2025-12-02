@@ -52,6 +52,20 @@
 #define SHARED_DSQ	0
 
 /*
+ * CPU Scan Limits (BPF verifier friendly)
+ *
+ * TIER 0: Compile-time constants
+ */
+#define TASKGRAPH_MAX_PREF_SCAN   12	/* TaskGraph corral: scan up to 12 CPUs */
+#define TASKGRAPH_BORROW_MAX_SCAN 12	/* Borrow scan limit */
+#define FRAME_PHYS_SCAN_MAX       64	/* Frame thread physical scan limit */
+
+/*
+ * Histogram Configuration
+ */
+#define HIST_BUCKETS	12
+
+/*
  * Performance Tuning Thresholds
  *
  * TIER 0: All compile-time constants (zero runtime cost)
@@ -67,20 +81,21 @@
 #define CHAIN_BOOST_STEP		2	/* Chain boost increment per sync-wake */
 
 /*
- * Thread Classification Thresholds
+ * Thread Classification: 100% Event-Driven
  *
- * TIER 0: All compile-time constants (zero runtime cost)
+ * REMOVED: All behavioral heuristic thresholds (GPU_SUBMIT_EXEC_THRESH_NS,
+ * BACKGROUND_EXEC_THRESH_NS, etc.) were eliminated because they violate our
+ * "100% proof, no guesswork" rule.
+ *
+ * Detection is now purely event-driven via kernel hooks:
+ * - GPU: fentry/drm_ioctl, fentry/security_file_open, fentry/dma_fence_signal
+ * - Input: fentry/input_event, fentry/hid_input_report, fentry/hid_irq_in
+ * - Audio: fentry/snd_pcm_period_elapsed
+ * - Network: fentry/netif_receive_skb, fentry/udp_rcv
+ * - Wine/Proton: fentry/eventfd_signal_mask, fentry/do_futex, fentry/ntsync_*
+ *
+ * No heuristics. No arbitrary thresholds. Just kernel proof.
  */
-
-/* GPU submission thread detection */
-#define GPU_SUBMIT_EXEC_THRESH_NS	100000ULL	/* <100μs exec suggests GPU submit */
-#define GPU_SUBMIT_FREQ_MIN		50ULL		/* Min wakeup freq (500fps = 2ms) */
-#define GPU_SUBMIT_STABLE_SAMPLES	8		/* Samples needed for classification */
-
-/* Background task detection */
-#define BACKGROUND_EXEC_THRESH_NS	5000000ULL	/* >5ms exec suggests CPU-intensive */
-#define BACKGROUND_FREQ_MAX		10ULL		/* Low freq (<10 = >100ms sleep) */
-#define BACKGROUND_STABLE_SAMPLES	4		/* Samples for stable classification */
 
 /*
  * CPU Frequency Scaling
@@ -117,6 +132,29 @@
  * from unnecessary CCX hops (~100-300ns penalty per hop on AMD Ryzen). */
 #define IDLE_HINT_VALID_NS		(200ULL * NSEC_PER_USEC)
 
+/*
+ * Starvation Prevention
+ *
+ * TIER 0: Compile-time constant
+ *
+ * STARVATION_THRESHOLD_NS: Maximum time a runnable task can wait without running
+ * before receiving an emergency priority boost. This prevents non-game tasks
+ * (audio servers, system services) from being completely starved by aggressive
+ * game thread boosting.
+ *
+ * 500ms chosen because:
+ * - Long enough to not interfere with normal game thread prioritization
+ * - Short enough to prevent audio crackling (PipeWire timeout ~1s)
+ * - Short enough to prevent UI freezes in background apps
+ * - Aligns with kernel watchdog expectations (5s hard limit)
+ *
+ * EMERGENCY_BOOST_SHIFT: Temporary boost level for starved tasks (boost=4)
+ * This gives them ~16x deadline reduction to ensure they run soon without
+ * completely overriding input handlers (boost=7) or GPU threads (boost=6).
+ */
+#define STARVATION_THRESHOLD_NS		(500ULL * NSEC_PER_MSEC)
+#define EMERGENCY_BOOST_SHIFT		4
+
 /* NAPI preference tracking
  *
  * TIER 0: Compile-time constants
@@ -124,5 +162,76 @@
 #define NET_RX_SOFTIRQ	3
 #define NET_TX_SOFTIRQ	2
 #define NAPI_PREFER_TIMEOUT_NS	(5ULL * NSEC_PER_MSEC)
+
+/*
+ * Input Handling Configuration
+ *
+ * TIER 0: Compile-time constants
+ */
+#define KBD_REFRESH_THROTTLE_NS   10000000ULL	/* 10ms = 100 Hz max refresh */
+#define PRE_WAKE_LEAD_NS          30000ULL	/* 30µs lead time before predicted input */
+#define PRE_WAKE_WINDOW_NS        100000ULL	/* 100µs total window for pre-wake */
+#define INPUT_QUEUE_DRAIN_THRESHOLD 1
+
+/*
+ * Speculative Preemption Configuration
+ *
+ * TIER 0: Compile-time constants
+ */
+#define SPECULATIVE_PREEMPT_THRESHOLD  5	/* boost_shift 0-4 are preemptable */
+#define INPUT_RESERVATION_NS           50000ULL	/* 50µs CPU reservation for input */
+#define SYNC_PREEMPT_THRESHOLD         5	/* Don't preempt tasks with boost >= 5 */
+
+/*
+ * Device Cache Configuration
+ */
+#define DEVICE_CACHE_SLOTS	32
+
+/*
+ * Sampling Intervals
+ *
+ * TIER 0: Compile-time constants
+ */
+#define UTIL_SAMPLE_INTERVAL_NS       (500ULL * NSEC_PER_USEC)	/* 0.5ms */
+#define HOUSEKEEPING_INTERVAL_NS      (5ULL * NSEC_PER_MSEC)	/* 5ms */
+
+/*
+ * Input Event Types (from linux/input-event-codes.h)
+ *
+ * TIER 0: Compile-time constants
+ */
+#define EV_KEY      0x01	/* Button/key press */
+#define EV_REL      0x02	/* Relative movement (mouse) */
+#define EV_ABS      0x03	/* Absolute axis (analog input) */
+
+#define KEY_RELEASE 0
+#define KEY_PRESS   1
+#define KEY_REPEAT  2
+
+#define BTN_MISC    0x100
+
+/*
+ * Futex Constants
+ *
+ * TIER 0: Compile-time constants (for Wine/Proton sync detection)
+ */
+#ifndef FUTEX_CMD_MASK
+#define FUTEX_CMD_MASK     0x3f
+#endif
+#ifndef FUTEX_WAIT
+#define FUTEX_WAIT         0
+#endif
+#ifndef FUTEX_WAKE
+#define FUTEX_WAKE         1
+#endif
+#ifndef FUTEX_REQUEUE
+#define FUTEX_REQUEUE      3
+#endif
+#ifndef FUTEX_CMP_REQUEUE
+#define FUTEX_CMP_REQUEUE  4
+#endif
+#ifndef FUTEX_WAKE_BITSET
+#define FUTEX_WAKE_BITSET  10
+#endif
 
 #endif /* __GAMER_CONFIG_BPF_H */
