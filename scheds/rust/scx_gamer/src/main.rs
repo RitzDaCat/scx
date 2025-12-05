@@ -298,6 +298,7 @@ impl<'a> Scheduler<'a> {
                 let max_wait_ns = Self::read_u64(&bytes, 480);
                 let nr_starvation = Self::read_u64(&bytes, 488);
                 let nr_errors = Self::read_u64(&bytes, 496);
+                let nr_affinity_race = Self::read_u64(&bytes, 504);
                 
                 // Display comprehensive stats
                 println!("\n\x1b[1;36m╔═══════════════════════════════════════════════════════════════╗\x1b[0m");
@@ -402,6 +403,11 @@ impl<'a> Scheduler<'a> {
                 let color = if max_ms < 1.0 { "\x1b[32m" } else if max_ms < 10.0 { "\x1b[33m" } else { "\x1b[31m" };
                 println!("  Max wait: {}{:.2}ms\x1b[0m   Starvation rescues: {:>6}   Errors: {}",
                     color, max_ms, nr_starvation, nr_errors);
+                
+                // Show affinity race catches (important for Wine/Proton games with ntsync)
+                if nr_affinity_race > 0 {
+                    println!("  \x1b[36mAffinity races caught: {}\x1b[0m  (Wine/Proton thread affinity changes)", nr_affinity_race);
+                }
                 
                 // Show slow tasks (waited >10ms) - catches ALL long waits including direct dispatch
                 if let Ok(tasks) = self.slow_tasks.lock() {

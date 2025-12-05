@@ -1,8 +1,8 @@
 # scx_gamer: Technical Design Document
 
-**Version:** 1.0.4-rc1  
+**Version:** 1.0.4-rc2  
 **Status:** Release Candidate  
-**Last Updated:** 2025-12-05
+**Last Updated:** 2025-12-06
 
 ---
 
@@ -2204,6 +2204,31 @@ static __always_inline s32 pick_idle_physical_core(const struct cpumask *allowed
 }
 ```
 
+### 7.3 CRITICAL: Affinity Race Condition (Wine/Proton/ntsync)
+
+**Problem:** Wine/Proton games (especially with ntsync enabled) aggressively modify thread CPU affinities. This creates a race condition:
+
+```
+Timeline:
+T1: select_cpu() calls scx_bpf_pick_idle_cpu(p->cpus_ptr) → returns CPU 3
+T2: Game calls sched_setaffinity() to pin thread to CPUs {0, 1, 2}
+T3: scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | 3, ...) → CRASH!
+    "SCX_DSQ_LOCAL[_ON] target CPU 3 not allowed for wine_threadpool"
+```
+
+**Solution:** Always verify CPU is still in task's cpumask before direct dispatch:
+
+```c
+/* In gamer_select_cpu, BEFORE scx_bpf_dsq_insert: */
+if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+    /* Affinity changed - CPU no longer allowed, fallback to enqueue */
+    STAT_INC(nr_affinity_failures);
+    return prev_cpu;  /* Will go through enqueue() */
+}
+```
+
+**Debug Stat:** `nr_affinity_failures` tracks how often this race is caught. Displayed in HEALTH section as "Affinity races caught: N" when N > 0. High counts indicate aggressive affinity manipulation by the game.
+
 ---
 
 ## 8. Dispatch Logic
@@ -3628,12 +3653,18 @@ if (unlikely(error_condition)) {
 
 ---
 
-**Document Version:** 1.0.4-rc1  
+**Document Version:** 1.0.4-rc2  
 **Created:** 2025-12-04  
-**Updated:** 2025-12-05  
+**Updated:** 2025-12-06  
 **Author:** AI-assisted (Cursor Claude)
 
 **Changelog:**
+- v1.0.4-rc2: **CRITICAL: CPU affinity race condition fix for Wine/Proton + ntsync**
+  - Fixed fatal crash: "SCX_DSQ_LOCAL[_ON] target CPU X not allowed for task"
+  - Wine/Proton games (especially with ntsync) aggressively modify thread affinities
+  - Between `scx_bpf_pick_idle_cpu()` and `scx_bpf_dsq_insert()`, affinity can change
+  - Added `bpf_cpumask_test_cpu()` verification before direct dispatch to both paths
+  - New debug stat: `nr_affinity_failures` (displayed as "Affinity races caught")
 - v1.0.4-rc1: **Release Candidate** - Kernel background worker identification in debug output
 - v2.5.0: **Starvation threshold reduced to 20ms + rescued task logging**
   - Lowered `STARVATION_THRESH_NS` from 100ms to 20ms for faster intervention on outliers
