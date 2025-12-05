@@ -4,12 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Colors for output (using $'...' for proper escape sequence interpretation)
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+NC=$'\033[0m' # No Color
 
 print_status() {
     local status=$1
@@ -38,7 +38,7 @@ check_dependencies() {
     # -------------------------------------------------------------------------
     # Required Commands
     # -------------------------------------------------------------------------
-    echo "${BLUE}Required Commands:${NC}"
+    printf "${BLUE}Required Commands:${NC}\n"
     
     # Rust toolchain
     if command -v cargo &>/dev/null; then
@@ -118,7 +118,7 @@ check_dependencies() {
     # -------------------------------------------------------------------------
     # Required Libraries
     # -------------------------------------------------------------------------
-    echo "${BLUE}Required Libraries:${NC}"
+    printf "${BLUE}Required Libraries:${NC}\n"
     
     # libbpf
     if pkg-config --exists libbpf 2>/dev/null; then
@@ -155,7 +155,7 @@ check_dependencies() {
     # -------------------------------------------------------------------------
     # Kernel Headers (for vmlinux.h generation)
     # -------------------------------------------------------------------------
-    echo "${BLUE}Kernel Headers:${NC}"
+    printf "${BLUE}Kernel Headers:${NC}\n"
     
     local kernel_ver=$(uname -r)
     local headers_path="/usr/lib/modules/${kernel_ver}/build"
@@ -163,14 +163,40 @@ check_dependencies() {
     if [ -d "$headers_path" ]; then
         print_status "ok" "linux-headers" "$kernel_ver"
     else
-        print_status "missing" "linux-headers" "for kernel $kernel_ver"
-        # CachyOS uses linux-cachyos-headers
+        # Headers for exact kernel version not found
+        # Check if *any* compatible headers are installed (common after kernel update before reboot)
+        local any_headers=""
+        
+        # For CachyOS, check if linux-cachyos-headers is installed at all
         if echo "$kernel_ver" | grep -q "cachyos"; then
-            missing_pkgs+=("linux-cachyos-headers")
+            if pacman -Qs linux-cachyos-headers &>/dev/null; then
+                local installed_ver=$(pacman -Q linux-cachyos-headers 2>/dev/null | awk '{print $2}')
+                any_headers="/usr/lib/modules/${installed_ver%-*}-cachyos/build"
+                if [ -d "$any_headers" ] || [ -d "/usr/lib/modules/"*"-cachyos/build" ]; then
+                    print_status "warn" "linux-headers" "Running $kernel_ver, headers for $installed_ver (reboot recommended)"
+                    echo -e "    ${YELLOW}Note: Kernel headers version mismatch. Reboot to use new kernel.${NC}"
+                    echo -e "    ${YELLOW}      Build should still work with installed headers.${NC}"
+                    # Don't fail - headers are installed, just version mismatch
+                else
+                    print_status "missing" "linux-headers" "for kernel $kernel_ver"
+                    missing_pkgs+=("linux-cachyos-headers")
+                    all_ok=false
+                fi
+            else
+                print_status "missing" "linux-headers" "for kernel $kernel_ver"
+                missing_pkgs+=("linux-cachyos-headers")
+                all_ok=false
+            fi
         else
-            missing_pkgs+=("linux-headers")
+            # Non-CachyOS kernel
+            if pacman -Qs linux-headers &>/dev/null; then
+                print_status "warn" "linux-headers" "Installed but version mismatch (reboot may be needed)"
+            else
+                print_status "missing" "linux-headers" "for kernel $kernel_ver"
+                missing_pkgs+=("linux-headers")
+                all_ok=false
+            fi
         fi
-        all_ok=false
     fi
     
     echo
@@ -264,11 +290,8 @@ BUILD TYPE            DESCRIPTION
                       - Best performance, no profiling overhead
                       - Binary: target/release/scx_gamer
 
-2) Debug               Development build with profiling enabled
+2) Debug               Development build
                       - Debug symbols (-g)
-                      - Profiling enabled (ENABLE_PROFILING)
-                      - Latency histograms active
-                      - ~50-150ns overhead per scheduling decision
                       - Binary: target/debug/scx_gamer
 
 3) Exit                Quit without building
@@ -420,15 +443,13 @@ build_release() {
 build_debug() {
     echo
     echo "================================================================================"
-    echo "                    BUILDING SCX_GAMER (DEBUG + PROFILING)"
+    echo "                    BUILDING SCX_GAMER (DEBUG)"
     echo "================================================================================"
     echo
     echo "Repository root: ${REPO_ROOT}"
-    echo "Build type: Debug with profiling enabled"
-    echo "Profiling: ENABLE_PROFILING flag active"
-    echo "Note: Adds ~50-150ns overhead per scheduling decision"
+    echo "Build type: Debug"
     echo
-    
+
     cd "${REPO_ROOT}"
     
     # Check if workspace needs initial setup (vmlinux.h generation)
@@ -436,22 +457,16 @@ build_debug() {
     
     clean_build
     
-    echo "Step 3: Building scx_gamer (debug with profiling)..."
-    echo "Setting SCX_GAMER_ENABLE_PROFILING=1 for BPF compilation..."
-    # Use environment variable that build.rs will read (avoids CFLAGS conflicts)
-    export SCX_GAMER_ENABLE_PROFILING=1
+    echo "Step 3: Building scx_gamer (debug)..."
     cargo build -p scx_gamer
     
     echo
     echo "================================================================================"
-    echo "                         BUILD COMPLETE (DEBUG + PROFILING)"
+    echo "                         BUILD COMPLETE (DEBUG)"
     echo "================================================================================"
     echo
     echo "Binary location: ${REPO_ROOT}/target/debug/scx_gamer"
     echo "Size: $(du -h "${REPO_ROOT}/target/debug/scx_gamer" 2>/dev/null | cut -f1 || echo "unknown")"
-    echo
-    echo "Profiling enabled: Latency histograms will be populated."
-    echo "Use --stats <interval> to view scheduler metrics."
     echo
 }
 
