@@ -1,8 +1,8 @@
-# scx_gamer v2.0: Technical Design Document
+# scx_gamer: Technical Design Document
 
-**Version:** 2.0.0  
-**Status:** Active Development  
-**Last Updated:** 2025-12-04
+**Version:** 1.0.4-rc1  
+**Status:** Release Candidate  
+**Last Updated:** 2025-12-05
 
 ---
 
@@ -3628,12 +3628,13 @@ if (unlikely(error_condition)) {
 
 ---
 
-**Document Version:** 2.4.0  
+**Document Version:** 1.0.4-rc1  
 **Created:** 2025-12-04  
 **Updated:** 2025-12-05  
 **Author:** AI-assisted (Cursor Claude)
 
 **Changelog:**
+- v1.0.4-rc1: **Release Candidate** - Kernel background worker identification in debug output
 - v2.5.0: **Starvation threshold reduced to 20ms + rescued task logging**
   - Lowered `STARVATION_THRESH_NS` from 100ms to 20ms for faster intervention on outliers
   - Added ring buffer consumer in userspace to display rescued task names in debug view

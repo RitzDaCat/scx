@@ -1,6 +1,6 @@
 [package]
 name = "scx_gamer"
-version = "1.0.4"
+version = "1.0.4-rc1"
 authors = ["RitzDaCat"]
 edition = "2021"
 description = "Gaming-optimized scheduler focused on low frametime variance and input latency. https://github.com/sched-ext/scx/tree/main"
