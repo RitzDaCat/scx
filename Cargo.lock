@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "scx_gamer"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3086,8 +3086,6 @@ dependencies = [
  "rand",
  "rustc-hash 2.1.1",
  "scx_cargo",
- "scx_stats",
- "scx_stats_derive",
  "scx_utils",
  "serde",
  "serde_json",

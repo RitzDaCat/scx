@@ -53,7 +53,11 @@ qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript "$SCRIPT_NAME
 # Load KWin script
 log "Loading KWin script: $KWIN_SCRIPT"
 SCRIPT_ID=$(qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$KWIN_SCRIPT" "$SCRIPT_NAME" 2>&1)
-if [[ "$SCRIPT_ID" == "0" ]] || [[ "$SCRIPT_ID" == *"Error"* ]]; then
+
+# FIX: KWin's loadScript sometimes returns "0" on success or an integer ID.
+# Error messages usually contain "Error" text.
+# We treat "0" as a valid ID (some KWin versions use it for the first script).
+if [[ "$SCRIPT_ID" == *"Error"* ]]; then
     log "ERROR: Failed to load KWin script: $SCRIPT_ID"
     exit 1
 fi

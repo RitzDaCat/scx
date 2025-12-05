@@ -348,7 +348,7 @@ sudo ./target/release/scx_gamer --stats 1
 |--------|-------------|
 | `--stats N` | Print statistics every N seconds |
 | `--verbose` | Detailed logging including thread classification |
-| `--slice-us N` | Base time slice in microseconds (default: 5000) |
+| `--slice-us N` | Base time slice in microseconds (default: 10 for Esports) |
 | `--avoid-smt` | Avoid SMT siblings for latency-critical tasks |
 | `--no-stats` | Disable stats collection for maximum performance |
 
@@ -493,4 +493,4 @@ This project uses AI assistance (Cursor AI) for code generation and optimization
 
 ---
 
-**Version:** 1.0.5 | **Last Updated:** 2025-12-02
+**Version:** 1.0.5 | **Last Updated:** 2025-12-03

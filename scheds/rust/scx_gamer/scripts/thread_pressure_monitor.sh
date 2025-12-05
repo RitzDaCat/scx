@@ -23,6 +23,19 @@ SCX_API_PORT="${SCX_API_PORT:-8080}"
 SCX_API_URL="http://127.0.0.1:${SCX_API_PORT}"
 MAX_THREADS=30
 
+# Helper for floating point math without bc
+calc_float() {
+    awk "BEGIN {printf \"%.2f\", $1}"
+}
+
+calc_pct() {
+    awk "BEGIN {printf \"%.1f\", $1}"
+}
+
+calc_cmp() {
+    awk "BEGIN {print ($1)}"
+}
+
 #=============================================================================
 # DATA COLLECTION FUNCTIONS
 #=============================================================================
@@ -94,6 +107,7 @@ find_game_pid() {
         "overwatch" "apex" "r5apex" "dota2" "hl2_linux"
         "wine.*\.exe" "proton.*\.exe" "steam_app"
         "gamescope" "Xwayland"
+        "ArcRaiders"  # Added specific entry
     )
     
     if [[ -n "$game_name" ]]; then
@@ -112,11 +126,11 @@ find_game_pid() {
 format_ns() {
     local ns="$1"
     if (( ns >= 1000000000 )); then
-        echo "$(echo "scale=2; $ns / 1000000000" | bc)s"
+        echo "$(calc_float "$ns / 1000000000")s"
     elif (( ns >= 1000000 )); then
-        echo "$(echo "scale=2; $ns / 1000000" | bc)ms"
+        echo "$(calc_float "$ns / 1000000")ms"
     elif (( ns >= 1000 )); then
-        echo "$(echo "scale=1; $ns / 1000" | bc)us"
+        echo "$(calc_float "$ns / 1000")us"
     else
         echo "${ns}ns"
     fi
@@ -233,18 +247,18 @@ collect_thread_data() {
         local total=$((runtime + wait))
         local wait_pct="0.0"
         if (( total > 0 )); then
-            wait_pct=$(echo "scale=1; $wait * 100 / $total" | bc)
+            wait_pct=$(calc_pct "$wait * 100 / $total")
         fi
         
         # Generate notes for AI
         local notes=""
-        if [[ "$class" == "INPUT" ]] && (( $(echo "$wait_pct > 5" | bc -l) )); then
+        if [[ "$class" == "INPUT" ]] && (( $(calc_cmp "$wait_pct > 5") )); then
             notes="[!] INPUT LATENCY RISK"
-        elif [[ "$class" == "GPU_RENDER" ]] && (( $(echo "$wait_pct > 15" | bc -l) )); then
+        elif [[ "$class" == "GPU_RENDER" ]] && (( $(calc_cmp "$wait_pct > 15") )); then
             notes="[!] RENDER STALL"
-        elif [[ "$class" == "GAME_LOGIC" ]] && (( $(echo "$wait_pct > 20" | bc -l) )); then
+        elif [[ "$class" == "GAME_LOGIC" ]] && (( $(calc_cmp "$wait_pct > 20") )); then
             notes="[!] GAME THREAD STARVED"
-        elif (( $(echo "$wait_pct > 30" | bc -l) )); then
+        elif (( $(calc_cmp "$wait_pct > 30") )); then
             notes="[!] HIGH WAIT"
         fi
         
@@ -529,8 +543,8 @@ watch_mode() {
             local mem_psi=$(grep "^some" /proc/pressure/memory | grep -oP 'avg10=\K[0-9.]+')
             
             local cpu_color="\033[32m"  # green
-            (( $(echo "$cpu_psi >= 2" | bc -l) )) && cpu_color="\033[33m"  # yellow
-            (( $(echo "$cpu_psi >= 5" | bc -l) )) && cpu_color="\033[31m"  # red
+            (( $(calc_cmp "$cpu_psi >= 2") )) && cpu_color="\033[33m"  # yellow
+            (( $(calc_cmp "$cpu_psi >= 5") )) && cpu_color="\033[31m"  # red
             
             echo -e "PSI: CPU ${cpu_color}${cpu_psi}%\033[0m | MEM ${mem_psi}%"
         fi
@@ -555,7 +569,7 @@ watch_mode() {
                 
                 local total=$((runtime + wait))
                 local wait_pct="0.0"
-                (( total > 0 )) && wait_pct=$(echo "scale=1; $wait * 100 / $total" | bc)
+                (( total > 0 )) && wait_pct=$(calc_pct "$wait * 100 / $total")
                 
                 # Only show threads with some activity
                 (( wait > 1000000 || runtime > 1000000 )) || continue
