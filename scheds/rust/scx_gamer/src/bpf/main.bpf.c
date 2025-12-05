@@ -84,8 +84,13 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
      * Strategy 1: Prefer prev_cpu for cache locality.
      * Try to claim prev_cpu FIRST before looking for other CPUs.
      * This dramatically improves cache hit rates and reduces migrations.
+     *
+     * NOTE: Also verify prev_cpu is still allowed. The kernel typically
+     * validates this, but Wine/Proton games can change thread affinities
+     * so rapidly that a race can occur.
      */
-    if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+    if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+        scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
         slice = task_slice(tctx);
         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice, 0);
         
@@ -107,8 +112,24 @@ s32 BPF_STRUCT_OPS(gamer_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
     /*
      * DIRECT DISPATCH: If we got an idle CPU (not prev_cpu fallback),
      * it's already claimed by pick_idle_cpu. Dispatch directly!
+     *
+     * CRITICAL: Verify CPU is still in task's allowed cpumask!
+     * Wine/Proton games (especially with ntsync) aggressively modify
+     * thread affinities. Between pick_idle_cpu() and dsq_insert(),
+     * the affinity can change, causing:
+     *   "SCX_DSQ_LOCAL[_ON] target CPU X not allowed for task"
+     *
+     * If affinity changed, fall through to enqueue() which handles this.
      */
     if (cpu >= 0 && cpu != prev_cpu) {
+        /* Verify CPU is still allowed (affinity may have changed) */
+        if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+            /* Affinity changed - CPU no longer allowed, fallback to enqueue */
+            STAT_INC(nr_affinity_failures);
+            track_cpu_selection(tctx, prev_cpu, prev_cpu);
+            return prev_cpu;
+        }
+        
         slice = task_slice(tctx);
         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, 0);
         
