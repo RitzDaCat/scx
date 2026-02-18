@@ -538,8 +538,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     {
         u8 mcd = mega_mailbox[prev_idx].migration_cooldown;
         if (mcd > 0) {
-            /* NOTE: LUT optimization (cpu_phys_map) removed due to clang 18.1.3 backend crash.
-             * Reverted to modulo until compiler is updated. */
             u32 prev_phys = (u32)prev_cpu % nr_phys_cpus;
             u32 half_base = prev_phys & ~3u;  /* 0 or 4 — single AND, no division */
             /* Scan physical cores in same half */
