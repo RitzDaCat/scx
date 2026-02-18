@@ -112,7 +112,7 @@ struct cake_task_ctx {
 #define PACK_DEFICIT_AVG(deficit, avg)  (((u32)(deficit) & 0xFFFF) | ((u32)(avg) << 16))
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * MEGA-MAILBOX: Per-CPU state (64 bytes = single cache line)
+ * MEGA-MAILBOX: Per-CPU state (128 bytes = 2 cache lines)
  * - Zero false sharing: each CPU writes only to its own entry
  * - Prefetch-accelerated reads: one prefetch loads entire CPU state
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -214,6 +214,13 @@ struct cake_stats {
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS         (2 * 1000 * 1000)   /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS  (8 * 1000 * 1000)   /* 8ms */
+
+/* Tuning Constants */
+#define CAKE_MIN_SLICE_NS         200000     /* 200us - Requeue slice floor */
+#define CAKE_MIGRATION_COOLDOWN   4          /* wakeups - NEAR_PREF cooldown duration */
+#define CAKE_WSC_MAX              255        /* max consecutive same-cpu wakeups counter */
+#define CAKE_SYNC_MASK            15         /* tctx sync every 16th stop (0..15) */
+#define CAKE_EWMA_SKIP_THRESH     64         /* consecutive hits to skip EWMA calc */
 
 
 /* Default tier arrays (Gaming profile) — 4 tiers */

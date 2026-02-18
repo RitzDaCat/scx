@@ -380,6 +380,12 @@ impl<'a> Scheduler<'a> {
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
+            // Populate cpu_phys_map for BPF division replacement (Rule 42)
+            for i in 0..topology::MAX_CPUS {
+                if topo.nr_phys_cpus > 0 {
+                    rodata.cpu_phys_map[i] = (i % topo.nr_phys_cpus) as u8;
+                }
+            }
         }
 
         // Load the BPF program

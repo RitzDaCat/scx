@@ -25,6 +25,9 @@ const u32 nr_llcs = 1;
 const u32 nr_cpus = 8;  /* Set by loader — bounds kick scan loop (Rule 39) */
 const u32 nr_phys_cpus = 8;  /* Set by loader — physical core count for PHYS_FIRST */
 const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
+/* Map logical CPU ID to physical core ID (0..nr_phys_cpus-1).
+ * Replaces division in cake_select_cpu with array lookup (Rule 42). */
+const u8 cpu_phys_map[CAKE_MAX_CPUS] = {};
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
@@ -425,9 +428,9 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         u64 slice = p->scx.slice ?: quantum_ns;
 
         /* J1 V2: Gate 1 hit — increment prediction counter.
-         * Saturate at 255 to avoid wrap. */
+         * Saturate at CAKE_WSC_MAX to avoid wrap. */
         u8 wsc = mega_mailbox[prev_idx].wakeup_same_cpu;
-        if (wsc < 255) {
+        if (wsc < CAKE_WSC_MAX) {
             u8 new_wsc = wsc + 1;
             mega_mailbox[prev_idx].wakeup_same_cpu = new_wsc;
         }
@@ -492,13 +495,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     }
 
     /* NEAR_PREF: Gate 1 MISS — task is about to migrate.
-     * Set cooldown = 4: for the next 4 Gate 1 hits, the cooldown
+     * Set cooldown = CAKE_MIGRATION_COOLDOWN: for the next 4 Gate 1 hits, the cooldown
      * decrements and Gate 1c will try nearby CPUs before Gate 2.
      * CL1 of mailbox[prev_idx] already hot from WSC access above. */
     /* MESI GUARD (Rule 11): skip write if already at target value.
      * Avoids ~4.5K unnecessary RFOs/s on CL1 when cooldown is already 4. */
-    if (mega_mailbox[prev_idx].migration_cooldown != 4)
-        mega_mailbox[prev_idx].migration_cooldown = 4;
+    if (mega_mailbox[prev_idx].migration_cooldown != CAKE_MIGRATION_COOLDOWN)
+        mega_mailbox[prev_idx].migration_cooldown = CAKE_MIGRATION_COOLDOWN;
 
     /* ── GATE 1b: SMT sibling fallback — L2 still warm ──
      * When prev_cpu is busy, try its SMT sibling before Gate 2's full scan.
@@ -538,7 +541,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     {
         u8 mcd = mega_mailbox[prev_idx].migration_cooldown;
         if (mcd > 0) {
-            u32 prev_phys = (u32)prev_cpu % nr_phys_cpus;
+            /* Use pre-computed LUT to avoid division (Rule 42) */
+            u32 prev_phys = cpu_phys_map[(u32)prev_cpu & (CAKE_MAX_CPUS - 1)];
             u32 half_base = prev_phys & ~3u;  /* 0 or 4 — single AND, no division */
             /* Scan physical cores in same half */
             #pragma unroll
@@ -747,11 +751,11 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         /* STOLEN SLICE: Re-enqueued tasks (slice exhaust, yield) get 50%
          * of their normal slice. Forces compilation workers to release
          * CPUs 2x faster, creating more idle windows for fresh game
-         * wakeups. 200µs floor prevents micro-slicing (Rule 9).
+         * wakeups. CAKE_MIN_SLICE_NS floor prevents micro-slicing (Rule 9).
          * Sim: cuts render wait 82% vs full-slice re-enqueue. */
         requeue_slice >>= 1;
-        if (requeue_slice < 200000)
-            requeue_slice = 200000;
+        if (requeue_slice < CAKE_MIN_SLICE_NS)
+            requeue_slice = CAKE_MIN_SLICE_NS;
         u64 vtime = ((u64)requeue_tier << 56) | (now_fresh & 0x00FFFFFFFFFFFFFFULL);
         /* J6 V1: per-tier DSQ */
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + requeue_tier,
@@ -1042,10 +1046,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
             if (counter & mask) {
                 /* ── OPT3: CONFIDENCE EWMA SKIP ──
-                 * After 64+ consecutive fast-path hits, the task's tier is
+                 * After CAKE_EWMA_SKIP_THRESH+ consecutive fast-path hits, the task's tier is
                  * hyper-stable. Skip EWMA+kfunc on 3 of every 4 stops.
                  * Just stage from cache and return. ~4ns vs ~14ns. */
-                if (counter > 64 && (counter & 3)) {
+                if (counter > CAKE_EWMA_SKIP_THRESH && (counter & 3)) {
                     u8 nf = (packed >> SHIFT_FLAGS) & 1;
                     /* WRITE BURST: all stores grouped at exit */
                     *counter_ptr = counter;
@@ -1104,7 +1108,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                  * dsq_vtime carry authoritative state. Only sync during tier
                  * transitions (stable<3) or after migration (self-seed handles).
                  * Sim: eliminates 100% sync jitter for gaming tasks. */
-                if (unlikely(!(sync & 15)) && stable < 3) {
+                if (unlikely(!(sync & CAKE_SYNC_MASK)) && stable < 3) {
                     struct cake_task_ctx *tctx =
                         get_task_ctx(p, false);
                     if (tctx) {
