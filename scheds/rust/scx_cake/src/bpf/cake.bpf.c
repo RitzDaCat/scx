@@ -25,9 +25,6 @@ const u32 nr_llcs = 1;
 const u32 nr_cpus = 8;  /* Set by loader — bounds kick scan loop (Rule 39) */
 const u32 nr_phys_cpus = 8;  /* Set by loader — physical core count for PHYS_FIRST */
 const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
-/* Map logical CPU ID to physical core ID (0..nr_phys_cpus-1).
- * Replaces division in cake_select_cpu with array lookup (Rule 42). */
-const u8 cpu_phys_map[CAKE_MAX_CPUS] = {};
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
@@ -541,8 +538,9 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     {
         u8 mcd = mega_mailbox[prev_idx].migration_cooldown;
         if (mcd > 0) {
-            /* Use pre-computed LUT to avoid division (Rule 42) */
-            u32 prev_phys = cpu_phys_map[(u32)prev_cpu & (CAKE_MAX_CPUS - 1)];
+            /* NOTE: LUT optimization (cpu_phys_map) removed due to clang 18.1.3 backend crash.
+             * Reverted to modulo until compiler is updated. */
+            u32 prev_phys = (u32)prev_cpu % nr_phys_cpus;
             u32 half_base = prev_phys & ~3u;  /* 0 or 4 — single AND, no division */
             /* Scan physical cores in same half */
             #pragma unroll
