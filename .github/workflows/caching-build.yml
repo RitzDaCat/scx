@@ -39,6 +39,12 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
+      - name: Install dependencies (Ubuntu)
+        if: github.repository_owner != 'sched-ext'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libelf-dev zlib1g-dev
+
       - name: Build
         run: nix run ./.nix#ci -- build
 
@@ -65,6 +71,12 @@ jobs:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
       - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
       - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
 

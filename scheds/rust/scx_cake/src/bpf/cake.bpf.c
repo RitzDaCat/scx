@@ -27,8 +27,6 @@ const u32 nr_llcs = 1;
 const u32 nr_cpus = 8;  /* Set by loader — bounds kick scan loop (Rule 39) */
 const u32 nr_phys_cpus = 8;  /* Set by loader — physical core count for PHYS_FIRST */
 const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
-/* Map CPU ID -> Physical Core ID (0..nr_phys_cpus-1) — eliminates division in Gate 1c */
-const u32 cpu_phys_map[CAKE_MAX_CPUS] = {};
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * PER-CPU ARENA BLOCK: Unified mailbox + scratch (C1 spatial consolidation).
@@ -513,8 +511,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     {
         u8 mcd = per_cpu[prev_idx].mbox.migration_cooldown;
         if (mcd > 0) {
-            /* OPT: Map lookup eliminates division (16-30 cycles) */
-            u32 prev_phys = cpu_phys_map[(u32)prev_cpu & (CAKE_MAX_CPUS - 1)];
+            u32 prev_phys = (u32)prev_cpu % nr_phys_cpus;
             u32 half_base = prev_phys & ~3u;  /* 0 or 4 — single AND, no division */
             /* Scan physical cores in same half */
             #pragma unroll
@@ -744,8 +741,8 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
          * wakeups. 200µs floor prevents micro-slicing (Rule 9).
          * Sim: cuts render wait 82% vs full-slice re-enqueue. */
         requeue_slice >>= 1;
-        if (requeue_slice < CAKE_MIN_SLICE_NS)
-            requeue_slice = CAKE_MIN_SLICE_NS;
+        if (requeue_slice < 200000)
+            requeue_slice = 200000;
         u64 vtime = ((u64)requeue_tier << 56) | (now_fresh & 0x00FFFFFFFFFFFFFFULL);
         /* J6 V1: per-tier DSQ */
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + requeue_tier,
