@@ -382,6 +382,20 @@ impl<'a> Scheduler<'a> {
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
+
+            // Populate cpu_phys_map: Map CPU ID -> Physical Core Index (0..nr_phys_cpus-1)
+            // Eliminates runtime division in BPF Gate 1c.
+            let mut unique_core_ids: Vec<u8> = topo.cpu_core_id.iter().cloned().collect();
+            unique_core_ids.sort_unstable();
+            unique_core_ids.dedup();
+
+            for cpu in 0..64 {
+                let core_id = topo.cpu_core_id[cpu];
+                if let Ok(idx) = unique_core_ids.binary_search(&core_id) {
+                    rodata.cpu_phys_map[cpu] = idx as u32;
+                }
+            }
+
             // Arena library: nr_cpu_ids must be set before load() — arena_init
             // checks this and returns -ENODEV (errno 19) if uninitialized.
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;

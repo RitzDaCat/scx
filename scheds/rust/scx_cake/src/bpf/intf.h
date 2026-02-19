@@ -218,6 +218,7 @@ struct cake_stats {
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS         (2 * 1000 * 1000)   /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS  (8 * 1000 * 1000)   /* 8ms */
+#define CAKE_MIN_SLICE_NS               200000              /* 200us floor */
 
 
 /* Default tier arrays (Gaming profile) — 4 tiers */
