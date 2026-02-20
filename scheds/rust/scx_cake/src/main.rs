@@ -196,6 +196,28 @@ impl Profile {
             _ => None,
         }
     }
+
+    /// Classification thresholds in nanoseconds [T0_limit, T1_limit, T2_limit].
+    /// T0: < T0_limit
+    /// T1: < T1_limit
+    /// T2: < T2_limit
+    /// T3: >= T2_limit
+    fn classification_thresholds(&self, quantum_us: u64) -> [u64; 3] {
+        // T0 limit: critical latency tasks (IRQ, input).
+        // 100us is standard. Esports tighter (50us), Legacy looser (200us).
+        let t0 = match self {
+            Profile::Esports => 50_000,
+            Profile::Legacy | Profile::Battery => 200_000,
+            _ => 100_000,
+        };
+
+        // T1 limit: Interactive tasks. Should typically match 1x quantum.
+        // T2 limit: Frame tasks. Should typically match 4x quantum.
+        let t1 = quantum_us * 1000;
+        let t2 = t1 * 4;
+
+        [t0, t1, t2]
+    }
 }
 
 /// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
@@ -308,6 +330,53 @@ impl Args {
     }
 }
 
+/// Helper to generate the tier classification LUT with hysteresis
+fn generate_tier_lut(thresholds: [u64; 3]) -> [[u8; 512]; 4] {
+    let mut lut = [[0u8; 512]; 4];
+
+    // Thresholds: [T0_limit, T1_limit, T2_limit] (nanoseconds)
+    // Convert thresholds to bucket indices (avg_us >> TIER_LUT_SHIFT)
+    // bucket * 16 = avg_us => bucket = avg_ns / 16000
+    let to_bucket = |ns: u64| -> usize {
+        ((ns / 1000) >> bpf_intf::TIER_LUT_SHIFT) as usize
+    };
+
+    let g0_base = to_bucket(thresholds[0]);
+    let g1_base = to_bucket(thresholds[1]);
+    let g2_base = to_bucket(thresholds[2]);
+
+    // Hysteresis: 10% reduction for demotion protection applied when old_tier is higher.
+    let g0_hyst = (g0_base * 9) / 10;
+    let g1_hyst = (g1_base * 9) / 10;
+    let g2_hyst = (g2_base * 9) / 10;
+
+    // LUT generation logic matches C implementation:
+    // old_tier=0: gates at base
+    // old_tier=1: g0 lowered
+    // old_tier=2: g0, g1 lowered
+    // old_tier=3: g0, g1, g2 lowered
+
+    for old_tier in 0..4 {
+        let g0 = if old_tier > 0 { g0_hyst } else { g0_base };
+        let g1 = if old_tier > 1 { g1_hyst } else { g1_base };
+        let g2 = if old_tier > 2 { g2_hyst } else { g2_base };
+
+        for bucket in 0..512 {
+            if bucket < g0 {
+                lut[old_tier][bucket] = 0; // T0
+            } else if bucket < g1 {
+                lut[old_tier][bucket] = 1; // T1
+            } else if bucket < g2 {
+                lut[old_tier][bucket] = 2; // T2
+            } else {
+                lut[old_tier][bucket] = 3; // T3
+            }
+        }
+    }
+
+    lut
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     args: Args,
@@ -363,6 +432,13 @@ impl<'a> Scheduler<'a> {
             rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
             rodata.enable_stats = args.verbose;
             rodata.tier_configs = args.profile.tier_configs(quantum);
+
+            // Dynamic tuning constants
+            rodata.tier_classify_lut = generate_tier_lut(args.profile.classification_thresholds(quantum));
+            rodata.gate_conf_thresh = 8;
+            rodata.gate_conf_max = 8;
+            rodata.migration_cooldown_init = 4;
+            rodata.requeue_slice_floor_ns = 200_000;
 
             // P16: Pre-computed tier slices (single RODATA load vs multiply+shift)
             let multipliers = args.profile.tier_multiplier();

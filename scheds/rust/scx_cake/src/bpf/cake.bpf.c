@@ -17,6 +17,12 @@ const bool enable_stats	     = false;
 const bool enable_dvfs =
 	false; /* RODATA — loader-compat only (tick removed, DVFS dead) */
 
+/* Dynamic tuning constants (populated by loader) */
+const u8  gate_conf_thresh	 = CAKE_GATE_CONF_THRESH;
+const u8  gate_conf_max		 = CAKE_GATE_CONF_MAX;
+const u8  migration_cooldown_init = 4;
+const u64 requeue_slice_floor_ns  = 200000;
+
 /* Topology config - JIT eliminates unused P/E-core steering when has_hybrid=false */
 const bool has_hybrid = false;
 
@@ -213,11 +219,8 @@ static const u16 tier_recheck_mask[] = {
  *
  * BPF constraint: flat 2D array (no pointer indirection — BPF linker
  * rejects relocations against non-exec sections). */
-#define TIER_LUT_SHIFT 4
-#define TIER_LUT_ENTRIES 512
-#define TIER_LUT_CLAMP (TIER_LUT_ENTRIES - 1)
 
-static const u8 tier_classify_lut[4][TIER_LUT_ENTRIES]
+const u8 tier_classify_lut[4][TIER_LUT_ENTRIES]
     __attribute__((aligned(64))) = {
     /* old_tier=0: gates at 100, 2000, 8000 (standard) */
     [0] = {
@@ -357,7 +360,7 @@ get_task_ctx(struct task_struct *p)
  *      NO  → fall through to full read/write
  *
  *   2. Full path: read remote CL1, update confidence, maybe write.
- *      If confidence saturates (== CAKE_GATE_CONF_MAX) AND gate matches:
+ *      If confidence saturates (== gate_conf_max) AND gate matches:
  *        → cache locally for future skips: gr_cache[prev_cpu] = gate_id
  *      If gate changed:
  *        → invalidate local cache: gr_cache[prev_cpu] = 0xFF
@@ -373,7 +376,7 @@ get_task_ctx(struct task_struct *p)
 		u8 _pg = per_cpu[(idx)].mbox.predicted_gate;                               \
 		if (_pg == (gate_id)) {                                                    \
 			u8 _gc = per_cpu[(idx)].mbox.gate_confidence;                      \
-			if (_gc < CAKE_GATE_CONF_MAX) {                                    \
+			if (_gc < gate_conf_max) {                                         \
 				per_cpu[(idx)].mbox.gate_confidence = _gc + 1;             \
 			} else {                                                           \
 				/* Confidence saturated + gate matches: cache locally.   \
@@ -437,10 +440,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		u64 slice = p->scx.slice ?: quantum_ns;
 
 		/* Gate 1 hit — increment prediction counter.
-         * Saturate at 8 (CAKE_GATE_CONF_THRESH) to prevent unnecessary
+         * Saturate at 8 (gate_conf_thresh) to prevent unnecessary
          * cross-CPU RFO invalidations on stable assignments. */
 		u8 wsc = per_cpu[prev_idx].mbox.wakeup_same_cpu;
-		if (wsc < 8) {
+		if (wsc < gate_conf_thresh) {
 			u8 new_wsc			       = wsc + 1;
 			per_cpu[prev_idx].mbox.wakeup_same_cpu = new_wsc;
 		}
@@ -467,7 +470,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * Sim: -100% gate cascade jitter (P99-P50 → 0ns). */
 	{
 		u8 wsc = per_cpu[prev_idx].mbox.wakeup_same_cpu;
-		if (wsc >= 8) {
+		if (wsc >= gate_conf_thresh) {
 			per_cpu[prev_idx].mbox.wakeup_same_cpu = 0;
 			/* Use prev_cpu's LLC, not waker's — task predicted to run
              * on prev_cpu. Using waker's LLC would put it in the wrong
@@ -497,7 +500,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * BPF: forward goto only — verifier traces both paths. */
 	u8 _pred_gate = per_cpu[prev_idx].mbox.predicted_gate;
 	u8 _gate_conf = per_cpu[prev_idx].mbox.gate_confidence;
-	if (_gate_conf >= CAKE_GATE_CONF_THRESH) {
+	if (_gate_conf >= gate_conf_thresh) {
 		switch (_pred_gate) {
 		case CAKE_GATE_2:
 			goto gate_2_entry;
@@ -518,8 +521,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * CL1 of mailbox[prev_idx] already hot from WSC access above. */
 	/* MESI GUARD (Rule 11): skip write if already at target value.
      * Avoids ~4.5K unnecessary RFOs/s on CL1 when cooldown is already 4. */
-	if (per_cpu[prev_idx].mbox.migration_cooldown != 4)
-		per_cpu[prev_idx].mbox.migration_cooldown = 4;
+	if (per_cpu[prev_idx].mbox.migration_cooldown != migration_cooldown_init)
+		per_cpu[prev_idx].mbox.migration_cooldown = migration_cooldown_init;
 
 	/* ── GATE 1b: SMT sibling fallback — L2 still warm ──
      * When prev_cpu is busy, try its SMT sibling before Gate 2's full scan.
@@ -948,8 +951,8 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
          * wakeups. 200µs floor prevents micro-slicing (Rule 9).
          * Sim: cuts render wait 82% vs full-slice re-enqueue. */
 		requeue_slice >>= 1;
-		if (requeue_slice < 200000)
-			requeue_slice = 200000;
+		if (requeue_slice < requeue_slice_floor_ns)
+			requeue_slice = requeue_slice_floor_ns;
 		u64 vtime = ((u64)requeue_tier << 56) |
 			    (now_cached & 0x00FFFFFFFFFFFFFFULL);
 		/* Single DSQ per LLC */

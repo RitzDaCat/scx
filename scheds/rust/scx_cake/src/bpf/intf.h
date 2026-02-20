@@ -257,6 +257,11 @@ struct cake_stats {
 #define CAKE_DEFAULT_WAIT_BUDGET_T2 8000000 /* Frame: 8ms */
 #define CAKE_DEFAULT_WAIT_BUDGET_T3 0 /* Bulk: no limit */
 
+/* Tier Classification LUT parameters */
+#define TIER_LUT_SHIFT 4
+#define TIER_LUT_ENTRIES 512
+#define TIER_LUT_CLAMP (TIER_LUT_ENTRIES - 1)
+
 /* Fused tier config - packs 4 params into 64-bit: [Mult:12][Quantum:16][Budget:16][Starve:20] */
 typedef u64 fused_config_t;
 
