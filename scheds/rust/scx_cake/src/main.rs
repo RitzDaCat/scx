@@ -337,9 +337,7 @@ fn generate_tier_lut(thresholds: [u64; 3]) -> [[u8; 512]; 4] {
     // Thresholds: [T0_limit, T1_limit, T2_limit] (nanoseconds)
     // Convert thresholds to bucket indices (avg_us >> TIER_LUT_SHIFT)
     // bucket * 16 = avg_us => bucket = avg_ns / 16000
-    let to_bucket = |ns: u64| -> usize {
-        ((ns / 1000) >> bpf_intf::TIER_LUT_SHIFT) as usize
-    };
+    let to_bucket = |ns: u64| -> usize { ((ns / 1000) >> bpf_intf::TIER_LUT_SHIFT) as usize };
 
     let g0_base = to_bucket(thresholds[0]);
     let g1_base = to_bucket(thresholds[1]);
@@ -434,7 +432,8 @@ impl<'a> Scheduler<'a> {
             rodata.tier_configs = args.profile.tier_configs(quantum);
 
             // Dynamic tuning constants
-            rodata.tier_classify_lut = generate_tier_lut(args.profile.classification_thresholds(quantum));
+            rodata.tier_classify_lut =
+                generate_tier_lut(args.profile.classification_thresholds(quantum));
             rodata.gate_conf_thresh = 8;
             rodata.gate_conf_max = 8;
             rodata.migration_cooldown_init = 4;
