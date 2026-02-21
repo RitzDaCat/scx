@@ -232,6 +232,11 @@ struct cake_stats {
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS (2 * 1000 * 1000) /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (8 * 1000 * 1000) /* 8ms */
+#define CAKE_MIN_SLICE_NS 200000 /* 200us */
+#define CAKE_PRIO_NICE_0 120 /* Default nice 0 priority */
+#define CAKE_PRIO_NICE_10 130 /* Nice 10 priority */
+#define CAKE_MIGRATION_COOLDOWN 4 /* Number of wakeups before allowing far migration */
+#define CAKE_MAX_RT_US 65535 /* Max tracked runtime in microseconds (UINT16_MAX) */
 
 /* Default tier arrays (Gaming profile) — 4 tiers */
 

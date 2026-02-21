@@ -188,12 +188,17 @@ const u64 tier_slice_ns[8] = { 0 };
 /* Per-tier graduated backoff recheck masks (RODATA)
  * Lower tiers (more stable) recheck less often.
  * Tighter masks catch tier transitions 5× faster with lower net cost. */
+#define TIER_RECHECK_T0 255
+#define TIER_RECHECK_T1 63
+#define TIER_RECHECK_T2 15
+#define TIER_RECHECK_T3 7
+
 static const u16 tier_recheck_mask[] = {
-	255, /* T0: every 256th stop (was 1024 — over-skipped) */
-	63, /* T1: every 64th   (was 128) */
-	15, /* T2: every 16th   (was 32)  */
-	7, /* T3: every 8th    (was 16)  */
-	7,   7, 7, 7, /* padding */
+	TIER_RECHECK_T0, /* T0: every 256th stop (was 1024 — over-skipped) */
+	TIER_RECHECK_T1, /* T1: every 64th   (was 128) */
+	TIER_RECHECK_T2, /* T2: every 16th   (was 32)  */
+	TIER_RECHECK_T3, /* T3: every 8th    (was 16)  */
+	TIER_RECHECK_T3, TIER_RECHECK_T3, TIER_RECHECK_T3, TIER_RECHECK_T3, /* padding */
 };
 
 /* Tier classification LUT: pre-baked hysteresis-aware tier mapping.
@@ -279,7 +284,7 @@ compute_ewma_classify(u64 tick_slice, u64 remaining_slice, u16 old_avg,
 	struct ewma_result r;
 	/* slice-delta runtime (zero kfuncs) */
 	u32 rt_raw  = (u32)(tick_slice - remaining_slice);
-	u32 _max_rt = 65535U << 10;
+	u32 _max_rt = CAKE_MAX_RT_US << 10;
 	rt_raw -= (rt_raw - _max_rt) & -(rt_raw > _max_rt);
 	r.rt_us = (u16)(rt_raw >> 10);
 	/* EWMA: 7/8 old + 1/8 new */
@@ -517,9 +522,9 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * decrements and Gate 1c will try nearby CPUs before Gate 2.
      * CL1 of mailbox[prev_idx] already hot from WSC access above. */
 	/* MESI GUARD (Rule 11): skip write if already at target value.
-     * Avoids ~4.5K unnecessary RFOs/s on CL1 when cooldown is already 4. */
-	if (per_cpu[prev_idx].mbox.migration_cooldown != 4)
-		per_cpu[prev_idx].mbox.migration_cooldown = 4;
+     * Avoids ~4.5K unnecessary RFOs/s on CL1 when cooldown is already CAKE_MIGRATION_COOLDOWN. */
+	if (per_cpu[prev_idx].mbox.migration_cooldown != CAKE_MIGRATION_COOLDOWN)
+		per_cpu[prev_idx].mbox.migration_cooldown = CAKE_MIGRATION_COOLDOWN;
 
 	/* ── GATE 1b: SMT sibling fallback — L2 still warm ──
      * When prev_cpu is busy, try its SMT sibling before Gate 2's full scan.
@@ -945,11 +950,11 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		/* STOLEN SLICE: Re-enqueued tasks (slice exhaust, yield) get 50%
          * of their normal slice. Forces compilation workers to release
          * CPUs 2x faster, creating more idle windows for fresh game
-         * wakeups. 200µs floor prevents micro-slicing (Rule 9).
+         * wakeups. CAKE_MIN_SLICE_NS floor prevents micro-slicing (Rule 9).
          * Sim: cuts render wait 82% vs full-slice re-enqueue. */
 		requeue_slice >>= 1;
-		if (requeue_slice < 200000)
-			requeue_slice = 200000;
+		if (requeue_slice < CAKE_MIN_SLICE_NS)
+			requeue_slice = CAKE_MIN_SLICE_NS;
 		u64 vtime = ((u64)requeue_tier << 56) |
 			    (now_cached & 0x00FFFFFFFFFFFFFFULL);
 		/* Single DSQ per LLC */
@@ -1443,20 +1448,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	/* MULTI-SIGNAL INITIAL CLASSIFICATION (moved from alloc_task_ctx_cold)
      *
      * Signal 1: Nice value (u32 field read, ~2 cycles)
-     *   - nice < 0 (prio < 120): OS/user explicitly prioritized → T0
-     *   - nice > 10 (prio > 130): explicitly deprioritized → T3
+     *   - nice < 0 (prio < CAKE_PRIO_NICE_0): OS/user explicitly prioritized → T0
+     *   - nice > 10 (prio > CAKE_PRIO_NICE_10): explicitly deprioritized → T3
      *   - nice 0-10: default → T1, avg_runtime adjusts naturally
      *
      * R1 sum-of-cmp: branchless non-monotonic mapping.
-     * (prio >= 120) = 0 for negative nice (→ CRITICAL=0), 1 for default (→ INTERACT=1)
-     * (prio > 130) * 2 = 0 for normal, 2 for high nice (1+2 = BULK=3) */
+     * (prio >= CAKE_PRIO_NICE_0) = 0 for negative nice (→ CRITICAL=0), 1 for default (→ INTERACT=1)
+     * (prio > CAKE_PRIO_NICE_10) * 2 = 0 for normal, 2 for high nice (1+2 = BULK=3) */
 	u16 init_deficit	= (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
 	tctx->deficit_avg_fused = PACK_DEFICIT_AVG(init_deficit, 0);
 	tctx->last_run_at	= 0;
 	tctx->reclass_counter	= 0;
 
 	u32 prio		= p->static_prio;
-	u8  init_tier		= (prio >= 120) + (prio > 130) * 2;
+	u8  init_tier		= (prio >= CAKE_PRIO_NICE_0) + (prio > CAKE_PRIO_NICE_10) * 2;
 
 	u32 packed		= 0;
 	/* Fused TIER+FLAGS: bits [29:24] = [tier:2][flags:4] (Rule 37 coalescing) */
