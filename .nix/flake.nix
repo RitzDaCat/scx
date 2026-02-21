@@ -219,6 +219,7 @@
               virtme-ng
 
               elfutils.dev
+              libelf
               zlib.dev
               zstd.dev
 
