@@ -4,8 +4,6 @@
 #ifndef __CAKE_INTF_H
 #define __CAKE_INTF_H
 
-#include <limits.h>
-
 /* Type defs for BPF/userspace compat - defined when vmlinux.h is not included */
 #ifndef __VMLINUX_H__
 typedef unsigned char  u8;
