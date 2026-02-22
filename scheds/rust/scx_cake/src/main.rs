@@ -43,7 +43,7 @@ pub enum Profile {
     Gaming,
     /// Balanced profile for general desktop use (same as gaming for now)
     Default,
-    /// Power-efficient profile for handhelds/laptops on battery (DVFS enabled)
+    /// Power-efficient profile for handhelds/laptops on battery
     Battery,
 }
 
@@ -176,26 +176,6 @@ impl Profile {
         }
         configs
     }
-
-    /// DVFS enabled — only Battery profile activates frequency steering
-    fn dvfs_enabled(&self) -> bool {
-        matches!(self, Profile::Battery)
-    }
-
-    /// DVFS per-tier CPU performance targets (SCX_CPUPERF_ONE = 1024 = max)
-    /// Returns None for profiles that don't use DVFS.
-    fn dvfs_targets(&self) -> Option<[u32; 8]> {
-        match self {
-            Profile::Battery => Some([
-                1024, // T0 Critical: 100% — IRQ, input, audio (never throttle)
-                896,  // T1 Interactive: 87.5% — compositor, physics
-                768,  // T2 Frame: 75% — game render (P ∝ V²f savings)
-                512,  // T3 Bulk: 50% — background tasks at half speed
-                512, 512, 512, 512, // Padding
-            ]),
-            _ => None,
-        }
-    }
 }
 
 /// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
@@ -243,8 +223,7 @@ struct Args {
     ///   - Currently same as gaming; will diverge in future versions
     ///
     /// BATTERY: Power-efficient for handhelds/laptops on battery.
-    ///   - Quantum: 4000µs, DVFS enabled, per-tier frequency scaling
-    ///   - T0: 100%, T1: 87.5%, T2: 75%, T3: 50%
+    ///   - Quantum: 4000µs, optimized for power efficiency
     #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
     profile: Profile,
 
@@ -373,13 +352,63 @@ impl<'a> Scheduler<'a> {
             }
             rodata.tier_slice_ns = slices;
 
-            // DVFS: Battery profile enables per-tier CPU frequency steering
-            rodata.enable_dvfs = args.profile.dvfs_enabled();
-            if let Some(targets) = args.profile.dvfs_targets() {
-                rodata.tier_perf_target = targets;
+            // Calculate Dynamic LUT shift based on max T2 wait budget
+            let budgets = args.profile.wait_budget();
+            let max_budget = budgets[2]; // T2 threshold (transition to T3)
+            // We need 512 * (1 << shift) >= max_budget to cover the full range
+            let mut shift = 0;
+            while (512u64 << shift) < max_budget {
+                shift += 1;
             }
+            // Clamp shift to minimum 4 (16us) to maintain resolution
+            if shift < 4 {
+                shift = 4;
+            }
+            rodata.tier_lut_shift = shift;
 
-            // Topology: has_hybrid enables P/E-core DVFS scaling in cake_tick
+            // Populate Tier Classification LUT with hysteresis
+            let mut lut = [[0u8; 512]; 4];
+            for old_tier in 0..4 {
+                // Hysteresis logic:
+                // old_tier 0: standard thresholds
+                // old_tier 1: T0 threshold lowered 10%
+                // old_tier 2: T0, T1 thresholds lowered 10%
+                // old_tier 3: T0, T1, T2 thresholds lowered 10%
+                let mut thresholds = [
+                    budgets[0], // T0 boundary
+                    budgets[1], // T1 boundary
+                    budgets[2], // T2 boundary
+                ];
+
+                if old_tier >= 1 {
+                    thresholds[0] = thresholds[0] * 9 / 10;
+                }
+                if old_tier >= 2 {
+                    thresholds[1] = thresholds[1] * 9 / 10;
+                }
+                if old_tier >= 3 {
+                    thresholds[2] = thresholds[2] * 9 / 10;
+                }
+
+                for i in 0..512 {
+                    let runtime = (i as u64) << shift;
+                    if runtime < thresholds[0] {
+                        lut[old_tier][i] = 0; // T0
+                    } else if runtime < thresholds[1] {
+                        lut[old_tier][i] = 1; // T1
+                    } else if runtime < thresholds[2] {
+                        lut[old_tier][i] = 2; // T2
+                    } else {
+                        lut[old_tier][i] = 3; // T3
+                    }
+                }
+            }
+            rodata.tier_classify_lut = lut;
+
+            // Populate Recheck Masks (currently static values, moved to .rodata)
+            rodata.tier_recheck_mask = [255, 63, 15, 7, 7, 7, 7, 7];
+
+            // Topology: has_hybrid enables P/E-core steering optimization
             rodata.has_hybrid = topo.has_hybrid_cores;
 
             // Per-LLC DSQ partitioning: populate CPU→LLC mapping

@@ -14,8 +14,6 @@ char _license[] SEC("license") = "GPL";
 const u64  quantum_ns	     = CAKE_DEFAULT_QUANTUM_NS;
 const u64  new_flow_bonus_ns = CAKE_DEFAULT_NEW_FLOW_BONUS_NS;
 const bool enable_stats	     = false;
-const bool enable_dvfs =
-	false; /* RODATA — loader-compat only (tick removed, DVFS dead) */
 
 /* Topology config - JIT eliminates unused P/E-core steering when has_hybrid=false */
 const bool has_hybrid = false;
@@ -188,13 +186,7 @@ const u64 tier_slice_ns[8] = { 0 };
 /* Per-tier graduated backoff recheck masks (RODATA)
  * Lower tiers (more stable) recheck less often.
  * Tighter masks catch tier transitions 5× faster with lower net cost. */
-static const u16 tier_recheck_mask[] = {
-	255, /* T0: every 256th stop (was 1024 — over-skipped) */
-	63, /* T1: every 64th   (was 128) */
-	15, /* T2: every 16th   (was 32)  */
-	7, /* T3: every 8th    (was 16)  */
-	7,   7, 7, 7, /* padding */
-};
+const u16 tier_recheck_mask[8] = { 0 };
 
 /* Tier classification LUT: pre-baked hysteresis-aware tier mapping.
  * 4 old_tiers × 512 entries = 2KB RODATA. Indexed by [old_tier][new_avg >> 4].
@@ -217,37 +209,11 @@ static const u16 tier_recheck_mask[] = {
 #define TIER_LUT_ENTRIES 512
 #define TIER_LUT_CLAMP (TIER_LUT_ENTRIES - 1)
 
-static const u8 tier_classify_lut[4][TIER_LUT_ENTRIES]
-    __attribute__((aligned(64))) = {
-    /* old_tier=0: gates at 100, 2000, 8000 (standard) */
-    [0] = {
-        [0 ... 5]     = 0,   /* 0-80µs   → T0 */
-        [6 ... 124]   = 1,   /* 96-1984µs → T1 */
-        [125 ... 499] = 2,   /* 2000-7984µs → T2 */
-        [500 ... 511] = 3,   /* 8000+µs → T3 */
-    },
-    /* old_tier=1: gates at 90, 2000, 8000 (g0 lowered 10%) */
-    [1] = {
-        [0 ... 4]     = 0,   /* 0-64µs   → T0 */
-        [5 ... 124]   = 1,   /* 80-1984µs → T1 */
-        [125 ... 499] = 2,   /* 2000-7984µs → T2 */
-        [500 ... 511] = 3,   /* 8000+µs → T3 */
-    },
-    /* old_tier=2: gates at 90, 1800, 8000 (g0,g1 lowered 10%) */
-    [2] = {
-        [0 ... 4]     = 0,   /* 0-64µs   → T0 */
-        [5 ... 111]   = 1,   /* 80-1776µs → T1 */
-        [112 ... 499] = 2,   /* 1792-7984µs → T2 */
-        [500 ... 511] = 3,   /* 8000+µs → T3 */
-    },
-    /* old_tier=3: gates at 90, 1800, 7200 (all lowered 10%) */
-    [3] = {
-        [0 ... 4]     = 0,   /* 0-64µs   → T0 */
-        [5 ... 111]   = 1,   /* 80-1776µs → T1 */
-        [112 ... 449] = 2,   /* 1792-7184µs → T2 */
-        [450 ... 511] = 3,   /* 7200+µs → T3 */
-    },
-};
+/* Dynamic LUT shift (populated by loader) */
+const u32 tier_lut_shift = TIER_LUT_SHIFT;
+
+const u8 tier_classify_lut[4][TIER_LUT_ENTRIES]
+    __attribute__((aligned(64))) = { 0 };
 
 /* Inline helper: hysteresis-aware tier classification via LUT.
  * Replaces: (new_avg >= g0) + (new_avg >= g1) + (new_avg >= g2)
@@ -255,7 +221,7 @@ static const u8 tier_classify_lut[4][TIER_LUT_ENTRIES]
  * = ~5 instructions, ZERO branches (vs 9 instructions, 3 branches) */
 static __always_inline u8 classify_tier_lut(u8 old_tier, u16 new_avg)
 {
-	u32 bucket = new_avg >> TIER_LUT_SHIFT;
+	u32 bucket = new_avg >> tier_lut_shift;
 	if (bucket > TIER_LUT_CLAMP)
 		bucket = TIER_LUT_CLAMP;
 	return tier_classify_lut[old_tier & 3][bucket];
@@ -1041,12 +1007,6 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 			return;
 	}
 }
-
-/* DVFS RODATA: unused by BPF (tick removed) but written by Rust loader.
- * Kept to prevent loader panic on missing RODATA symbol. JIT dead-code eliminates. */
-const u32 tier_perf_target[8] = {
-	1024, 1024, 1024, 768, 768, 768, 768, 768,
-};
 
 /* ZERO bpf_task_storage_get: stamp the currently-running task's data into
  * the per-CPU mega_mailbox. cake_stopping reads from the SAME cache line.
