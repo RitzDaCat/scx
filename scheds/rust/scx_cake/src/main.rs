@@ -354,8 +354,9 @@ impl<'a> Scheduler<'a> {
 
             // Calculate Dynamic LUT shift based on max T2 wait budget
             let budgets = args.profile.wait_budget();
-            let max_budget = budgets[2]; // T2 threshold (transition to T3)
-            // We need 512 * (1 << shift) >= max_budget to cover the full range
+            // T2 threshold (transition to T3)
+            let max_budget = budgets[2];
+                                         // We need 512 * (1 << shift) >= max_budget to cover the full range
             let mut shift = 0;
             while (512u64 << shift) < max_budget {
                 shift += 1;
