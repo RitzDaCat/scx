@@ -356,7 +356,7 @@ impl<'a> Scheduler<'a> {
             let budgets = args.profile.wait_budget();
             // T2 threshold (transition to T3)
             let max_budget = budgets[2];
-                                         // We need 512 * (1 << shift) >= max_budget to cover the full range
+            // We need 512 * (1 << shift) >= max_budget to cover the full range
             let mut shift = 0;
             while (512u64 << shift) < max_budget {
                 shift += 1;
