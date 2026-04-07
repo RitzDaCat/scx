@@ -45,6 +45,91 @@ const STEAM_INFRA: &[&str] = &[
     "reaper",
 ];
 
+/// Container/wrapper processes that host games but don't have .exe in their own cmdline.
+/// When matched, `has_exe_cmdline` scans their children instead.
+const CONTAINER_WRAPPERS: &[&str] = &["systemd", "pv-adverb", "srt-bwrap"];
+
+/// Known launcher and helper process basenames — never the actual game.
+/// Matched as substrings against the lowercased comm.
+const LAUNCHER_INFRA: &[&str] = &[
+    // Windows system / Wine processes
+    "services",
+    "winedevice",
+    "svchost",
+    "plugplay",
+    "explorer",
+    "rpcss",
+    "tabtip",
+    "wineboot",
+    "conhost",
+    "taskmgr",
+    "xalia",
+    // Ubisoft Connect / Uplay
+    "ubisoftconnect",
+    "ubisoftgamelauncher",
+    "upc",
+    "uplay",
+    "uplaywebcore",
+    "uplayservice",
+    // EA Desktop / Origin
+    "eadesktop",
+    "ealauncher",
+    "eabackgroundservice",
+    "eaconnect",
+    "eacrashreporter",
+    "eagep",
+    "ealaunchhelper",
+    "eastreamproxy",
+    "eauninstall",
+    "errorreporter",
+    "getgametoken",
+    "igoproxy",
+    "linkea",
+    "origin",
+    "originlegacycompatibility",
+    // Epic Games Launcher
+    "epicgameslauncher",
+    "epicwebhelper",
+    "epiconline",
+    // Game-specific launchers
+    "armalauncher",
+    "redprelauncher",
+    "dayzlauncher",
+    "squad_launcher",
+    "wowslauncher",
+    "launcher", // Rockstar, etc.
+    // Crash handlers / utilities
+    "crashhandler",
+    "crashpad_handler",
+    "crashreportclient",
+    "unitycrashhandler",
+    // Chromium-based launcher renderers
+    "crgpu",
+    "crutility",
+    // Desktop shells — can appear as siblings under systemd --user
+    "plasmashell",   // KDE
+    "kwin_wayland",  // KDE Wayland
+    "kwin_x11",      // KDE X11
+    "kwin",          // KDE (generic)
+    "gnome-shell",   // GNOME
+    "mutter",        // GNOME window manager
+    "sway",          // Sway (Wayland)
+    "hyprland",      // Hyprland (Wayland)
+    "weston",        // Weston reference compositor
+    "river",         // River (Wayland)
+    "labwc",         // Labwc (Wayland)
+    "wayfire",       // Wayfire (Wayland)
+    "xfdesktop",     // XFCE desktop
+    "xfwm4",         // XFCE window manager
+    "xfce4-panel",   // XFCE panel
+    "xfce4-session", // XFCE session manager
+    "cinnamon",      // Cinnamon desktop
+    "mate-panel",    // MATE desktop
+    "compiz",        // Compiz window manager
+    "picom",         // Standalone compositor
+    "wlroots",       // Generic wlroots compositor
+];
+
 /// Known compiler binary names for COMPILATION state detection.
 /// Require ≥2 actively running to avoid false positives from
 /// transient ld/as invocations or idle IDE processes.
@@ -79,6 +164,8 @@ pub struct GameDetector {
     pub challenger_ppid: u32,
     pub challenger_since: Option<Instant>,
     pub stable_polls: u32,
+    /// Which detection path locked the game: "steam" or "exe".
+    pub detect_path: &'static str,
     /// Reusable buffer for PPID aggregation — avoids per-poll heap allocation.
     /// Sorted in-place each poll; run-counting replaces HashMap<u32, usize>.
     ppid_buf: Vec<u32>,
@@ -274,15 +361,87 @@ fn read_acf_name(appid: u32, extra_lib: Option<String>) -> Option<String> {
     None
 }
 
-/// Check if a process has a .exe in its cmdline (Wine/Proton game).
-fn has_exe_cmdline(pid: u32) -> bool {
-    if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
-        cmdline
-            .split(|&b| b == 0)
-            .filter_map(|arg| std::str::from_utf8(arg).ok())
-            .any(|s| s.to_lowercase().ends_with(".exe"))
+/// Check if the PPID (or its children, if it's a wrapper) has a game .exe in cmdline.
+/// For wrappers like systemd --user, scans children to find the actual game .exe.
+/// For normal PPIDs, only checks the PPID's own cmdline (cheap, no extra reads).
+/// Filters out launcher and Windows system processes.
+fn has_exe_cmdline(ppid: u32, entries: &[ProcEntry]) -> bool {
+    // Check if this PPID is a known container/wrapper that won't have .exe itself.
+    // Wine/Proton games may sometimes be reparented to systemd (or similar init processes)
+    // after the launcher exits. Without this guard, systemd would match as a "game"
+    // because it hosts many children with .exe in their cmdline.
+    let is_wrapper = entries.iter().any(|e| {
+        e.pid == ppid
+            && CONTAINER_WRAPPERS
+                .iter()
+                .any(|&w| e.comm.to_lowercase().contains(w))
+    });
+
+    if is_wrapper {
+        // Quick guard: at least one child must have WINEPREFIX= in environ.
+        // Prevents matching systemd when it hosts non-game .exe processes.
+        // TODO: could narrow further to STEAM_COMPAT_DATA_PATH= or GAMEID=
+        // for more specific Proton/Heroic detection.
+        let has_proton_child = entries.iter().any(|e| {
+            if e.ppid != ppid {
+                return false;
+            }
+            let c = e.comm.to_lowercase();
+            if STEAM_INFRA.iter().any(|&s| c.contains(s)) {
+                return false;
+            }
+            if let Ok(env) = std::fs::read(format!("/proc/{}/environ", e.pid)) {
+                env.windows(b"WINEPREFIX=".len())
+                    .any(|w| w == b"WINEPREFIX=")
+            } else {
+                false
+            }
+        });
+        if !has_proton_child {
+            return false;
+        }
+        entries.iter().any(|e| {
+            if e.ppid != ppid {
+                return false;
+            }
+            if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", e.pid)) {
+                cmdline
+                    .split(|&b| b == 0)
+                    .filter_map(|arg| std::str::from_utf8(arg).ok())
+                    .any(|s| {
+                        let lower = s.to_lowercase();
+                        if !lower.ends_with(".exe") {
+                            return false;
+                        }
+                        let basename = lower.rsplit(['\\', '/']).next().unwrap_or(&lower);
+                        !LAUNCHER_INFRA.iter().any(|&infra| basename.contains(infra))
+                    })
+            } else {
+                false
+            }
+        })
     } else {
-        false
+        // Normal PPID — check its own cmdline only (single file read).
+        entries.iter().any(|e| {
+            if e.pid != ppid {
+                return false;
+            }
+            if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", e.pid)) {
+                cmdline
+                    .split(|&b| b == 0)
+                    .filter_map(|arg| std::str::from_utf8(arg).ok())
+                    .any(|s| {
+                        let lower = s.to_lowercase();
+                        if !lower.ends_with(".exe") {
+                            return false;
+                        }
+                        let basename = lower.rsplit(['\\', '/']).next().unwrap_or(&lower);
+                        !LAUNCHER_INFRA.iter().any(|&infra| basename.contains(infra))
+                    })
+            } else {
+                false
+            }
+        })
     }
 }
 
@@ -334,12 +493,23 @@ fn resolve_game(ppid: u32, entries: &[ProcEntry]) -> (u32, String) {
     let mut best_pid: u32 = ppid;
     let mut best_threads: u32 = 0;
     for e in entries {
-        if descendants.contains(&e.pid) {
-            let threads = read_thread_count(e.pid);
-            if threads > best_threads {
-                best_threads = threads;
-                best_pid = e.pid;
-            }
+        if !descendants.contains(&e.pid) {
+            continue;
+        }
+        // Skip launcher and desktop infrastructure — Chromium-based launchers
+        // (UplayWebCore, EpicWebHelper) and desktop shells (plasmashell, kwin)
+        // easily have more threads than the actual game.
+        let comm_lower = e.comm.to_lowercase();
+        if LAUNCHER_INFRA
+            .iter()
+            .any(|&infra| comm_lower.contains(infra))
+        {
+            continue;
+        }
+        let threads = read_thread_count(e.pid);
+        if threads > best_threads {
+            best_threads = threads;
+            best_pid = e.pid;
         }
     }
 
@@ -415,6 +585,7 @@ impl GameDetector {
             challenger_ppid: 0,
             challenger_since: None,
             stable_polls: 0,
+            detect_path: "none",
             ppid_buf: Vec::with_capacity(512),
             uid: detect_real_uid(),
             verbose,
@@ -494,11 +665,12 @@ impl GameDetector {
         // into the true game engine before printing to the terminal.
         if !self.verbose && self.tracked_game_tgid > 0 && self.stable_polls == 10 {
             info!(
-                "Game detected: {} (PID {}, PPID {}, conf {})",
+                "Game detected: {} (PID {}, PPID {}, conf {}) via {}",
                 self.game_name,
                 self.tracked_game_tgid,
                 self.tracked_game_ppid,
-                self.game_confidence
+                self.game_confidence,
+                self.detect_path
             );
         }
 
@@ -570,7 +742,7 @@ impl GameDetector {
             }
         }
 
-        // ─── Phase 2: .exe scan (Wine without Steam — Heroic, Lutris, etc.) ───
+        // ─── Phase 2: .exe scan (Wine without Steam — Lutris, Faugus, etc.) ───
         let mut exe_ppid: u32 = 0;
         if steam_ppid == 0 {
             let mut i = 0;
@@ -581,7 +753,7 @@ impl GameDetector {
                     i += 1;
                 }
                 let child_count = i - run_start;
-                if child_count >= GAME_MIN_CHILDREN && has_exe_cmdline(ppid) {
+                if child_count >= GAME_MIN_CHILDREN && has_exe_cmdline(ppid, entries) {
                     exe_ppid = ppid;
                     break;
                 }
@@ -642,6 +814,11 @@ impl GameDetector {
                         // Wait for self.stable_polls == 10 to announce.
                         self.tracked_game_ppid = new_game_ppid;
                         self.game_confidence = new_game_confidence;
+                        self.detect_path = if new_game_ppid == steam_ppid {
+                            "steam"
+                        } else {
+                            "exe"
+                        };
                         self.challenger_ppid = 0;
                         self.challenger_since = None;
                         self.stable_polls = 1;
@@ -685,6 +862,11 @@ impl GameDetector {
                     // Wait for self.stable_polls == 10 to announce.
                     self.tracked_game_ppid = new_game_ppid;
                     self.game_confidence = new_game_confidence;
+                    self.detect_path = if new_game_ppid == steam_ppid {
+                        "steam"
+                    } else {
+                        "exe"
+                    };
                     self.challenger_ppid = 0;
                     self.challenger_since = None;
                     self.stable_polls = 1;
