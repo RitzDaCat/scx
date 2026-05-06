@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: GPL-2.0
-// scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
+// scx_cake - CAKE-inspired sched_ext scheduler for low-latency CPU scheduling
 
+mod dump_compare;
+#[cfg(debug_assertions)]
+mod task_anatomy;
+mod telemetry_report;
 mod topology;
+mod trust;
 mod tui;
 
 use core::sync::atomic::Ordering;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use log::{info, warn};
+use log::info;
 
+#[cfg(cake_needs_arena)]
 use scx_arena::ArenaLib;
 use scx_utils::build_id;
 use scx_utils::UserExitInfo;
+#[cfg(cake_needs_arena)]
 use scx_utils::NR_CPU_IDS;
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -36,123 +44,307 @@ const SCHEDULER_NAME: &str = "scx_cake";
 /// Scheduler profile presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Profile {
-    /// Ultra-low-latency for competitive esports (1ms quantum)
+    /// Ultra-low-latency for competitive esports (750us quantum)
     Esports,
-    /// Optimized for older/lower-power hardware (4ms quantum)
-    Legacy,
     /// Low-latency profile optimized for gaming and interactive workloads
     Gaming,
-    /// Balanced profile for general desktop use (same as gaming for now)
-    Default,
-    /// Power-efficient profile for handhelds/laptops on battery (DVFS enabled)
-    Battery,
+    /// Balanced profile for general desktop use
+    Balanced,
+    /// Optimized for older/lower-power hardware (4ms quantum)
+    Legacy,
 }
 
 impl Profile {
-    /// Returns (quantum_us, new_flow_bonus_us, starvation_us)
-    fn values(&self) -> (u64, u64, u64) {
+    #[cfg(not(cake_bpf_release))]
+    fn quantum_us(&self) -> u64 {
         match self {
-            // Esports: Ultra-aggressive, 1ms quantum for maximum responsiveness
-            Profile::Esports => (1000, 4000, 50000),
-            // Legacy: High efficiency, 4ms quantum to reduce overhead on older CPUs
-            Profile::Legacy => (4000, 12000, 200000),
-            // Gaming: Aggressive latency, 2ms quantum
-            Profile::Gaming => (2000, 8000, 100000),
-            // Default: Same as gaming for now
-            Profile::Default => (2000, 8000, 100000),
-            // Battery: 4ms quantum — fewer context switches = less power
-            Profile::Battery => (4000, 12000, 200000),
+            Profile::Esports => 750,
+            Profile::Gaming => 1000,
+            Profile::Balanced => 2000,
+            Profile::Legacy => 4000,
         }
     }
 
-    // DVFS — disabled (tick architecture removed, no runtime effect).
-    // RODATA symbols retained in BPF for loader compat; JIT eliminates.
+    #[cfg(not(cake_bpf_release))]
+    fn as_str(&self) -> &'static str {
+        match self {
+            Profile::Esports => "esports",
+            Profile::Gaming => "gaming",
+            Profile::Balanced => "balanced",
+            Profile::Legacy => "legacy",
+        }
+    }
+
+    // Older DVFS controls were removed. Profiles currently only select quantum.
 }
 
-/// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BusyWakeKickMode {
+    /// Use Cake's owner-runtime pressure policy.
+    Policy = 0,
+    /// Always preempt on same-CPU busy wakeups.
+    Preempt = 1,
+    /// Always use an idle kick on same-CPU busy wakeups.
+    Idle = 2,
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum QueuePolicy {
+    /// 1.1.1 local-first fallback policy retained for A/B testing.
+    Local = 0,
+    /// Default per-LLC vtime fallback queues similar to the 1.1.0 queue shape.
+    LlcVtime = 1,
+}
+
+impl QueuePolicy {
+    #[cfg(not(cake_bpf_release))]
+    fn as_str(&self) -> &'static str {
+        match self {
+            QueuePolicy::Local => "local",
+            QueuePolicy::LlcVtime => "llc-vtime",
+        }
+    }
+}
+
+const LLC_DSQ_BASE: u64 = 200;
+const CPU_FAST_SCAN_SLOTS: usize = 4;
+const CPU_FAST_PROBE_SLOTS: usize = 4;
+const CPU_META_PRIMARY: u64 = 1u64 << 48;
+const CPU_META_SMT: u64 = 1u64 << 49;
+
+#[inline]
+fn pack_cpu_meta(
+    sibling_cpu: u16,
+    primary_cpu: u16,
+    llc_id: u32,
+    core_id: u32,
+    is_primary: bool,
+    has_smt_sibling: bool,
+) -> u64 {
+    let mut meta = (u64::from(sibling_cpu) & 0xffff)
+        | ((u64::from(primary_cpu) & 0xffff) << 16)
+        | ((u64::from(llc_id) & 0xff) << 32)
+        | ((u64::from(core_id) & 0xff) << 40);
+
+    if is_primary {
+        meta |= CPU_META_PRIMARY;
+    }
+    if has_smt_sibling {
+        meta |= CPU_META_SMT;
+    }
+    meta
+}
+
+#[inline]
+fn precompute_cpu_llc_dsq_id(llc_id: u32) -> u64 {
+    LLC_DSQ_BASE + u64::from(llc_id)
+}
+
+#[inline]
+fn primary_cpu_for(topo: &topology::TopologyInfo, cpu: usize, nr_cpus: usize) -> u16 {
+    if cpu >= nr_cpus {
+        return u16::MAX;
+    }
+    if topo.cpu_thread_bit[cpu] == 1 {
+        return cpu as u16;
+    }
+
+    let sibling = topo.cpu_sibling_map[cpu] as usize;
+    if sibling < nr_cpus && topo.cpu_thread_bit[sibling] == 1 {
+        return sibling as u16;
+    }
+
+    cpu as u16
+}
+
+fn build_fast_scan_slots(
+    cpu: usize,
+    nr_cpus: usize,
+    cpu_sibling_map: &[u16],
+    cpu_thread_bit: &[u8],
+    cpu_llc_id: &[u8],
+) -> [u16; CPU_FAST_SCAN_SLOTS] {
+    fn push_unique(
+        slots: &mut [u16; CPU_FAST_SCAN_SLOTS],
+        next: &mut usize,
+        cpu: usize,
+        nr: usize,
+    ) {
+        if cpu >= nr || *next >= CPU_FAST_SCAN_SLOTS {
+            return;
+        }
+        let cpu = cpu as u16;
+        if slots.iter().take(*next).any(|&seen| seen == cpu) {
+            return;
+        }
+        slots[*next] = cpu;
+        *next += 1;
+    }
+
+    let mut slots = [u16::MAX; CPU_FAST_SCAN_SLOTS];
+    let mut next = 0;
+    if cpu >= nr_cpus {
+        return slots;
+    }
+
+    push_unique(&mut slots, &mut next, cpu, nr_cpus);
+
+    let sibling = cpu_sibling_map.get(cpu).copied().unwrap_or(u16::MAX) as usize;
+    let primary = if cpu_thread_bit.get(cpu).copied().unwrap_or(0) == 1 {
+        cpu
+    } else if sibling < nr_cpus && cpu_thread_bit.get(sibling).copied().unwrap_or(0) == 1 {
+        sibling
+    } else {
+        cpu
+    };
+    push_unique(&mut slots, &mut next, primary, nr_cpus);
+
+    let llc = cpu_llc_id.get(cpu).copied().unwrap_or(0);
+    for candidate in 0..nr_cpus {
+        if cpu_llc_id.get(candidate).copied().unwrap_or(u8::MAX) != llc {
+            continue;
+        }
+        if cpu_thread_bit.get(candidate).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        push_unique(&mut slots, &mut next, candidate, nr_cpus);
+        if next >= CPU_FAST_SCAN_SLOTS {
+            break;
+        }
+    }
+    push_unique(&mut slots, &mut next, sibling, nr_cpus);
+
+    slots
+}
+
+#[inline]
+fn active_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> [u16; CPU_FAST_PROBE_SLOTS] {
+    [slots[0], slots[1], slots[2], slots[3]]
+}
+
+/// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
 ///
-/// This scheduler adapts CAKE's DRR++ (Deficit Round Robin++) algorithm
-/// for CPU scheduling, providing low-latency scheduling for gaming and
-/// interactive workloads while maintaining fairness.
+/// This scheduler adapts CAKE's low-latency scheduling ideas to CPU time.
+/// The current design centers on topology-aware CPU selection, per-LLC
+/// vtime fallback queues, and lightweight per-task accounting in BPF.
 ///
-/// PROFILES set all tuning parameters at once. Individual options override profile defaults.
+/// Release builds bake profile, quantum, and queue policy at compile time.
+/// Debug builds keep those options as runtime A/B controls.
 ///
-/// 4-CLASS SYSTEM (classified by PELT utilization + game family detection):
-///   GAME:    game process tree + audio + compositor (during GAMING)
-///   NORMAL:  default class — interactive desktop tasks
-///   HOG:     high PELT utilization (≥78% CPU) non-game tasks
-///   BG:      low PELT utilization non-game tasks during GAMING
+/// Game detection and older multi-mode policy logic have been removed.
+/// The scheduler now runs one general low-latency policy for all tasks.
 ///
 /// EXAMPLES:
 ///   scx_cake                          # Run with gaming profile (default)
 ///   scx_cake -p esports               # Ultra-low-latency for competitive play
+///   scx_cake -p balanced              # Balanced desktop / mixed-use profile
 ///   scx_cake --quantum 1500           # Gaming profile with custom quantum
+///   scx_cake --wake-chain-locality=true # A/B enable learned wake-chain guard
+///   scx_cake --learned-locality=true # A/B enable learned locality steering
+///   scx_cake --busy-wake-kick=preempt # A/B force same-CPU busy wake preemption
+///   scx_cake --queue-policy local # A/B use 1.1.1 local fallback queues
 ///   scx_cake -v                       # Run with live TUI stats display
+///   scx_cake -v --diag-dir /tmp/cake  # Headless diagnostic recorder if no TTY
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
     version,
     disable_version_flag = true,
-    about = "🍰 A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling",
+    about = "🍰 A CAKE-inspired sched_ext scheduler for low-latency CPU scheduling",
     verbatim_doc_comment
 )]
 struct Args {
     /// Scheduler profile preset.
     ///
-    /// Profiles configure all tier thresholds, quantum multipliers, and wait budgets.
-    /// Individual CLI options (--quantum, etc.) override profile values.
+    /// Profiles configure the base quantum in debug builds. Release builds use
+    /// SCX_CAKE_PROFILE at build time.
     ///
     /// ESPORTS: Ultra-low-latency for competitive gaming.
-    ///   - Quantum: 1000µs, Starvation: 50ms
-    ///
-    /// LEGACY: Optimized for older/lower-power hardware.
-    ///   - Quantum: 4000µs, Starvation: 200ms
+    ///   - Quantum: 750µs
     ///
     /// GAMING: Optimized for low-latency gaming and interactive workloads.
-    ///   - Quantum: 2000µs, Starvation: 100ms
+    ///   - Quantum: 1000µs
     ///
-    /// DEFAULT: Balanced profile for general desktop use.
-    ///   - Currently same as gaming; will diverge in future versions
+    /// BALANCED: Balanced profile for general desktop use.
+    ///   - Quantum: 2000µs
     ///
-    /// BATTERY: Power-efficient for handhelds/laptops on battery.
-    ///   - Quantum: 4000µs, reduced context switch overhead
+    /// LEGACY: Optimized for older/lower-power hardware.
+    ///   - Quantum: 4000µs
     #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
     profile: Profile,
 
-    /// Base scheduling time slice in MICROSECONDS [default: 2000].
+    /// Base scheduling time slice in MICROSECONDS [default: 1000].
+    ///
+    /// Debug builds patch this at startup. Release builds use
+    /// SCX_CAKE_QUANTUM_US at build time.
     ///
     /// How long a task runs before potentially yielding.
     ///
     /// Smaller quantum = more responsive but higher overhead.
-    /// Esports: 1000µs | Gaming: 2000µs | Legacy: 4000µs
+    /// Esports: 750µs | Gaming: 1000µs | Balanced: 2000µs | Legacy: 4000µs
     /// Recommended range: 1000-8000µs
     #[arg(long, verbatim_doc_comment)]
     quantum: Option<u64>,
 
-    /// Bonus time for newly woken tasks in MICROSECONDS [default: 8000].
+    /// Enable learned wake-chain locality guard.
     ///
-    /// Tasks waking from sleep get this extra time added to their deficit,
-    /// allowing them to run longer on first dispatch. Helps bursty workloads.
-    ///
-    /// Esports: 4000µs | Gaming: 8000µs
-    /// Recommended range: 4000-16000µs
-    #[arg(long, verbatim_doc_comment)]
-    new_flow_bonus: Option<u64>,
+    /// This generic behavior-based guard keeps hot short blocking wake chains
+    /// near their learned CPU instead of broadening every idle scan. It defaults
+    /// off because latency tails are worse than migration for the current policy.
+    #[arg(
+        long,
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        verbatim_doc_comment
+    )]
+    wake_chain_locality: bool,
 
-    /// Max run time before forced preemption in MICROSECONDS [default: 100000].
+    /// Enable learned locality steering.
     ///
-    /// Safety limit: tasks running longer than this are forcibly preempted.
-    /// Prevents any single task from monopolizing the CPU.
+    /// This controls the arena-backed home/core/primary steering policy used
+    /// after a task has enough history. It defaults off so the baseline stays
+    /// latency-first and idle-selector driven.
+    #[arg(
+        long,
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        verbatim_doc_comment
+    )]
+    learned_locality: bool,
+
+    /// Same-CPU busy wake kick behavior.
     ///
-    /// Esports: 50000µs (50ms) | Gaming: 100000µs (100ms) | Legacy: 200000µs (200ms)
-    /// Recommended range: 50000-200000µs
-    #[arg(long, verbatim_doc_comment)]
-    starvation: Option<u64>,
+    /// POLICY uses Cake's current owner-runtime/pressure policy.
+    /// PREEMPT forces immediate preempt kicks for local busy wakeups.
+    /// IDLE forces gentler idle kicks for local busy wakeups.
+    #[arg(long, value_enum, default_value_t = BusyWakeKickMode::Policy, verbatim_doc_comment)]
+    busy_wake_kick: BusyWakeKickMode,
+
+    /// Queueing policy for busy fallback work.
+    ///
+    /// Debug builds patch this at startup. Release builds use
+    /// SCX_CAKE_QUEUE_POLICY at build time.
+    ///
+    /// LLC-VTIME keeps the default 1.1.0-style shape: fallback work is inserted
+    /// into a per-LLC vtime DSQ that dispatch() pulls from.
+    /// LOCAL A/B tests the 1.1.1 local-only shape: fallback work is inserted
+    /// into the selected CPU's local DSQ.
+    #[arg(long, value_enum, default_value_t = QueuePolicy::LlcVtime, verbatim_doc_comment)]
+    queue_policy: QueuePolicy,
 
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
     ///
-    /// Shows dispatch counts per tier, tier transitions,
-    /// wait time stats, and system topology information.
+    /// Shows live scheduler stats, wait/run timing, and system topology
+    /// information. Debug builds compile the full verbose capture surface by
+    /// default; release builds compile telemetry out.
     /// Press 'q' to exit TUI mode.
     #[arg(long, short, verbatim_doc_comment)]
     verbose: bool,
@@ -166,28 +358,77 @@ struct Args {
     #[arg(long, default_value_t = 1, verbatim_doc_comment)]
     interval: u64,
 
-    /// Live in-kernel testing mode for automated benchmarking.
+    /// Directory for headless --verbose diagnostic snapshots.
     ///
-    /// Runs the scheduler for 10 seconds, collects BPF data points,
-    /// and prints a structured JSON output to stdout.
-    #[arg(long, verbatim_doc_comment)]
-    testing: bool,
+    /// When --verbose is used without an interactive terminal, scx_cake records
+    /// text and JSON diagnostic dumps here instead of trying to draw the TUI.
+    #[arg(long, default_value = ".", verbatim_doc_comment)]
+    diag_dir: PathBuf,
+
+    /// Headless --verbose diagnostic write interval in SECONDS.
+    ///
+    /// A value of 0 disables periodic latest writes. A timestamped final dump
+    /// is still written when scx_cake exits.
+    #[arg(long, default_value_t = 60, verbatim_doc_comment)]
+    diag_period: u64,
 
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Compare two scx_cake TUI dump files and exit without loading BPF.
+    #[arg(long, value_names = ["BASELINE", "CANDIDATE"], num_args = 2)]
+    compare_dump: Option<Vec<PathBuf>>,
 }
 
 impl Args {
-    /// Get effective values (profile defaults with CLI overrides applied)
-    fn effective_values(&self) -> (u64, u64, u64) {
-        let (q, nfb, starv) = self.profile.values();
-        (
-            self.quantum.unwrap_or(q),
-            self.new_flow_bonus.unwrap_or(nfb),
-            self.starvation.unwrap_or(starv),
-        )
+    #[cfg(not(cake_bpf_release))]
+    fn quantum_us(&self) -> u64 {
+        self.quantum.unwrap_or(self.profile.quantum_us())
     }
+
+    fn effective_quantum_us(&self) -> u64 {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_QUANTUM_US
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.quantum_us()
+        }
+    }
+
+    fn effective_profile(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_PROFILE
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.profile.as_str()
+        }
+    }
+
+    fn effective_queue_policy(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_QUEUE_POLICY
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.queue_policy.as_str()
+        }
+    }
+}
+
+#[cfg(cake_bpf_release)]
+fn cli_arg_present(long: &str, short: Option<&str>) -> bool {
+    let long_with_value = format!("{long}=");
+    std::env::args().skip(1).any(|arg| {
+        arg == long
+            || arg.starts_with(&long_with_value)
+            || short.map_or(false, |short| arg == short)
+    })
 }
 
 struct Scheduler<'a> {
@@ -203,7 +444,9 @@ impl<'a> Scheduler<'a> {
         args: Args,
         open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
     ) -> Result<Self> {
-        use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+        #[cfg(cake_needs_arena)]
+        use libbpf_rs::skel::Skel;
+        use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 
         // ═══ scx_ops_open! equivalent ═══
         // Matches scx_ops_open!(skel_builder, open_object, cake_ops, None)
@@ -216,7 +459,7 @@ impl<'a> Scheduler<'a> {
             .open(open_object)
             .context("Failed to open BPF skeleton")?;
 
-        // Inject version suffix into ops name: "cake" → "cake_1.1.0_g<hash>_<target>"
+        // Inject version suffix into ops name: "cake" → "cake_1.1.1_g<hash>_<target>"
         // This is what scx_loader reads from /sys/kernel/sched_ext/root/ops
         {
             let ops = open_skel.struct_ops.cake_ops_mut();
@@ -270,60 +513,119 @@ impl<'a> Scheduler<'a> {
         // Detect system topology (CCDs, P/E cores)
         let topo = topology::detect()?;
 
-        // Get effective values (profile + CLI overrides)
-        let (quantum, new_flow_bonus, _starvation) = args.effective_values();
+        // Get effective values. Release bakes these in build.rs; debug keeps
+        // profile + CLI overrides for runtime A/B.
+        #[cfg(not(cake_bpf_release))]
+        let quantum = args.effective_quantum_us();
 
         // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
         let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
-            rodata.quantum_ns = quantum * 1000;
-            rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
+            #[cfg(not(cake_bpf_release))]
+            {
+                rodata.quantum_ns = quantum * 1000;
+                rodata.queue_policy = args.queue_policy as u32;
+                rodata.enable_learned_locality = args.learned_locality;
+                rodata.enable_wake_chain_locality = args.wake_chain_locality;
+                rodata.busy_wake_kick_mode = args.busy_wake_kick as u32;
+            }
             // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
-            // In release, --verbose is silently ignored — zero overhead for production gaming.
+            // In release, --verbose is silently ignored.
             #[cfg(debug_assertions)]
             {
-                rodata.enable_stats = args.verbose || args.testing;
+                rodata.enable_stats = args.verbose;
             }
 
-            // has_hybrid removed: smt_sibling now uses pre-filled cpu_sibling_map only
-            // Per-LLC DSQ partitioning: populate CPU→LLC mapping
+            // Populate topology metadata used by local-first steering and telemetry.
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
-            rodata.nr_cpus = topo.nr_cpus.min(256) as u32; // F2: widened from 64→256 for Threadripper
-            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(256) as u32; // V3: PHYS_FIRST scan mask
+            rodata.nr_cpus = topo.nr_cpus.min(topology::MAX_CPUS) as u32;
+            // nr_phys_cpus REMOVED: zero BPF readers.
 
-            // Ferry explicit 64-bit topology arrays down into BPF (O(1) execution replacements)
+            // Ferry topology arrays into BPF RODATA — compile-time scaled
 
-            // Heterogeneous Gaming Topology — u64[4] arrays (F2: 256-bit masks)
-            rodata.big_core_phys_mask[0] = topo.big_core_phys_mask;
-            rodata.big_core_smt_mask[0] = topo.big_core_smt_mask;
-            rodata.little_core_mask[0] = topo.little_core_mask;
-            rodata.vcache_llc_mask[0] = topo.vcache_llc_mask;
-            rodata.has_vcache = topo.has_vcache;
-            rodata.has_hybrid_cores = topo.big_core_phys_mask != 0;
-
-            for i in 0..topo.cpu_sibling_map.len() {
-                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i];
+            // Heterogeneous Gaming Topology — only compiled when CAKE_HAS_HYBRID
+            #[cfg(cake_has_hybrid)]
+            {
+                for i in 0..topo
+                    .big_core_phys_mask
+                    .len()
+                    .min(rodata.big_core_phys_mask.len())
+                {
+                    rodata.big_core_phys_mask[i] = topo.big_core_phys_mask[i];
+                }
+                for i in 0..topo
+                    .big_core_smt_mask
+                    .len()
+                    .min(rodata.big_core_smt_mask.len())
+                {
+                    rodata.big_core_smt_mask[i] = topo.big_core_smt_mask[i];
+                }
+                for i in 0..topo
+                    .little_core_mask
+                    .len()
+                    .min(rodata.little_core_mask.len())
+                {
+                    rodata.little_core_mask[i] = topo.little_core_mask[i];
+                }
+                rodata.has_hybrid_cores = topo.big_core_phys_mask.iter().any(|&w| w != 0);
             }
-            for i in 0..topo.llc_cpu_mask.len().min(8) {
+            // vcache_llc_mask/has_vcache REMOVED from BPF: zero BPF readers.
+            // Rust TUI reads topology directly.
+
+            for i in 0..topo.cpu_sibling_map.len().min(rodata.cpu_sibling_map.len()) {
+                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i] as _;
+            }
+            for i in 0..topo.cpu_thread_bit.len().min(rodata.cpu_thread_bit.len()) {
+                rodata.cpu_thread_bit[i] = topo.cpu_thread_bit[i];
+            }
+            for i in 0..topo.llc_cpu_mask.len().min(rodata.llc_cpu_mask.len()) {
                 rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
             }
-            for i in 0..topo.core_cpu_mask.len().min(32) {
-                rodata.core_cpu_mask[i] = topo.core_cpu_mask[i];
-            }
+            // core_cpu_mask REMOVED from BPF: zero BPF readers.
 
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
+            for i in 0..topo.cpu_core_id.len().min(rodata.cpu_core_id.len()) {
+                rodata.cpu_core_id[i] = topo.cpu_core_id[i];
+            }
 
-            // Performance-ordered CPU arrays: read prefcore ranking from sysfs,
-            // sort by performance, group SMT pairs together.
-            // GAME tasks scan fast→slow, non-GAME scans slow→fast.
+            let nr = topo.nr_cpus.min(topology::MAX_CPUS);
+            for i in 0..nr.min(rodata.cpu_meta.len()) {
+                let sibling = topo.cpu_sibling_map[i];
+                let has_smt_sibling = (sibling as usize) < nr && sibling as usize != i;
+                let primary = primary_cpu_for(&topo, i, nr);
+                let is_primary = primary as usize == i;
+                let llc_id = topo.cpu_llc_id[i] as u32;
+
+                rodata.cpu_meta[i] = pack_cpu_meta(
+                    sibling,
+                    primary,
+                    llc_id,
+                    topo.cpu_core_id[i] as u32,
+                    is_primary,
+                    has_smt_sibling,
+                );
+                rodata.cpu_llc_dsq[i] = precompute_cpu_llc_dsq_id(llc_id);
+                let fast_scan = build_fast_scan_slots(
+                    i,
+                    nr,
+                    &topo.cpu_sibling_map,
+                    &topo.cpu_thread_bit,
+                    &topo.cpu_llc_id,
+                );
+                rodata.cpu_fast_probe[i] = active_fast_scan_probe_slots(fast_scan);
+            }
+
+            info!("Topology Strategy: Per-CPU local-first dispatch");
+
+            // Performance-ordered CPU scan arrays — HYBRID ONLY
+            #[cfg(cake_has_hybrid)]
             {
-                let nr = topo.nr_cpus.min(256);
-                // Read prefcore ranking per CPU (higher = faster)
+                let nr = topo.nr_cpus.min(topology::MAX_CPUS);
                 let mut rankings: Vec<(usize, u32)> = (0..nr)
                     .map(|cpu| {
                         let path = format!(
@@ -333,41 +635,38 @@ impl<'a> Scheduler<'a> {
                         let rank = std::fs::read_to_string(&path)
                             .ok()
                             .and_then(|s| s.trim().parse::<u32>().ok())
-                            .unwrap_or(100); // fallback: equal ranking
+                            .unwrap_or(100);
                         (cpu, rank)
                     })
                     .collect();
 
-                // Sort by descending rank (fastest first), stable for SMT grouping
                 rankings.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-                // Build fast→slow array with SMT pairs grouped together:
-                // [best_phys, best_smt, second_phys, second_smt, ...]
-                let mut fast_to_slow: Vec<u8> = Vec::with_capacity(nr);
+                let mut fast_to_slow: Vec<u16> = Vec::with_capacity(nr);
                 let mut used = vec![false; nr];
                 for &(cpu, _) in &rankings {
                     if used[cpu] {
                         continue;
                     }
-                    fast_to_slow.push(cpu as u8);
+                    fast_to_slow.push(cpu as u16);
                     used[cpu] = true;
-                    // Add SMT sibling immediately after
-                    let sib = topo.cpu_sibling_map.get(cpu).copied().unwrap_or(0xFF);
+                    let sib = topo.cpu_sibling_map.get(cpu).copied().unwrap_or(0xFFFF);
                     if (sib as usize) < nr && !used[sib as usize] {
                         fast_to_slow.push(sib);
                         used[sib as usize] = true;
                     }
                 }
 
-                // Populate RODATA arrays
-                for i in 0..64usize {
+                for i in 0..topology::MAX_CPUS {
+                    if i >= rodata.cpus_fast_to_slow.len() {
+                        break;
+                    }
                     if i < fast_to_slow.len() {
-                        rodata.cpus_fast_to_slow[i] = fast_to_slow[i];
-                        // Reverse for slow→fast
-                        rodata.cpus_slow_to_fast[i] = fast_to_slow[fast_to_slow.len() - 1 - i];
+                        rodata.cpus_fast_to_slow[i] = fast_to_slow[i] as _;
+                        rodata.cpus_slow_to_fast[i] = fast_to_slow[fast_to_slow.len() - 1 - i] as _;
                     } else {
-                        rodata.cpus_fast_to_slow[i] = 0xFF; // sentinel
-                        rodata.cpus_slow_to_fast[i] = 0xFF;
+                        rodata.cpus_fast_to_slow[i] = rodata.cpus_fast_to_slow[i].wrapping_sub(1);
+                        rodata.cpus_slow_to_fast[i] = rodata.cpus_slow_to_fast[i].wrapping_sub(1);
                     }
                 }
 
@@ -378,241 +677,11 @@ impl<'a> Scheduler<'a> {
                 );
             }
 
-            // ═══ Per-CPU capacity table (F1 correctness fix) ═══
-            // Read arch_scale_cpu_capacity from sysfs for P/E core vruntime scaling.
-            // Scale: 0-1024, where 1024 = fastest core. On SMP all = 1024 → JIT folds.
-            // Intel hybrid: P-cores ~1024, E-cores ~600-700.
-            // AMD SMP: all 1024 → cap > 0 && cap < 1024 is always false → zero overhead.
+            #[cfg(cake_needs_arena)]
             {
-                let nr = topo.nr_cpus.min(256);
-                let mut all_equal = true;
-                let mut first_cap: u32 = 0;
-
-                for cpu in 0..nr {
-                    let path = format!("/sys/devices/system/cpu/cpu{}/cpu_capacity", cpu);
-                    let cap = std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u32>().ok())
-                        .unwrap_or(1024);
-
-                    rodata.cpuperf_cap_table[cpu] = cap;
-
-                    if cpu == 0 {
-                        first_cap = cap;
-                    } else if cap != first_cap {
-                        all_equal = false;
-                    }
-                }
-
-                if !all_equal {
-                    info!(
-                        "Capacity scaling: heterogeneous (P/E cores, range {}-{})",
-                        rodata.cpuperf_cap_table[..nr].iter().min().unwrap_or(&0),
-                        rodata.cpuperf_cap_table[..nr].iter().max().unwrap_or(&1024)
-                    );
-                }
-            }
-
-            // Arena library: nr_cpu_ids must be set before load() — arena_init
-            // checks this and returns -ENODEV (errno 19) if uninitialized.
-            rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
-
-            // ═══ Audio stack detection ═══
-            // Phase 1: Core audio daemons by comm name.
-            // Phase 2: PipeWire socket clients (mixers like goxlr-daemon).
-            // Both are session-persistent → bake into RODATA.
-            {
-                use std::collections::HashSet;
-
-                const AUDIO_COMMS: &[&str] = &[
-                    "pipewire",
-                    "wireplumber",
-                    "pipewire-pulse",
-                    "pulseaudio",
-                    "jackd",
-                    "jackdbus",
-                ];
-                let mut audio_tgids: Vec<u32> = Vec::new();
-                let mut audio_tgid_set: HashSet<u32> = HashSet::new();
-
-                // Phase 1: comm-based detection
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                            continue;
-                        }
-                        let pid: u32 = match name_str.parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-                            let comm = comm.trim();
-                            if AUDIO_COMMS.contains(&comm) && audio_tgid_set.insert(pid) {
-                                audio_tgids.push(pid);
-                            }
-                        }
-                    }
-                }
-
-                // Phase 2: PipeWire socket client detection.
-                // Scan /proc/net/unix for pipewire-0 socket inodes, then find
-                // processes with fds pointing to those inodes. This catches any
-                // audio mixer daemon (goxlr-daemon, easyeffects, etc.) without
-                // brittle comm lists.
-                let core_count = audio_tgids.len();
-                'pw_detect: {
-                    let uid = unsafe { libc::getuid() };
-                    let pw_socket_path = format!("/run/user/{}/pipewire-0", uid);
-
-                    // Collect inodes for the PipeWire socket
-                    let unix_content = match std::fs::read_to_string("/proc/net/unix") {
-                        Ok(c) => c,
-                        Err(_) => break 'pw_detect,
-                    };
-                    let mut pw_inodes: HashSet<u64> = HashSet::new();
-                    for line in unix_content.lines().skip(1) {
-                        if line.ends_with(&pw_socket_path)
-                            || line.contains(&format!("{} ", pw_socket_path))
-                        {
-                            // Format: Num RefCount Protocol Flags Type St Inode Path
-                            let fields: Vec<&str> = line.split_whitespace().collect();
-                            if fields.len() >= 7 {
-                                if let Ok(inode) = fields[6].parse::<u64>() {
-                                    if inode > 0 {
-                                        pw_inodes.insert(inode);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if pw_inodes.is_empty() {
-                        break 'pw_detect;
-                    }
-
-                    // Scan /proc/*/fd for socket links matching PipeWire inodes.
-                    // Only check thread-group leaders (dirs in /proc with numeric names).
-                    if let Ok(proc_entries) = std::fs::read_dir("/proc") {
-                        for entry in proc_entries.flatten() {
-                            if audio_tgids.len() >= 8 {
-                                break;
-                            }
-                            let name = entry.file_name();
-                            let name_str = name.to_string_lossy();
-                            if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                                continue;
-                            }
-                            let pid: u32 = match name_str.parse() {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            // Skip PIDs already detected as core audio
-                            if audio_tgid_set.contains(&pid) {
-                                continue;
-                            }
-                            let fd_dir = format!("/proc/{}/fd", pid);
-                            let fd_entries = match std::fs::read_dir(&fd_dir) {
-                                Ok(e) => e,
-                                Err(_) => continue,
-                            };
-                            for fd_entry in fd_entries.flatten() {
-                                if let Ok(link) = std::fs::read_link(fd_entry.path()) {
-                                    let link_str = link.to_string_lossy();
-                                    // Socket links look like "socket:[12345]"
-                                    if let Some(inode_str) = link_str
-                                        .strip_prefix("socket:[")
-                                        .and_then(|s| s.strip_suffix(']'))
-                                    {
-                                        if let Ok(inode) = inode_str.parse::<u64>() {
-                                            if pw_inodes.contains(&inode) {
-                                                if audio_tgid_set.insert(pid) {
-                                                    audio_tgids.push(pid);
-                                                }
-                                                break; // Found one match, move to next PID
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                rodata.nr_audio_tgids = audio_tgids.len() as u32;
-                for (i, &tgid) in audio_tgids.iter().enumerate() {
-                    rodata.audio_tgids[i] = tgid;
-                }
-                let client_count = audio_tgids.len() - core_count;
-                if !audio_tgids.is_empty() {
-                    info!(
-                        "Audio stack detected: {} daemons{} (TGIDs: {:?})",
-                        audio_tgids.len(),
-                        if client_count > 0 {
-                            format!(
-                                ", {} PipeWire client{}",
-                                client_count,
-                                if client_count == 1 { "" } else { "s" }
-                            )
-                        } else {
-                            String::new()
-                        },
-                        audio_tgids
-                    );
-                }
-            }
-
-            // ═══ Compositor detection ═══
-            // Wayland compositors present every frame to the display.
-            // Session-persistent → bake into RODATA.
-            {
-                const COMPOSITOR_COMMS: &[&str] = &[
-                    "kwin_wayland",
-                    "kwin_x11",
-                    "mutter",
-                    "gnome-shell",
-                    "sway",
-                    "Hyprland",
-                    "weston",
-                    "labwc",
-                    "wayfire",
-                    "river",
-                    "gamescope",
-                ];
-                let mut compositor_tgids: Vec<u32> = Vec::new();
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                            continue;
-                        }
-                        let pid: u32 = match name_str.parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-                            let comm = comm.trim();
-                            if COMPOSITOR_COMMS.contains(&comm) {
-                                compositor_tgids.push(pid);
-                                if compositor_tgids.len() >= 4 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                rodata.nr_compositor_tgids = compositor_tgids.len() as u32;
-                for (i, &tgid) in compositor_tgids.iter().enumerate() {
-                    rodata.compositor_tgids[i] = tgid;
-                }
-                if !compositor_tgids.is_empty() {
-                    info!(
-                        "Compositor detected: {} (TGIDs: {:?})",
-                        compositor_tgids.len(),
-                        compositor_tgids
-                    );
-                }
+                // Arena library: nr_cpu_ids must be set before load() — arena_init
+                // checks this and returns -ENODEV (errno 19) if uninitialized.
+                rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
             }
         }
 
@@ -620,27 +689,27 @@ impl<'a> Scheduler<'a> {
         // Set UEI dump buffer size before load (matches scx_ops_load! behavior)
         scx_utils::uei_set_size!(open_skel, cake_ops, uei);
 
+        #[cfg(cake_needs_arena)]
         let mut skel = open_skel.load().context("Failed to load BPF program")?;
+        #[cfg(not(cake_needs_arena))]
+        let skel = open_skel.load().context("Failed to load BPF program")?;
 
-        // Initialize the BPF arena library.
-        // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
-        // (scheduler not yet running, so init_task hasn't fired yet).
-        // ArenaLib::setup() runs SEC("syscall") probes:
-        //   1. arena_init: allocates static pages, inits task stack allocator
-        //   2. arena_topology_node_init: registers topology nodes for arena traversal
-        let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
-        let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
-            .context("Failed to create ArenaLib")?;
-        arena.setup().context("Failed to initialize BPF arena")?;
-        info!(
-            "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
-            task_ctx_size, topo.nr_cpus
-        );
-
-        // Set initial BSS values before attach (zero-init'd in BPF for BSS placement).
-        // quantum_ceiling_ns: default IDLE/GAMING → 2ms. TUI updates at ~2Hz.
-        if let Some(bss) = &mut skel.maps.bss_data {
-            bss.quantum_ceiling_ns = 2_000_000; // AQ_BULK_CEILING_NS
+        #[cfg(cake_needs_arena)]
+        {
+            // Initialize the BPF arena library.
+            // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
+            // (scheduler not yet running, so init_task hasn't fired yet).
+            // ArenaLib::setup() runs SEC("syscall") probes:
+            //   1. arena_init: allocates static pages, inits task stack allocator
+            //   2. arena_topology_node_init: registers topology nodes for arena traversal
+            let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
+            let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
+                .context("Failed to create ArenaLib")?;
+            arena.setup().context("Failed to initialize BPF arena")?;
+            info!(
+                "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
+                task_ctx_size, topo.nr_cpus
+            );
         }
 
         Ok(Self {
@@ -673,14 +742,26 @@ impl<'a> Scheduler<'a> {
                 .context("Failed to attach struct_ops BPF programs")?,
         );
 
-        // Release builds: --verbose and --testing are unavailable (stats compiled out).
-        // Warn early so user knows these flags require a debug build.
+        // Release builds: --verbose is unavailable (stats compiled out).
+        // Warn early so user knows this flag requires a debug build.
         #[cfg(not(debug_assertions))]
-        if self.args.verbose || self.args.testing {
-            warn!("--verbose and --testing require a debug build (telemetry is compiled out in release).");
-            warn!("Rebuild without --release: cargo build -p scx_cake");
+        if self.args.verbose {
+            log::warn!("--verbose requires a debug build (telemetry is compiled out in release).");
+            log::warn!("Rebuild without --release: cargo build -p scx_cake");
             self.args.verbose = false;
-            self.args.testing = false;
+        }
+
+        #[cfg(cake_bpf_release)]
+        if self.args.quantum.is_some()
+            || cli_arg_present("--profile", Some("-p"))
+            || cli_arg_present("--queue-policy", None)
+        {
+            log::warn!(
+                "release build uses baked profile={}, quantum={}us, queue-policy={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, or SCX_CAKE_QUEUE_POLICY to change hot-path knobs",
+                topology::BAKED_PROFILE,
+                topology::BAKED_QUANTUM_US,
+                topology::BAKED_QUEUE_POLICY
+            );
         }
 
         // Standard startup banner: follows scx_cosmos/scx_bpfland convention
@@ -702,7 +783,7 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "{} CPUs, {} LLCs, profile: {:?}",
+            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}",
             self.topology.nr_cpus,
             self.topology
                 .llc_cpu_mask
@@ -710,55 +791,38 @@ impl<'a> Scheduler<'a> {
                 .filter(|&&m| m != 0)
                 .count()
                 .max(1),
-            self.args.profile
+            self.args.effective_profile(),
+            self.args.effective_quantum_us(),
+            self.args.effective_queue_policy()
         );
-        if self.args.testing {
-            info!("Running in benchmarking mode for 10 seconds...");
-            std::thread::sleep(std::time::Duration::from_secs(1)); // Warmup
-
-            let mut start_dispatches = 0u64;
-            for cpu in 0..self.topology.nr_cpus {
-                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                start_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
-            }
-
-            let start_time = std::time::Instant::now();
-            let mut elapsed = 0;
-            while elapsed < 10 && !shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                elapsed += 1;
-            }
-            let duration = start_time.elapsed().as_secs_f64();
-
-            let mut end_dispatches = 0u64;
-            for cpu in 0..self.topology.nr_cpus {
-                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                end_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
-            }
-
-            let delta = end_dispatches.saturating_sub(start_dispatches);
-            let throughput = delta as f64 / duration;
-            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}",
-                     duration, delta, throughput);
-
-            shutdown.store(true, Ordering::Relaxed);
-        } else if self.args.verbose && std::io::stdout().is_terminal() {
-            // Run TUI mode
+        let mut trust_governor = trust::TrustGovernor::new(self.topology.nr_cpus);
+        if self.args.verbose && std::io::stdout().is_terminal() {
             tui::run_tui(
                 &mut self.skel,
+                &mut trust_governor,
                 shutdown.clone(),
                 self.args.interval,
+                self.args.effective_quantum_us(),
                 self.topology.clone(),
                 self.latency_matrix.clone(),
             )?;
+        } else if self.args.verbose {
+            tui::run_headless_recorder(
+                &mut self.skel,
+                &mut trust_governor,
+                tui::HeadlessRecorderConfig {
+                    shutdown: shutdown.clone(),
+                    interval_secs: self.args.interval,
+                    quantum_us: self.args.effective_quantum_us(),
+                    topology: self.topology.clone(),
+                    latency_matrix: self.latency_matrix.clone(),
+                    diag_dir: self.args.diag_dir.clone(),
+                    diag_period_secs: self.args.diag_period,
+                },
+            )?;
         } else {
-            if self.args.verbose && !std::io::stdout().is_terminal() {
-                warn!("TUI disabled: no terminal detected (headless mode)");
-            }
-            // Simple headless mode: matches cosmos/bpfland pattern exactly.
-            // ctrlc handler sets shutdown on SIGINT/SIGTERM.
-            // 1-second sleep + UEI check = responsive shutdown.
             while !shutdown.load(Ordering::Relaxed) {
+                trust_governor.tick(&mut self.skel, self.topology.nr_cpus);
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 if scx_utils::uei_exited!(&self.skel, uei) {
                     break;
@@ -786,6 +850,15 @@ impl Drop for Scheduler<'_> {
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Route libbpf messages through log crate — trim trailing \n to avoid double-newlines.
+    libbpf_rs::set_print(Some((libbpf_rs::PrintLevel::Debug, |level, msg| {
+        let msg = msg.trim_end();
+        match level {
+            libbpf_rs::PrintLevel::Debug => log::debug!("{msg}"),
+            libbpf_rs::PrintLevel::Info => log::info!("{msg}"),
+            libbpf_rs::PrintLevel::Warn => log::warn!("{msg}"),
+        }
+    })));
 
     let args = Args::parse();
 
@@ -796,6 +869,11 @@ fn main() -> Result<()> {
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
+        return Ok(());
+    }
+
+    if let Some(paths) = args.compare_dump.as_ref() {
+        dump_compare::run_compare(&paths[0], &paths[1])?;
         return Ok(());
     }
 
@@ -823,4 +901,62 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_policy_defaults_to_llc_vtime() {
+        let args = Args::try_parse_from(["scx_cake"]).unwrap();
+
+        assert_eq!(args.queue_policy, QueuePolicy::LlcVtime);
+    }
+
+    #[test]
+    fn queue_policy_parses_local() {
+        let args = Args::try_parse_from(["scx_cake", "--queue-policy", "local"]).unwrap();
+
+        assert_eq!(args.queue_policy, QueuePolicy::Local);
+    }
+
+    #[test]
+    fn cpu_meta_packs_static_topology_fact() {
+        let meta = pack_cpu_meta(300, 260, 12, 44, true, true);
+
+        assert_eq!(meta & 0xffff, 300);
+        assert_eq!((meta >> 16) & 0xffff, 260);
+        assert_eq!((meta >> 32) & 0xff, 12);
+        assert_eq!((meta >> 40) & 0xff, 44);
+        assert_ne!(meta & CPU_META_PRIMARY, 0);
+        assert_ne!(meta & CPU_META_SMT, 0);
+    }
+
+    #[test]
+    fn precomputed_dsq_ids_match_bpf_layout() {
+        assert_eq!(precompute_cpu_llc_dsq_id(2), 202);
+    }
+
+    #[test]
+    fn fast_scan_slots_are_init_built_nearby_cpu_order() {
+        let siblings = [1, 0, 3, 2];
+        let thread_bits = [1, 2, 1, 2];
+        let llcs = [0, 0, 0, 0];
+
+        let slots = build_fast_scan_slots(1, 4, &siblings, &thread_bits, &llcs);
+
+        assert_eq!(slots, [1, 0, 2, u16::MAX]);
+
+        let primary_slots = build_fast_scan_slots(0, 4, &siblings, &thread_bits, &llcs);
+
+        assert_eq!(primary_slots, [0, 2, 1, u16::MAX]);
+    }
+
+    #[test]
+    fn active_fast_scan_probe_slots_are_prev_then_primary() {
+        let slots = [7, 4, 2, u16::MAX];
+
+        assert_eq!(active_fast_scan_probe_slots(slots), [7, 4, 2, u16::MAX]);
+    }
 }
