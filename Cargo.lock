@@ -3632,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cake"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3651,6 +3651,9 @@ dependencies = [
  "scx_arena",
  "scx_cargo",
  "scx_utils",
+ "serde",
+ "serde_json",
+ "strum",
  "sysinfo",
  "tachyonfx",
 ]
