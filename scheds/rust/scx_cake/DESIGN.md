@@ -8,23 +8,23 @@ compiled to *different schedulers* and a known, understood fix could no longer
 be placed. The rewrite trades that surface for a design small enough to hold
 in your head — one BPF file, eight callbacks in the release build — and defends
 that smallness with hard invariants. The file has grown back to ~1.75k lines
-since the rewrite (roughly half comments recording why each rule exists, plus
-the default-off research surface described in invariant 1); the release
-decision path is a fraction of that.
+since the rewrite (roughly half comments recording why each rule exists); the
+release decision path is a fraction of that.
 
 Kernel-validated against Linux **7.1.x** (`kernel/sched/ext/{ext,idle}.c`,
 `internal.h`). Every mechanism below carries a measured, noise-gated A/B
 receipt; the falsification chain for everything that did NOT survive lives in
 [`EEVDF_GATE_2026-07-04.md`](./EEVDF_GATE_2026-07-04.md) and `docs/`.
 
-> **Exact-state note (2026-07-13):** this document records the accepted
-> clean-slate/Golden design, not every compile-time research surface currently
-> present in the dirty campaign tree. The current tree contains default-off
-> M-DBLS/topology/peek experiments and the unpromoted SCHED_IDLE plus ordered
-> direct-admission candidates. Bind any claim to the complete source snapshots
-> under
-> `.scx_cake_bench/candidates/full_surface_master_20260713/`; do not infer an
-> exact binary from this narrative alone.
+> **Exact-state note (rewritten 2026-07-27):** the compile-time research
+> surface this note used to warn about is gone. There are no default-off
+> M-DBLS/peek experiments left in the tree, and SCHED_IDLE weighting plus
+> ordered direct admission were promoted into the one shipped path. The only
+> conditional compilation remaining is `CAKE_NR_CCDS`/`CAKE_CCD_STEAL_POLICY`
+> selecting the multi-CCD steal order, which is build-host topology rather
+> than policy. What this document still cannot tell you is which *commit* a
+> given binary was built from — bind any performance claim to a receipt, and
+> note that the 2026-07-27 law-compliance sweep is committed but **unmeasured**.
 
 ## Design invariants
 
@@ -32,15 +32,19 @@ receipt; the falsification chain for everything that did NOT survive lives in
    no loader policy options, no mutable runtime policy config, nothing a user
    can tune. One immutable loader-filled array describes real SMT siblings; it
    is machine topology, not scheduler policy.
-   *Qualified as of 2026-07-13:* `intf.h` does carry a **compile-time research
-   surface** (`CAKE_MDBLS_*`, `CAKE_QMARK_MODE`, `CAKE_IRQ_SHADOW_MODE`,
-   `CAKE_SCALAR_PEEK`, `CAKE_DIRECT_SLICE_STORE`, the policy divisors), and
-   `cake.bpf.c` is threaded with the matching `#if`. Every one of them is
-   **off/at-default in the release build**, and the campaign rule is that a
-   mutation is A/B'd as *two git commits*, never by flipping a cflag — the BPF
-   object cache makes cflag-only toggles silently unreliable. The invariant the
-   project actually holds is therefore: one *default* behavior, one build per
-   commit, and a research surface that must never be live in a scored arm.
+   The campaign rule is that a mutation is A/B'd as *two git commits*, never by
+   flipping a cflag — the BPF object cache makes cflag-only toggles silently
+   unreliable, so a flag-toggled arm cannot be trusted to be the code it claims
+   to be and a revert cannot be proven byte-identical. **Enforced in the source
+   since 2026-07-27** (it used to be convention, and `intf.h` used to document
+   the banned mechanism as the supported one): every scheduling constant in
+   `intf.h` is a plain literal, and the only definitions a cflag may set are
+   the build host's CCD and CPU counts, which `build.rs` detects and which
+   cannot be resolved any later than the build. The `CAKE_MDBLS_*`,
+   `CAKE_QMARK_MODE`, `CAKE_IRQ_SHADOW_MODE`, `CAKE_SCALAR_PEEK` and
+   `CAKE_DIRECT_SLICE_STORE` switches this invariant used to qualify itself
+   against are gone. There is no research surface left to leave live in a
+   scored arm.
 2. **One master algorithm per hot path.** Each `ops` callback is a single
    coherent decision, not a dispatch into competing subsystems.
 3. **No division, no cold paths, no rescue buckets.** Reciprocal-weight table
@@ -70,14 +74,16 @@ receipt; the falsification chain for everything that did NOT survive lives in
 ## Topology
 
 Created at `init`: one custom vtime DSQ **per possible CPU** (`dsq_id ==
-cpu`), one global wake queue (`WAKE_DSQ`), one global overflow queue
-(`OVF_DSQ`). All mutable shared state is a single BSS struct of
-128-byte-stride slots (no false sharing, no hot-path atomics): per-CPU
-run-start stamp, per-CPU `sum_exec_runtime` snapshot, the vtime frontier,
-`ncpu`, and three families of one-shot hint bytes (`qmark` "queue may hold
-work", `pmark` "curr was preempt-kicked", owner-cleared, benign one-shot
-races). The five `SCX_*` enum values used are rebound to CO-RE load-time
-immediates instead of rodata loads.
+cpu`) and one global wake queue (`WAKE_DSQ`). All mutable shared state is a
+single BSS struct of 128-byte-stride slots (no false sharing, no hot-path
+atomics): the vtime frontier, a per-CPU run slot pairing the run-start stamp
+with the `sum_exec_runtime` snapshot, and one family of hint words (`qmark`
+"queue may hold work", republished by the owner from its own head peek,
+benign races). Load-time constants live in `const volatile` rodata so
+libbpf's freeze lets the verifier fold them: the SMT sibling map
+(`cpu_sibling`), the CPU id span (`nr_cpu_span`), and on multi-CCD hosts the
+precomputed steal order. The seven `SCX_*` enum values used are rebound to
+CO-RE load-time immediates instead of rodata loads.
 
 ## The algorithm
 
@@ -225,26 +231,22 @@ does not violate workload-neutrality. Storm survival went 3/3 then 5/5,
 including two contended runs where the pre-L baseline died in the same session.
 
 For a **continuation** (slice-expiry or preempt requeue):
-- **depth-threshold overflow**: requeuing onto a home queue already holding six tasks goes
-  to `OVF_DSQ` — the saturation balance nothing else provides (at 2×
-  compute nothing ever idles, so the steal ring never runs and depth
-  imbalance would persist forever; EEVDF's tick balance evens exactly
-  this). Two guards: never a preempt-marked task (`pmark` — its handoff
-  partner is on this CPU; overflowing spinners re-split pairs, futex t32
-  2.13M→0.64M measured), and never under global backlog (uniform depth —
-  overflow helps nobody, and it piled schbench-saturated 67K→178K).
-  The overflow channel must be its **own** DSQ: routing it through
-  `WAKE_DSQ` corrupted the backlog signal the herd gate reads.
-- otherwise: home insert, with a 1.5× slice when queued behind a waiter
-  (uninterrupted turns are the schbench win; a flat 2× starved
-  deep-queue waiters −11%), then a plain idle kick (an idle third party
+- home insert at a flat `SLICE_NS`. **The 1.5× contended turn was DELETED in
+  `4d5b5f96d`** to reach zero stack spills (probing queue depth put a call
+  between `vt` and its use). Its measured value was schbench p99 7368 → 6984,
+  saturated +30%, cache +18% (2026-07-04); the loss is UNMEASURED. It was
+  briefly restored on a `qmark` signal in `68264fb69` and reverted again in
+  `83cb6363a` when that signal measured futex −24.2%. Then a plain idle kick
+  (an idle third party
   stealing a homed task INTO opening capacity is load balancing, not
   waste — pinning those kicks to the home cost x265 its late-breaking
   spread).
 
 ### dispatch — one ordering rule
 
-Clear my `qmark`, re-set it if my own queue holds work. Two *lockless*
+Peek my own head and republish my `qmark` from it — one conditional store, so
+the line every stealer polls is not invalidated to write back the value it
+already held. Two *lockless*
 `scx_bpf_dsq_peek` snapshots order own-vs-wake by earliest vtime with
 **class-aware hysteresis**: a sleeper-class wake head (clamp-deep — the
 handoff shape) crosses at one slice of margin; a frontier-peer head waits
@@ -252,13 +254,7 @@ behind own work at two slices (peers tolerate waiting — the flat versions
 lose: 1× everywhere leaves +34% futex on the table, 2× everywhere collapses
 futex to below native). A stranded peer ages into sleeper class as the
 frontier advances — the starvation seal is structural, no rescue path.
-An `OVF_DSQ` head that falls behind the global service frontier by the bounded
-overflow-rescue hysteresis is
-rescued before ordinary arbitration. This is the bounded-progress seal for the
-overflow channel: saturated own/wake traffic can no longer prevent a compatible
-overflow continuation from running indefinitely, while a fresh overflow head
-does not turn the global queue into the default hot lock. Ordinary consume order
-remains **own → wake → overflow**, then the staggered two-half-loop ring steal
+Consume order is **own → wake**, then the staggered two-half-loop ring steal
 gated by per-CPU `qmark` hints (dispatch 199→68 ns/call), then keep-running slice
 refill when everything is visibly empty.
 
@@ -307,7 +303,6 @@ child-runs-first credit was evaluated and declined; fork already wins).
 | home preempt margin | `SLICE/2 - curr_age/2`; endpoint 31×SLICE/64 | state-derived inside the SLICE/32 young window |
 | global preempt floor | SLICE/8 | floor-less −27% futex |
 | wake-head hysteresis | 1 slice (sleeper) / 2 (peer) | both flat forms lose |
-| overflow depth | ≥ 6 | with pmark + empty-global guards |
 
 `MAX_CPUS`, DSQ IDs, fixed-point radix/table geometry, cache-line padding,
 UAPI scheduling-class values, unit conversions, and the watchdog are
@@ -424,6 +419,37 @@ any kind.
   placement by keeping CPUs busy or free, and that whole class of levers is
   closed. Treat the observation as unexplained pending replication and a
   residency measurement. → `docs/RT_PLACEMENT_LOGIC_2026-07-24.md`
+- **2026-07-27, the law-compliance sweep — `OVF_DSQ` and `pmark` are gone,
+  UNMEASURED.** A codebase audit against the design laws found one defect
+  wearing several hats: the wake path carried state it could derive, so it
+  spilled, accumulated predicates, needed a bucket to shed queue depth, needed
+  two rescues to un-strand that bucket, and still left one transition
+  notifying nobody. Fixed as one change rather than a ladder of point fixes.
+  Kept: guarded re-applied `qmark`/`pmark` stores; a home-routed wake with no
+  idle CPU now reaches `cake_wake_preempt` instead of returning silently
+  (`else if (!home && …)` had excluded the one arm that had already committed
+  the task to that CPU); `pmark` folded into the run slot and then deleted
+  with the divert it guarded; the sleeper clamp computed per arm rather than
+  hoisted; `OVF_DSQ` plus both of its rescues deleted under NO BUCKETS —
+  the ordering rule already conserves work, because a continuation left on its
+  owner's queue is qmarked and any CPU going idle finds it on the ring walk.
+  Then a second pass on the laws themselves: `nr_cpu_ids` moved out of mutable
+  BSS into frozen rodata (`nr_cpu_span`); `qmark` republished with one
+  conditional store instead of clear-then-remark; the dead
+  `cake_irq_shadow_observe` hook deleted; and every scheduling constant made
+  source-only, so an A/B is two commits and no cflag can change policy or the
+  128-byte inter-CPU stride.
+  Then the zero-spill push (maintainer call: the law gets attempted, not
+  reasoned around). Cake now binds directly to the 7.1 kfuncs instead of
+  compat.bpf.h's CO-RE ladders -- **a 7.1 minimum kernel is now required** --
+  the home preempt is decided after the insert rather than carried across it,
+  and the wake half lives in its own global subprogram. select_cpu, running and
+  stopping now meet ZERO STACK SPILLS; dispatch holds one slot (the struct_ops
+  ctx pointer, for the keep-running refill) and the enqueue pair holds eight.
+  **No benchmark has been run on any of it.** The registered endpoint is a
+  Palworld ABBA game A/B (1% low worst-avg) plus the sealed throughput set;
+  until that runs this is unmeasured code, and two of the changes are live
+  behaviour changes on the hottest path. See `STATE.md`.
 
 Historical campaign logs (pre-rewrite eras, May–June 2026) live in `docs/`;
 they document the 12.6k-line predecessor and its mutation campaigns, not the

@@ -19,15 +19,23 @@ evicts it and your system falls back to the default scheduler within
 seconds** — a crashed experiment costs a hiccup, not a hang or a reboot.
 
 > [!IMPORTANT]
-> **Honest current status (2026-07-24).** This 1.2.0 development source builds
-> and benchmarks: the current working head carries a build receipt, passes the
-> readiness probe, and has been screened against native EEVDF across every
-> registered workload through the exact-pair broker. What it does **not** have
-> is a live-game gate. Game frame-time tails are this scheduler's stated hard
-> constraint, and no game A/B has been run on the current mutation stack — so
-> the benchmark numbers below are real, and the gaming claim in the paragraph
-> above is *unproven for this checkout*. Treat it as a research candidate, not
-> a drop-in daily driver.
+> **Honest current status (2026-08-01).** This 1.2.0 development source builds,
+> benchmarks, and now has its **first live-game frame A/B**. Against native
+> EEVDF on Helldivers 2 (240 Hz display, mirrored ABBA, 2 runs/arm):
+>
+> | metric | vs native |
+> |---|---|
+> | frames missing the 240 Hz deadline | **−53%** (3.02% → 1.42%) |
+> | frame-time standard deviation | **−16%** |
+> | p99 − median frame time | **−13%** |
+> | 0.1% low, p99.9 − median, spikes >2× median | **tied** |
+> | average FPS | tied |
+>
+> Read that precisely: **smoother and fewer late frames, never worse, and even
+> on the deep-tail metrics this project scores on.** It is a real gaming result
+> and it is not yet a sweep. Caveats: menu scene rather than mission, n=2 per
+> arm, one game, one machine. Still a research candidate rather than a drop-in
+> daily driver.
 
 > [!IMPORTANT]
 > **AI assistance disclosure.** Code mutation in this project is done with
@@ -35,8 +43,9 @@ seconds** — a crashed experiment costs a hiccup, not a hang or a reboot.
 > software they run is built. The required discipline is **no change lands on
 > trust**: a candidate intended for retention must eventually clear
 > interleaved, noise-gated benchmark A/B and, for defaults, live-game A/B.
-> Historical A/Bs are research evidence rather than current promotion proof;
-> this checkout has not yet cleared that protocol.
+> Historical A/Bs are research evidence rather than current promotion proof.
+> This checkout has cleared benchmark A/B and a first live-game frame A/B; it
+> has not yet cleared a mission-scene game gate or a multi-game sweep.
 
 ## Requirements
 
@@ -105,6 +114,21 @@ core rule for that case:
   line** — its data is still hot in that core's cache, and it loses nothing
   by waiting where it is.
 
+Three refinements exist specifically for games, each measured on a real one:
+
+- **Keep a busy thread on its own core.** Linux's default idle-search prefers a
+  wholly-free core over the task's own still-warm one. For a render thread
+  pinned near 100% of a core that trade is backwards, so cake claims the old
+  core first when it is free. This closed most of a 9–17 point cache-locality
+  gap against native.
+- **Never queue behind an equally busy peer.** A game's render threads can
+  serialise on one core while others sit idle. If the core a task wants is held
+  by another well-served task, cake sends it to the shared line instead of
+  waiting. Cut wake latencies 14–49% across the render chain.
+- **Bound the worst case pessimistically.** The turn-length cap comes from a
+  deliberately conservative reading of the frame clock, so a brief mis-measure
+  can never *widen* it. A safety bound must fail short, not long.
+
 Everything else in the design is a measured refinement of that rule's edge
 cases: when a woken task is better off staying on its old core (its cache
 warmth outweighs the shared line's speed), when a sleeping partner should
@@ -125,8 +149,7 @@ is half comments explaining the why.
 
 Vocabulary (five terms carry everything):
 - **DSQ** — *dispatch queue*, sched_ext's task queue primitive. Cake makes
-  one per CPU, plus one global **wake queue** and one global **overflow
-  queue**.
+  one per CPU, plus one global **wake queue**.
 - **vtime** — each task's *virtual runtime*: CPU time consumed, weighted by
   priority. Lower vtime = has had less than its share = runs sooner.
 - **frontier** — the highest vtime any task has reached; "the present
@@ -135,8 +158,16 @@ Vocabulary (five terms carry everything):
   just slept a while (it earned credit); a task *at* the frontier has been
   running all along. Cake constantly uses this one-comparison distinction:
   sleepers get fast service, peers can wait a turn.
-- **slice** — a task's turn length: 3 ms (measured optimum of 1/2/3/4 ms),
-  1.5× when someone is waiting behind it.
+- **slice** — a task's turn length, sized **per task**: twice its own measured
+  burst, floored at one context-switch cost and capped at half a frame. A
+  1.4 µs prefetch thread and a 415 µs render stage get different turns.
+- **starved** — does a task *wait longer than it runs*? Computed from counters
+  the kernel already keeps, with no threshold to tune. This is cake's main
+  discriminator: starved tasks get the fast shared path, well-served ones keep
+  their cache.
+- **frame clock** — the display's actual cadence, measured at runtime by voting
+  on how often threads wake. Follows 60/144/240 Hz and VRR with no
+  configuration.
 
 Life of a wake under load: the kernel asks cake for a CPU
 (`select_cpu`) — if the default idle-search finds a free core, direct
@@ -154,13 +185,12 @@ sibling) to come collect it. A newly queued wake may **preempt** the task
 currently running on its target CPU only if that task is *young* (started
 < 100 µs ago — interrupting a just-started handoff partner is free;
 flushing a mid-request worker destroys throughput) *and* the wakee is ahead
-on fairness by a real margin. Expired tasks requeue on their own CPU —
-unless that queue already holds six, in which case they spill to the
-overflow queue that any draining CPU picks up (the load-balancing that
-otherwise never happens when no core ever idles). Each CPU's `dispatch`
-drains: own queue vs wake queue by earliest vtime (with hysteresis so the
-global queue's lock isn't stampeded), then overflow, then a ring-scan steal
-from neighbors, then "keep running what I have".
+on fairness by a real margin. Expired tasks requeue on their own CPU, where
+their cache is still warm, and are advertised to every other CPU by a
+per-CPU "may hold work" mark. Each CPU's `dispatch` drains: own queue vs
+wake queue by earliest vtime (with hysteresis so the global queue's lock
+isn't stampeded), then a ring-scan steal from neighbors, then "keep running
+what I have".
 
 Fairness accounting costs almost nothing: the turn charge is the delta of
 the kernel's own `sum_exec_runtime` (zero clock reads at context switch),
@@ -231,16 +261,23 @@ workload is exactly what the benchmark discipline above exists to answer.
 - **Migration count is not the throughput signal** — lock serialization is.
 - **Route by system state, not by force.** At oversubscription, every added
   preempt/forced-migration lever measured worse (seven falsifications);
-  the wins were two minimal routing gates. And the overflow channel must be
-  its own queue — sharing the wake queue corrupted the signal it reads.
+  the wins were two minimal routing gates.
+- **A rescue bucket is a symptom, not a fix.** The depth-triggered overflow
+  queue needed an aged rescue *and* a fallback drain and still let tasks sit
+  past the watchdog, because nothing routinely served it. Deleted in favour of
+  the ordering rule that already conserved work (2026-07-27, unmeasured).
 
 ## Source tour
 
 | file | contents |
 |---|---|
 | `src/bpf/cake.bpf.c` | the scheduler — 8 callbacks in the release build, ~1.75k lines, roughly half comments explaining the why |
-| `src/bpf/intf.h` | the constant surface: `SLICE_NS`, `MAX_CPUS`, `WAKE_DSQ`, `OVF_DSQ`, the policy divisors every threshold derives from, and the default-off compile-time research switches |
-| `src/main.rs` | thin Rust loader (attach, exit reporting) |
+| `src/bpf/intf.h` | the constant surface: `SLICE_NS`, `MAX_CPUS`, `WAKE_DSQ`, and every threshold derived from them. Policy values are source-only — the sole cflag inputs are the build host's CCD/CPU counts, detected by `build.rs` |
+| `src/main.rs` | the Rust loader: attach, exit reporting, hardware probes, and the once-a-second frame-clock publish |
+| [`STATE.md`](./STATE.md) | **start here** — current state, newest first, with every number |
+| [`CAMPAIGN_LEDGER.md`](./CAMPAIGN_LEDGER.md) | one row per experiment: what was tried, what the evidence class was, what the verdict was. Read this to see the arc |
+| [`CONSTANTS_AUDIT.md`](./CONSTANTS_AUDIT.md) | the adaptation model (how cake travels to any CPU, GPU and game) and the magic-number scoreboard |
+| [`HYPOTHESES.md`](./HYPOTHESES.md) | design rationale — every `§` reference in the source resolves here |
 | [`DESIGN.md`](./DESIGN.md) | the full design: every rule, every dose-responsed constant, invariants |
 | [`EEVDF_GATE_2026-07-04.md`](./EEVDF_GATE_2026-07-04.md) | the complete benchmark campaign log — every keep and every falsification |
 | [`docs/GAME_RENDER_PIPELINE_SCHED_EXT_INVESTIGATION_2026-07-23.md`](./docs/GAME_RENDER_PIPELINE_SCHED_EXT_INVESTIGATION_2026-07-23.md) | input-to-photon Wayland/KWin/DRM pipeline and the RT-preemption escape investigation (its IMMED candidate is superseded — see below) |
