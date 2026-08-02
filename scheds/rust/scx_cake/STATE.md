@@ -38,6 +38,42 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### 🏆 INPUT LATENCY — cake's largest measured game win, and nobody had ever scored it
+
+**2026-08-01, retained G17 rotation (interleaved cake-vs-native, 8-spinner load, same
+run). No new capture.** `bench/wake_maxdecomp.py` on the `Window & Input` role — the
+thread that never had a number attached to it in this corpus.
+
+Runnable->run delays per 10k transitions (~12,000 per arm):
+
+| | native N1 | native N2 | **cake C1** | **cake C2** |
+|---|---|---|---|---|
+| **>200 us** | 294.62 | 93.24 | **39.01** | **47.79** |
+| **>500 us** | 149.35 | 22.04 | **7.47** | **12.15** |
+
+**Cake 2/2 with no overlap on BOTH cuts** — native's *best* arm (93.24) is still 2x worse
+than cake's *worst* (47.79). Arm means: **193.9 -> 43.4, a 4.5x reduction.**
+
+**Why this matters more than the ratio suggests.** The input thread's own runtime is
+**p50 6-10 us**. A 200 us delay is 20-30x its entire burst, so these are not tail
+decorations on a busy thread -- they are the thread doing nothing for tens of its own
+service times. Input is also the one latency a player feels directly.
+
+**Top preemptor of the input thread: `kwin_wayland`, 48.2% native -> 31.2% cake.** Cake
+already cuts compositor interference on input by a third without ever having aimed at it.
+
+**Four caveats, none fatal.** The native arms differ 3x between themselves (the known
+instability, §THE UNATTENDED GAME RIG) -- but the comparison survives it because even the
+good native arm loses. `python3` (the capture harness) is 11% of C1's short preemptions
+and owns its single worst hold at 1746 us, so cake's true number is slightly better than
+shown. This is **wake-to-run, one hop** -- not end-to-end device-to-photon. And it is the
+loaded regime; the headroom regime is unmeasured for input.
+
+**WHAT THIS CHANGES.** The campaign has been scoring frames and renderer wakes, where cake
+ties or loses. **On input it wins by 4.5x.** Two actions follow: score `Window & Input` in
+every rotation from now on, and re-read the G14/G15/G16 falsifications -- all three were
+killed on renderer evidence alone and may have been input wins nobody looked for.
+
 ### ❌ G20 MEASURED — NULL on wake, NULL on frames, and CAKE LOSES TO NATIVE tonight
 
 **2026-08-01 21:38–21:56. Two measurements, both registered in advance, both clean.**
