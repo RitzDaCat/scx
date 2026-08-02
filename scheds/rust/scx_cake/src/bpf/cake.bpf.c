@@ -906,10 +906,17 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 * rather than herd order — the scx watchdog itself rides unbound
 	 * kworkers. PF_KTHREAD is scheduling state, not workload identity. Only
 	 * the wake takes this path; a continuation falls through (§R.14).
+	 *
+	 * Spend an idle CPU on it before spending an occupant. A LOCAL_ON insert
+	 * rescheds the target, so the assigned CPU pays a mid-burst eviction for
+	 * work that any free CPU would have served just as promptly (§G20).
 	 */
 	if ((enq_flags & CAKE_ENQ_WAKEUP) && (p->flags & PF_KTHREAD)) {
+		s32 kcpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+
 		cake_direct_clamp(p);
-		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)tcpu,
+		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON |
+				   (u32)(kcpu >= 0 ? kcpu : tcpu),
 				   SLICE_NS, enq_flags);
 		return;
 	}
