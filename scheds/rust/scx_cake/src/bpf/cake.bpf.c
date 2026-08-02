@@ -290,6 +290,9 @@ static __always_inline bool cake_cpu_irq_hot(s32 cpu)
 	return cpu >= 0 && cpu_irq_hot[(u32)cpu & (MAX_CPUS - 1)];
 }
 
+/* Built by ops.init from cpu_irq_hot: the first-choice placement set (§G23). */
+private(CAKE_NONSINK) struct bpf_cpumask __kptr *nonsink_cpumask;
+
 /*
  * The CPU id span cake scans, bounding the steal ring and neighbour probe.
  * Rodata, so libbpf's freeze lets the verifier fold it and prune the walk's
@@ -579,10 +582,11 @@ static __always_inline void cake_direct_clamp(struct task_struct *p)
 /*
  * ops.select_cpu — placement plus guarded direct admission.
  *
- * When select_cpu_dfl finds an idle CPU we normally direct-dispatch to the
- * local DSQ for lowest latency, unless the qmark guard sees an older visible
- * claim. Otherwise the system is saturated on this task's affinity: return the
- * selected CPU and let ops.enqueue() arbitrate on vtime.
+ * When the ranked pick (nonsink set first, whole machine as fallback) finds an
+ * idle CPU we normally direct-dispatch to the local DSQ for lowest latency,
+ * unless the qmark guard sees an older visible claim. Otherwise the system is
+ * saturated on this task's affinity: return the selected CPU and let
+ * ops.enqueue() arbitrate on vtime.
  */
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
@@ -639,31 +643,43 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	}
 
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	/*
+	 * First-choice placement runs dfl's ranking against the nonsink set,
+	 * so a sink is claimed only when nothing quieter is idle -- the
+	 * fallback ranks the whole machine and its claim is always the CPU
+	 * returned, never abandoned (§G23).
+	 */
+	{
+		const struct cpumask *ns = cast_mask(nonsink_cpumask);
+
+		cpu = -1;
+		if (ns && __COMPAT_HAS_scx_bpf_select_cpu_and)
+			cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
+						     ns, 0);
+	}
+	if (cpu >= 0)
+		is_idle = true;
+	else
+		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		/*
-		 * Distrust dfl's WAKE_SYNC return: is_idle=true also covers a
-		 * wake to the waker's own local DSQ, i.e. a still-BUSY CPU, and
-		 * taking it welds buffered pairs together permanently (§R.6).
+		 * Distrust a WAKE_SYNC return of the waker's own CPU: it can be
+		 * the waker's still-BUSY CPU, and taking it welds buffered
+		 * pairs together permanently (§R.6). Re-rank without the SYNC
+		 * flag.
 		 */
 		if ((wake_flags & CAKE_WAKE_SYNC) &&
 		    cpu == (s32)bpf_get_smp_processor_id()) {
-			s32 idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+			const struct cpumask *ns = cast_mask(nonsink_cpumask);
+			s32 idle;
 
+			if (ns && __COMPAT_HAS_scx_bpf_select_cpu_and)
+				idle = scx_bpf_select_cpu_and(p, prev_cpu, 0,
+							      ns, 0);
+			else
+				idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			if (idle >= 0)
 				cpu = idle;
-		}
-
-		/*
-		 * Decline an interrupt sink while a quieter CPU is free; dfl
-		 * ranks by idleness and cache distance and sees no interrupts.
-		 * Work-conserving: nothing else idle keeps the sink (§G21).
-		 */
-		if (cake_cpu_irq_hot(cpu)) {
-			s32 cool = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-
-			if (cool >= 0 && !cake_cpu_irq_hot(cool))
-				cpu = cool;
 		}
 
 		/*
@@ -1257,6 +1273,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 	ret = scx_bpf_create_dsq(WAKE_DSQ, -1);
 	if (ret)
 		return ret;
+
+	{
+		struct bpf_cpumask *mask = bpf_cpumask_create();
+
+		if (!mask)
+			return -ENOMEM;
+		bpf_for(i, 0, nr) {
+			if (!cpu_irq_hot[(u32)i & (MAX_CPUS - 1)])
+				bpf_cpumask_set_cpu((u32)i, mask);
+		}
+		mask = bpf_kptr_xchg(&nonsink_cpumask, mask);
+		if (mask)
+			bpf_cpumask_release(mask);
+	}
 	return 0;
 }
 
