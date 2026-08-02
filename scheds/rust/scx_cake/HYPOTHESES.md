@@ -1112,6 +1112,61 @@ caveat. And whether an IRQ-hot CPU is bad for *throughput* work too, or only for
 threads; the change deliberately preserves work conservation so the saturated case is
 untouched.
 
+### G23 — REGISTERED 2026-08-02: every sink, not just the loudest, and no abandoned claims
+
+**Parent: G21 (mechanism confirmed 2/2) + G22 investigation #1 (three sinks, not one).**
+
+**Hypothesis, two clauses.** (a) Detecting sinks per IRQ **line** — rate plus affinity
+concentration — finds every pinned interrupt sink independent of relative loudness. G21's
+4× fair-share test requires a CPU to carry ≥25% of *total* interrupt volume on a 16-CPU
+host, so only the loudest sink can ever qualify: G22 identified three 100%-affine sinks
+(nvidia→13, xhci/USB→5, enp10s0→2) and measured CPU 5 as the worst CPU for
+`Window & Input` (0.91 µs mean / 15.0 µs p99 vs ~0.50 / 2-3 elsewhere), yet CPU 5 sits at
+1.16× fair share (live replication, 2026-08-02) and can never be flagged. (b) Passing the
+non-sink mask to `scx_bpf_select_cpu_and` (BTF-verified present on this kernel; the kernel
+ANDs it with `p->cpus_ptr` internally) removes sinks from first-choice placement *inside*
+dfl's own ranking — deleting the G21 swap block's abandoned idle claim (dfl test-and-clears
+what it returns; the bit repairs only on the CPU's next idle re-pick) and its cool-is-hot
+sub-leak, rather than patching around them. Same bug class as the 2026-07-09 RT-dodge
+idle-claim leak.
+
+**Steps.** (1) Loader: per-line detector — a line whose delta rate is ≥1 kHz AND ≥95%
+concentrated on one CPU marks that CPU a sink; columns mapped by header CPU labels
+(fixes offline-CPU misattribution); ≥half-machine guard kept. (2) `cake_init` builds a
+`nonsink` bpf_cpumask from `cpu_irq_hot`. (3) `cake_select_cpu`: try
+`scx_bpf_select_cpu_and(p, prev, wake_flags, nonsink, 0)`, fall back to plain dfl on
+negative return — sinks stay last resort, so the saturated regime is untouched (the −19%
+enqueue-diversion law). The R.6 sync re-pick goes through `select_cpu_and` with the SYNC
+flag stripped, which also upgrades it from a flat idle scan to dfl's topology ranking.
+The G21 swap block is deleted; the hot-`prev_cpu` gate stays (it tests before claiming
+and leaks nothing).
+
+**Predictions, registered before measurement.**
+- P1: at attach with the mouse live the probe flags {5, 13}; CPU 2 only under network
+  traffic (live rates 2026-08-02: xhci 2.1 k/s 100%-on-5, nvidia 16.4 k/s 100%-on-13,
+  enp quiet).
+- P2: `Window & Input` mean wake −4 to −8%, p99 −30% or better — its CPU-5 wakes drop
+  from ~15 µs p99 to the 2-3 µs everywhere-else level, at a ~1-in-16 share.
+- P3: `main` / `renderer` ≈ neutral (G21 already covers CPU 13); a move >±5% on either
+  falsifies "the sink was the whole quiet-regime mechanism".
+- P4: throughput bench screen neutral: under saturation `select_cpu_and` returns
+  negative and the dfl fallback reproduces today's behavior.
+
+**Endpoint:** HD2 interleaved ABBA, fast config — score mean wake for `Window & Input`,
+`main`, `renderer`; screen severe-frame ratio. One `--blocks 2` bench screen for
+throughput regressions before the game arms.
+
+**Kill conditions:** total wakes served drops (work conservation lost); any CPU inherits
+a >2× penalty (harm moved — if it fires, the next commit ranks sinks worst-first, not a
+revert); stall/watchdog; `Window & Input` CPU-5 share fails to fall (mechanism never
+fired).
+
+**Step budget: 3 commits. Re-diagnose at 6.**
+
+Note: G21.1 (SMT sibling) was WITHDRAWN by G22 — CPU 5 is its own USB sink and the two
+effects are inseparable in that data. G23 flags CPU 5 for its own interrupt stream, which
+subsumes the actionable half of G21.1.
+
 ### R.23 — the two guards `wake_maxdecomp.py` cannot run without
 
 perf arms its per-CPU ring buffers **sequentially**, so early in a trace a CPU can be

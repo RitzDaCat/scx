@@ -38,6 +38,19 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### 🚧 G23 IN FLIGHT — every sink, not just the loudest; delete the swap's leaked claim
+
+**Registered 2026-08-02, full registration in HYPOTHESES.md §G23.** Two defects in G21's
+implementation, one fix: the 4× fair-share detector can only ever flag the loudest sink
+(G22 found three — nvidia→13, USB→5, net→2 — and CPU 5 is measurably the worst CPU for
+`Window & Input`), and the dfl-then-swap shape abandons the idle claim dfl made on the
+sink (RT-dodge leak class). Fix: per-IRQ-line detection (≥1 kHz, ≥95% one-CPU) and
+`scx_bpf_select_cpu_and(nonsink)` with dfl fallback, swap block deleted.
+
+**Endpoint: HD2 ABBA on `Window & Input` / `main` / `renderer` mean wake + severe-frame
+screen + one `--blocks 2` bench screen. Predictions P1-P4 registered. UNMEASURED until
+those run.**
+
 ### 🏆 G21 SHIPPED — the GPU interrupt owned a CPU, and cake was placing game threads on it
 
 **2026-08-02, interleaved ABBA on live HD2, quiet host, 2/2 arms, zero stalls.**
