@@ -662,6 +662,23 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 
 		/*
+		 * Decline an interrupt sink while a quieter CPU is free. dfl
+		 * ranks by idleness and cache distance, neither of which sees
+		 * the interrupt stream, so on this host it hands out the GPU's
+		 * CPU at its full one-in-sixteen share and the task then waits
+		 * behind the interrupt handler. Work-conserving by
+		 * construction: with nothing else idle the sink is still taken,
+		 * because a slow CPU beats no CPU (§G21, and the -19% the
+		 * enqueue-diversion falsification charged for losing that).
+		 */
+		if (cake_cpu_irq_hot(cpu)) {
+			s32 cool = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+
+			if (cool >= 0 && !cake_cpu_irq_hot(cool))
+				cpu = cool;
+		}
+
+		/*
 		 * Ordered direct admission: confirm the qmark hint with one
 		 * lockless head snapshot so the shortcut cannot jump an older
 		 * claim. Advisory, not a reservation (§R.4).
