@@ -88,18 +88,42 @@ verdicts were not systematically wrong. *Caveat: cross-run ratios, not interleav
 this is weaker evidence than the original cake-vs-cake reads and is only strong enough to
 decline a resurrection, never to re-falsify.*
 
-### 🚧 THE HARNESS IS NOW THE FLOOR ON WHAT CAKE CAN DEMONSTRATE
+### ❌ RETRACTED SAME DAY — "the harness is the floor" was MY error, not a finding
 
-**`python3` -- the wake-latency capture wrapper -- is the single worst CPU holder in 6 of
-12 arms, with holds up to 3513 us**, and it lands almost exclusively in the CAKE arms.
-That is not cake placing it badly: in the native arms the game's own workers hold longer,
-so the harness never becomes the maximum. **Cake removed the real holders and the
-instrument became the largest one left.**
+**The claim was: `python3` is the capture wrapper, it is the worst holder in 6 of 12 arms,
+therefore the instrument caps what cake can demonstrate. Every step after the first is
+wrong, because the first is wrong.**
 
-Two consequences. Cake's measured numbers are **understated**, not inflated. And any
-future change that improves on G17/G18 will be measuring against a ~3 ms artefact it
-cannot beat. **Fix before the next rotation:** nice/affinity-isolate the capture wrapper
-off the game's CPUs, or run the parse after the capture window rather than during it.
+I read the comm `python3`, assumed it was `scx_cake_wake_latency.py`, and built three
+conclusions on it without checking. One command disproved it. Per-comm on-CPU time across
+the whole G17-C1 trace:
+
+```
+trace span 22.0s, 16 CPUs = 352.3 CPU-seconds available
+python3      174.69 CPU-s    793.4% of one core    longest run 225,009us
+renderer      21.22 CPU-s     96.4%
+thread pool wor 9.41 CPU-s    42.7%
+```
+
+**793.4% is eight cores. `python3` IS THE EIGHT SPINNERS** — the deliberate load regime,
+recorded as working exactly as designed. The capture wrapper is a rounding error.
+Confirmed independently by tonight's rotation, where the spinners were `sh` and `python3`
+does not appear as a top holder in any arm.
+
+**What dies with it:** "the harness is the floor", "cake's numbers are understated", and
+the recommendation to isolate the capture tool. There is nothing to isolate.
+
+**What survives, stated more carefully.** In the NATIVE arms the worst holders are the
+game's own threads (`thread pool wor`, `ad pool !LP wor`); in the CAKE arms the worst
+holder is the synthetic load. Cake reduces game-internal interference far enough that the
+deliberate spinners become the dominant remaining blocker. That is a real and favourable
+reading — it is just a statement about the load, not about the instrument.
+
+**The process failure, named so it is not repeated: I inferred a process's identity from
+its `comm` string and never checked.** `python3` is ambiguous by construction — the load
+generator, the capture wrapper and half the harness all share it. **Fixed structurally:
+`bench/cakeload.c` gives the load generator the comm `cakeload`**, so no future trace
+analysis can confuse instrument with load. Use it instead of an ad-hoc shell spinner.
 
 ### 🏆 INPUT LATENCY — cake's largest measured game win, and nobody had ever scored it
 
