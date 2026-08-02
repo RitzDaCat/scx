@@ -283,6 +283,21 @@ static __always_inline bool cake_qmark_test(u32 cpu)
 const volatile s32 cpu_sibling[MAX_CPUS];
 
 /*
+ * Loader-filled: nonzero where a CPU carries a disproportionate share of the
+ * host's hardware interrupts, so a task placed there contends with the
+ * interrupt stream rather than merely with other tasks. One byte per CPU
+ * rather than a bitmap: MAX_CPUS exceeds a word, and a plain load costs less
+ * than the index arithmetic a mask would need (§G21).
+ */
+const volatile u8 cpu_irq_hot[MAX_CPUS];
+
+/* Is this CPU an interrupt sink? Advisory — never a reservation (§G21). */
+static __always_inline bool cake_cpu_irq_hot(s32 cpu)
+{
+	return cpu >= 0 && cpu_irq_hot[(u32)cpu & (MAX_CPUS - 1)];
+}
+
+/*
  * The CPU id span cake scans, bounding the steal ring and neighbour probe.
  * Rodata, so libbpf's freeze lets the verifier fold it and prune the walk's
  * bound checks; ops.init validates it against nr_cpu_ids (§R.21).
@@ -622,7 +637,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * which reserves what it returns (§G13).
 	 */
 	if (!(wake_flags & CAKE_WAKE_SYNC) && prev_cpu >= 0 &&
-	    !cake_starved(p) &&
+	    !cake_starved(p) && !cake_cpu_irq_hot(prev_cpu) &&
 	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cake_direct_clamp(p);

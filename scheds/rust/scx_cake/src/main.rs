@@ -175,6 +175,27 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Interrupt affinity is a host property, so it is measured rather than
+        // assumed. Logged whenever it finds anything: a scheduler quietly
+        // declining a CPU must always say which one and why (§G21).
+        {
+            let hot = probe_irq_hot_cpus(*NR_CPU_IDS);
+            let flags = &mut rodata.cpu_irq_hot;
+            let mut named: Vec<usize> = Vec::new();
+
+            for (cpu, is_hot) in hot.iter().enumerate() {
+                if *is_hot && cpu < flags.len() {
+                    flags[cpu] = 1;
+                    named.push(cpu);
+                }
+            }
+            if !named.is_empty() {
+                info!("   irq     interrupt-sink CPUs {named:?} — deprioritised for placement");
+            } else if opts.verbose {
+                info!("   irq     no interrupt sink found; placement unrestricted");
+            }
+        }
+
         let siblings = &mut rodata.cpu_sibling;
         siblings.fill(-1);
         for core in topo.all_cores.values() {
@@ -409,6 +430,96 @@ struct HandoffProbe {
     /// firing rate on this workload, so the statistic that matches the
     /// requirement is a high percentile, not an invented multiplier.
     p99: u64,
+}
+
+/// Which CPUs are interrupt sinks on THIS host.
+///
+/// IRQ affinity is a property of the machine, not of any policy value, so it is
+/// measured here and frozen into rodata rather than guessed at or hard-coded --
+/// on the development host the nvidia interrupt is pinned to a single CPU and
+/// has fired 1.27e9 times there against zero everywhere else, which cost the
+/// game's main thread a 116x within-CPU wake penalty (§G21).
+///
+/// Two samples of `/proc/interrupts` give a RATE; since-boot totals would keep
+/// flagging a CPU whose interrupt source has long since moved. A CPU is a sink
+/// when it carries at least `HOT_SHARE` times an even split AND takes more than
+/// one interrupt per millisecond -- a stream sparser than that cannot account
+/// for microsecond-scale wake delays. Returns an empty set rather than a
+/// half-measured one if anything about the probe looks wrong.
+fn probe_irq_hot_cpus(nr_cpus: usize) -> Vec<bool> {
+    /// Multiple of an even per-CPU split above which a CPU is an interrupt sink.
+    const HOT_SHARE: f64 = 4.0;
+    /// Below one interrupt per millisecond the stream is too sparse to matter.
+    const MIN_RATE_HZ: f64 = 1_000.0;
+    const WINDOW: Duration = Duration::from_millis(120);
+
+    let none = vec![false; nr_cpus];
+    let Some(a) = read_irq_counts(nr_cpus) else {
+        return none;
+    };
+    std::thread::sleep(WINDOW);
+    let Some(b) = read_irq_counts(nr_cpus) else {
+        return none;
+    };
+
+    let secs = WINDOW.as_secs_f64();
+    let rates: Vec<f64> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| y.saturating_sub(*x) as f64 / secs)
+        .collect();
+    let total: f64 = rates.iter().sum();
+    if total <= 0.0 {
+        return none;
+    }
+
+    let fair = total / nr_cpus as f64;
+    let hot: Vec<bool> = rates
+        .iter()
+        .map(|r| *r >= HOT_SHARE * fair && *r >= MIN_RATE_HZ)
+        .collect();
+
+    // A probe perturbed by host load must never mis-tune the scheduler: if it
+    // wants to condemn half the machine it has measured something other than
+    // interrupt affinity, so condemn nothing.
+    if hot.iter().filter(|h| **h).count() * 2 >= nr_cpus {
+        return none;
+    }
+    hot
+}
+
+/// Per-CPU total interrupt counts from `/proc/interrupts`.
+///
+/// Every row is summed, IPIs included: a rescheduling or TLB-shootdown storm
+/// costs the same microseconds as a device stream, and the fair-share test is
+/// relative, so symmetric sources raise every CPU alike and cancel.
+fn read_irq_counts(nr_cpus: usize) -> Option<Vec<u64>> {
+    let text = std::fs::read_to_string("/proc/interrupts").ok()?;
+    let mut lines = text.lines();
+    // The header names one column per online CPU and fixes how many of the
+    // leading numeric fields on each row are per-CPU counts.
+    let ncol = lines.next()?.split_whitespace().count().min(nr_cpus);
+    if ncol == 0 {
+        return None;
+    }
+
+    let mut sums = vec![0u64; nr_cpus];
+    for line in lines {
+        let mut fields = line.split_whitespace();
+        // Row label, e.g. "115:" or "LOC:".
+        if !fields.next()?.ends_with(':') {
+            continue;
+        }
+        for (cpu, f) in fields.take(ncol).enumerate() {
+            match f.parse::<u64>() {
+                Ok(v) => sums[cpu] += v,
+                // Trailing type/description columns are not counts; the row is
+                // done once parsing stops succeeding.
+                Err(_) => break,
+            }
+        }
+    }
+    Some(sums)
 }
 
 /// Measure one wake + block + switch hop on THIS host.

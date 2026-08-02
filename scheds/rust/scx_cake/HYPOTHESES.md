@@ -1035,6 +1035,56 @@ cake already wins the >200 µs delay rate 3–5× over native while tying 0.1% l
 link from stall rate to frame tail is unproven. And whether serving `DP-2` elsewhere costs
 *display* latency: it is vblank-adjacent work, and moving it is not free by assumption.
 
+### G21 — the GPU interrupt owns a CPU, and cake places game threads on it
+
+**Registered 2026-08-02. Parent: none — this is a new trunk, and the first experiment in
+the campaign aimed at the QUIET regime.**
+
+`/proc/irq/115/effective_affinity_list` is `13`. The nvidia interrupt has fired
+**1,266,319,129** times on CPU 13 and **zero** times on the other fifteen. A latency
+thread scheduled there contends with the GPU interrupt stream, and both schedulers place
+threads there at close to the fair 1-in-16 rate.
+
+Measured per-CPU wake→run delay, `bench/percpu_wake.py`, no new capture on the cake side
+(retained `G20R-20a`, cake, 8-spinner load):
+
+| role | CPUs 0-12,14,15 mean | CPU 13 mean | CPU 13 p99 | CPU 13 share |
+|---|---|---|---|---|
+| `main` | 1.35-1.75 µs | **40.33 µs** | 520 µs | 1.6% |
+| `renderer` | 1.87-3.27 µs | **6.02 µs** | 133 µs | **6.4%** |
+
+Removing CPU 13's excess would cut **28.5%** of `main`'s and **9.8%** of the renderer's
+total wake-delay budget. On a fresh quiet-machine native capture the same CPU costs `main`
+a **116×** within-CPU penalty (0.25 → 137.23 µs mean).
+
+**An idle-depth theory was falsified on the way here and must not be retried.** The
+quiet-machine data first showed delay rising monotonically with how long the target CPU
+had been idle — 0.27 µs under 50 µs asleep, 38.66 µs beyond 200 µs, which reads exactly
+like C-state exit. It is not: this host has **no cpuidle driver bound**
+(`current_driver = none`), and the within-CPU control shows 15 of 16 CPUs at a ratio of
+**1.0-1.6×**. The entire effect was CPU 13, which long-idle wakes disproportionately land
+on. **Idle duration is a confounder for IRQ residency, not a lever.**
+
+**Steps.** (1) Rust loader samples `/proc/interrupts` over a window and marks any CPU
+carrying ≥4× its fair share as IRQ-hot, published as a `const volatile u64` mask so libbpf
+freezes it to an immediate. (2) `cake_select_cpu` declines to re-home a task onto a hot
+`prev_cpu`. (3) When `select_cpu_dfl` returns a hot idle CPU, try one `scx_bpf_pick_idle_cpu`
+for a cool alternative, keeping the hot CPU when none exists.
+
+**Endpoint:** `main` and `renderer` wake p99, interleaved cake-vs-cake, plus the CPU 13
+share falling from 6.4% toward zero while total dispatch count holds.
+
+**Kill conditions:** CPU 13 share does not fall (mechanism never fires); total wakes served
+drops (work conservation lost — the −19% law from the enqueue-diversion falsification);
+any other CPU inherits a >2× penalty (the harm moved rather than went away).
+
+**Step budget: 3 commits.** Re-diagnose at 6.
+
+**Not established.** That wake latency converts to frames — the whole campaign's standing
+caveat. And whether an IRQ-hot CPU is bad for *throughput* work too, or only for latency
+threads; the change deliberately preserves work conservation so the saturated case is
+untouched.
+
 ### R.23 — the two guards `wake_maxdecomp.py` cannot run without
 
 perf arms its per-CPU ring buffers **sequentially**, so early in a trace a CPU can be
