@@ -38,6 +38,70 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### ❌ G20 MEASURED — NULL on wake, NULL on frames, and CAKE LOSES TO NATIVE tonight
+
+**2026-08-01 21:38–21:56. Two measurements, both registered in advance, both clean.**
+Wake: interleaved 18a/20a/20b/18b, 8 spinners verified 8/8 before and after every arm,
+binary sha256 checked at every attach. Frames: mirrored **ABCCBA**, native / G18 / G20,
+2 runs each, 45 s, ~13,400 frames per run, spinners OFF.
+
+**1. The registered wake endpoint does not separate.** Renderer delays per 10k:
+
+| | 18a (G18) | 20a (G20) | 20b (G20) | 18b (G18) |
+|---|---|---|---|---|
+| >200 µs | 18.02 | 10.72 | 12.31 | **9.52** |
+| >500 µs | 3.64 | 3.57 | 4.23 | **2.97** |
+
+**The best arm on both cuts is a G18 arm.** No ordering, no 2/2. **NULL.**
+*Caveat that cuts against G18, not for it:* arm 18a was still loading (QUEUE=22 vs ≤1
+elsewhere, an entirely different preemptor profile), which inflates the G18 mean.
+
+**2. G20's MECHANISM NEVER FIRED, so this run cannot falsify it.** `DP-2` evictions of
+the renderer, same game, same machine, same G18 binary:
+
+```
+this afternoon (P-18a)   11,518   73.7% of short preemptions
+tonight (20a / 20b)          45    1.6%
+tonight (18a / 18b)     not in the top 8
+```
+
+**256× fewer, on the control arm too.** The renderer's median run before preemption also
+moved 50 µs → 345 µs. This is a different regime, not a different scheduler. **G20 is
+UNTESTED, not falsified** — do not record it as either.
+
+**3. THE REAL RESULT, and it is against cake.** Frames, per-run, native vs both cake arms:
+
+| metric | native | G18 | G20 |
+|---|---|---|---|
+| **0.1% low** (per run) | **225.6 / 226.0** | 211.1 / 214.5 | 213.3 / 214.5 |
+| **0.1% low** (mean) | **225.80** | 212.79 | **213.92** |
+| p99.9 − median ms | **1.090** | 1.358 | 1.333 |
+| 240 Hz deadline miss % | **1.004** | 1.278 | 1.155 |
+| FT stddev | **0.272** | 0.294 | 0.290 |
+| max FT ms | **5.102** | 6.394 | 6.831 |
+| avg FPS | 299.26 | 299.24 | 299.31 |
+
+**Native wins 0.1% low 2/2 with no overlap — cake is −5.6%** — and wins every other tail
+metric. **G20 vs G18 is a wash**: marginally ahead on 0.1% low, p99.9−median, stddev and
+deadline misses, behind on max FT, all under 1.5% and all overlapping.
+
+**4. THIS CONTRADICTS THE 2026-08-01 G17 FRAME WIN and the scene is why.** That run
+measured native at **3.019%** deadline misses and 276 fps; tonight native is **1.004%** at
+299 fps. **The scene got easier and cake's advantage inverted.** Consistent with the
+standing law that cake's wins are regime-conditional — and it means the campaign's one
+frame win was never a general result. **Both readings stand; neither generalises.**
+
+**WHAT THIS CHANGES.** The open question is no longer "how do we beat native's tail" but
+**"why does cake lose the easy scene"** — a scene with headroom, where native's own tail
+is already tight. That is a different mechanism from the contended one G10–G18 chased, and
+it is now the highest-value target on the board.
+
+**DISPOSITION — maintainer's call, no auto-revert either way.** G20 is +10 insns, zero
+spills, and measured harmless-to-marginally-positive against G18. Its premise is real (it
+was measured this afternoon) but did not recur, so keeping it costs almost nothing and
+reverting it discards a mechanism that has never had a fair test. Recommend **keep on the
+branch, marked UNPROVEN, do not promote** until a capture reproduces the DP-2 regime.
+
 ### 🚨 RETRACTED — "cake's stalls are unbounded, native's are bounded" was an ARTIFACT
 
 **2026-08-01, second pass. No new capture — `bench/wake_maxdecomp.py` on the retained
