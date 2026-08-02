@@ -107,6 +107,25 @@ Reconciled scoreboard in CONSTANTS_AUDIT.md.
 6. **~30% of slow wakes on BOTH schedulers land on an idle CPU** — C-state exit, ~24–93 µs,
    which no placement policy fixes.
 
+## G21 — interrupt-sink avoidance (2026-08-02, KEPT)
+
+| | |
+|---|---|
+| **Hypothesis** | a CPU absorbing a device's interrupt stream is a bad home for a latency thread, and neither scheduler knows |
+| **Evidence** | nvidia IRQ 115 pinned to CPU 13: **1,266,319,129** interrupts there, **zero** on the other fifteen |
+| **Change** | loader measures `/proc/interrupts` into `cpu_irq_hot` rodata; `select_cpu` prefers a quieter CPU when one is idle |
+| **Result** | **`main` mean wake −39.9%, `renderer` −25.3%, 2/2 interleaved ABBA on live HD2** |
+| **Kill conditions** | all three passed — share fell 40×, wakes served **rose** 1.5%, no CPU inherited >2× |
+| **Charged** | migrations +9.7%, renderer preemptions +9.4%, `select_cpu` +29 insns, zero spills |
+| **Caveat** | wake latency, a proxy — no frame data. Inert under saturation by construction |
+
+**Two by-products worth more than the win.** An idle-depth/C-state theory was falsified by
+a within-CPU control (15 of 16 CPUs at 1.0–1.6×; the host binds no cpuidle driver), and the
+**SMT sibling of a sink is itself degraded at 1.30×** — G21.1, untested.
+
+**First experiment in the campaign aimed at the QUIET regime.** G10–G20 all ran under 8
+spinners; this one is inert there and acts only when a CPU is actually idle.
+
 ## Open, in priority order
 
 1. **Frame data for everything above.** Frames are the endpoint; the whole G10–G17 arc is
