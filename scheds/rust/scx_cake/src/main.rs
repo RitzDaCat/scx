@@ -48,7 +48,8 @@ const SCHEDULER_NAME: &str = "scx_cake";
 /// the two. The time slice is a compile-time constant.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Enable verbose libbpf output.
+    /// Enable verbose libbpf output and runtime diagnostics. A release run
+    /// without this prints only identity, attach and exit.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
@@ -65,6 +66,9 @@ struct Scheduler<'a> {
     /// Pessimistic frame estimate: fast down, slow up. Feeds the slice cap,
     /// which must not widen when the mode wobbles (§G18).
     frame_floor: u64,
+    /// Print runtime diagnostics. Off by default: a release run is not a
+    /// measurement session, and a scheduler logging into a game is noise.
+    verbose: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -157,13 +161,17 @@ impl<'a> Scheduler<'a> {
                 // measurement -- same machinery as G9.7.
                 let (med, p99) = (probe.median, probe.p99);
                 let hm = rodata.cake_handoff_max_ns;
-                info!("   class   starvation = mean wait > mean burst (no threshold)");
-                info!(
-                    "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
-                );
+                if opts.verbose {
+                    info!("   class   starvation = mean wait > mean burst (no threshold)");
+                    info!(
+                        "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
+                    );
+                }
             }
             None => {
-                log::warn!("   probe   handoff probe failed (diagnostic only)");
+                if opts.verbose {
+                    log::warn!("   probe   handoff probe failed (diagnostic only)");
+                }
             }
         }
 
@@ -274,6 +282,7 @@ impl<'a> Scheduler<'a> {
             struct_ops,
             frame_bucket: None,
             frame_floor: 0,
+            verbose: opts.verbose,
         })
     }
 
@@ -282,14 +291,14 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        // Frame clock, reported on a material change only, so a moving line
-        // here means the observed cadence really moved (§G11).
+        // Frame clock, reported under --verbose on a material change only, so
+        // a moving line there means the observed cadence really moved (§G11).
         let mut shown: u64 = 0;
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             std::thread::sleep(Duration::from_secs(1));
 
             let observed = self.publish_frame_clock();
-            if observed != 0 && observed.abs_diff(shown) > shown / 16 {
+            if self.verbose && observed != 0 && observed.abs_diff(shown) > shown / 16 {
                 shown = observed;
                 info!(
                     "   frame   observed period {}us ({:.1} Hz)",
