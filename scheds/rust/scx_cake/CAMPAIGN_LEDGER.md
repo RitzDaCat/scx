@@ -112,6 +112,20 @@ Reconciled scoreboard in CONSTANTS_AUDIT.md.
    `main`'s mean wake −39.9%. "Which no placement policy fixes" was a closed door that was
    never tested.
 
+## G23 + G24 (2026-08-02) — sink mask shipped unmeasured on frames; census closes four questions
+
+**G23 (BUILT, smoke-passed, endpoint PENDING):** per-line sink detection (flags {5,13}
+where G21's rule saw only 13) + `scx_bpf_select_cpu_and(nonsink)` deletes the
+abandoned-claim leak. Evidence so far: CENSUS + STATIC + live smoke; the HD2 ABBA and
+severe-frame screen are the endpoint. `docs/REVIEW_G21_G23_2026-08-02.md`.
+
+**G24 (CENSUS, complete):** | pinned-wake preempt **0/0, fifth zero** → delete |
+sibling kick **0/0** → delete | SLEEPER_LAG passes **98.6%** → not a predicate |
+steal ring **93-98% of dispatches walk, ~1% hit** → optimize (G25 candidate) |
+serial handoff **0.01-0.03%** in game regimes → GAMES-ONLY trade |
+G17 divert **81.7% of enqueues** under load — its mechanism is not a rare path |
+`docs/CENSUS_G24_2026-08-02.md`.
+
 ## G21 — interrupt-sink avoidance (2026-08-02, KEPT)
 
 | | |

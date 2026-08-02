@@ -38,12 +38,21 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
-### 🚧 G24 REGISTERED — expense-vs-benefit census of the unaudited systems, on the sim
+### ✅ G24 CENSUS COMPLETE — full numbers in `docs/CENSUS_G24_2026-08-02.md`
 
-**Maintainer direction 2026-08-02: audit expense vs benefit; expensive + does nothing
-for games = remove.** Registration in HYPOTHESES.md §G24; the coverage map that picked
-the targets is `docs/AUDIT_GAME_RELEVANCE_2026-08-02.md`. Census build modeled on
-`dba25375c`, run against `helldivers2-mission-fitted.conf` — no game time needed.
+**Both arms run 2026-08-02 (mission sim + ambient, HD2 menu live, recorded).** The
+verdict set: **pinned-wake preempt is dead at its FIFTH zero dataset** and the sibling
+kick at its second — both are delete-with-no-trade; the SLEEPER_LAG syncgate passes
+98.6%/95.5% (confirmed not a predicate, G10 #8); the **steal ring walks on 93-98% of
+all dispatches for a ~1% hit** — real expense, real work conservation, optimization
+target (G25 candidate), never a removal; serial handoff fires 0.01-0.03% in game
+regimes and is the GAMES-ONLY maintainer trade. Diagnostic committed `018fbe1d5`,
+reverted `254ed3667`, revert verified by empty source diff.
+
+**SESSION PARKED 2026-08-02 evening. Resume order:** (1) G23 endpoint — HD2 ABBA
+during active play + P4 bench screen (`docs/REVIEW_G21_G23_2026-08-02.md` §resume has
+receipts and steps); (2) the two dead-branch deletions + game screen; (3) syncgate
+simplification; (4) G25 steal-walk hypothesis; (5) serial-handoff trade decision.
 
 ### 🚧 G23 IN FLIGHT — every sink, not just the loudest; delete the swap's leaked claim
 

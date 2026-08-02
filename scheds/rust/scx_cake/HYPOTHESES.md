@@ -1171,7 +1171,14 @@ Note: G21.1 (SMT sibling) was WITHDRAWN by G22 — CPU 5 is its own USB sink and
 effects are inseparable in that data. G23 flags CPU 5 for its own interrupt stream, which
 subsumes the actionable half of G21.1.
 
-### G24 — REGISTERED 2026-08-02: expense-vs-benefit census of every unaudited system, on the sim
+### G24 — CENSUS COMPLETE 2026-08-02: expense-vs-benefit census of every unaudited system, on the sim
+
+**Status: both arms run same day; full table and dispositions in
+`docs/CENSUS_G24_2026-08-02.md`. Headlines: pinned-wake preempt 0/0 at its fifth
+dataset; sibling kick 0/0; SLEEPER_LAG passes 98.6%/95.5% (not a predicate); steal
+ring walks 93-98% of dispatches at ~1% hit (optimize, never remove); serial handoff
+0.01-0.03% in game regimes (the GAMES-ONLY trade). Deviation: cake-bpfstats not run —
+no verdict depended on sub-callback ns.**
 
 **Maintainer direction: audit the systems the game campaign never touched — expense
 versus what they bring — and remove what is expensive and does nothing for games.**
