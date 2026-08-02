@@ -1171,6 +1171,36 @@ Note: G21.1 (SMT sibling) was WITHDRAWN by G22 — CPU 5 is its own USB sink and
 effects are inseparable in that data. G23 flags CPU 5 for its own interrupt stream, which
 subsumes the actionable half of G21.1.
 
+### G24 — REGISTERED 2026-08-02: expense-vs-benefit census of every unaudited system, on the sim
+
+**Maintainer direction: audit the systems the game campaign never touched — expense
+versus what they bring — and remove what is expensive and does nothing for games.**
+
+**Hypothesis.** The five never-audited paths (dispatch search + steal ring, qmark
+maintenance, R.6 re-pick, sibling kick, run-slot learning) plus the three unexecuted
+§G10 dispositions (pinned-wake margin at 0%, SLEEPER_LAG at 94-99.95%, G20's null
+kthread arm) can be priced by CENSUS × path-cost under a game-shaped sim load —
+`helldivers2-mission-fitted.conf`, which needs no game time and no human. The sim is
+DISQUALIFIED for latency (2 µs vs 265 µs) and is not asked for any: firing rates and
+callback expense only. "Never fires" is removal-grade evidence (three gates died on
+rate, never on value); "fires, benefit unproven" routes to a game A/B list instead.
+
+**Steps.** (1) DIAGNOSTIC census commit modeled on `dba25375c` (PERCPU_ARRAY,
+non-atomic inc, dump at detach), ~24 counters over select_cpu arms / enqueue arms /
+dispatch ring / wake_notify. (2) Attach census build, run mission-fitted sim, collect
+rates; repeat on the menu spec for a quiet-regime contrast. (3) Expense side on the
+CLEAN build: per-callback ns (cake-bpfstats) + per-arm insn attribution. (4) Verdict
+table: ns/sec = rate × path cost vs best existing benefit evidence. (5) Revert the
+census commit; deletions (if any) are separate commits with the ledger attached.
+
+**Endpoint:** the expense-vs-benefit table in a committed doc, each row carrying its
+evidence class and a disposition (delete / keep / game-A/B).
+
+**Kill conditions:** census build fails verify or stalls (diag commit is discarded);
+sim validate fails against its fitted spec (rates would be shape-garbage).
+
+**Step budget: 3 commits (register, census, doc+revert). Re-diagnose at 6.**
+
 ### R.23 — the two guards `wake_maxdecomp.py` cannot run without
 
 perf arms its per-CPU ring buffers **sequentially**, so early in a trace a CPU can be

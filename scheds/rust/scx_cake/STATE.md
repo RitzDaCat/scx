@@ -38,6 +38,13 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### 🚧 G24 REGISTERED — expense-vs-benefit census of the unaudited systems, on the sim
+
+**Maintainer direction 2026-08-02: audit expense vs benefit; expensive + does nothing
+for games = remove.** Registration in HYPOTHESES.md §G24; the coverage map that picked
+the targets is `docs/AUDIT_GAME_RELEVANCE_2026-08-02.md`. Census build modeled on
+`dba25375c`, run against `helldivers2-mission-fitted.conf` — no game time needed.
+
 ### 🚧 G23 IN FLIGHT — every sink, not just the loudest; delete the swap's leaked claim
 
 **Registered 2026-08-02, full registration in HYPOTHESES.md §G23.** Two defects in G21's
