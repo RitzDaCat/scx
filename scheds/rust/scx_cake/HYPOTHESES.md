@@ -1112,7 +1112,11 @@ caveat. And whether an IRQ-hot CPU is bad for *throughput* work too, or only for
 threads; the change deliberately preserves work conservation so the saturated case is
 untouched.
 
-### G23 — REGISTERED 2026-08-02: every sink, not just the loudest, and no abandoned claims
+### G23 — BUILT + SMOKE-PASSED 2026-08-02, endpoint pending: every sink, not just the loudest, and no abandoned claims
+
+**Status: P1 CONFIRMED at live smoke (probe flagged {5, 13} with device names, verifier
+accepted, zero stalls). P2-P4 await the HD2 ABBA + bench screen. Findings, dispositions
+and resume steps: `docs/REVIEW_G21_G23_2026-08-02.md`.**
 
 **Parent: G21 (mechanism confirmed 2/2) + G22 investigation #1 (three sinks, not one).**
 

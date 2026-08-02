@@ -47,9 +47,15 @@ implementation, one fix: the 4× fair-share detector can only ever flag the loud
 sink (RT-dodge leak class). Fix: per-IRQ-line detection (≥1 kHz, ≥95% one-CPU) and
 `scx_bpf_select_cpu_and(nonsink)` with dfl fallback, swap block deleted.
 
-**Endpoint: HD2 ABBA on `Window & Input` / `main` / `renderer` mean wake + severe-frame
-screen + one `--blocks 2` bench screen. Predictions P1-P4 registered. UNMEASURED until
-those run.**
+**Code COMPLETE and smoke PASSED, endpoint UNMEASURED.** Commits `25ff596be` →
+`05209e24f` → `1c6b97559` → `77e6404d3`; zero spills throughout; divides 11 → 11.
+Live smoke on this desktop: verifier accepted, probe named both sinks
+(`xhci_hcd pins CPU 5 at 2158/s`, `nvidia pins CPU 13 at 15183/s`), zero stalls, clean
+detach — **P1 CONFIRMED**. Endpoint: HD2 ABBA during ACTIVE play (P2 needs live mouse
+input) on `Window & Input` / `main` / `renderer` mean wake + severe-frame screen, then
+the P4 `--blocks 2` bench screen (correctly blocked while a game runs). **Full review
+findings, verified kernel facts, receipts and resume steps:
+`docs/REVIEW_G21_G23_2026-08-02.md`.**
 
 ### 🏆 G21 SHIPPED — the GPU interrupt owned a CPU, and cake was placing game threads on it
 
