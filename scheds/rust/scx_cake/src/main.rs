@@ -12,6 +12,7 @@ pub use bpf_intf::*;
 
 #[cfg(cake_multi_ccd)]
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -435,49 +436,78 @@ struct HandoffProbe {
 /// Which CPUs are interrupt sinks on THIS host.
 ///
 /// IRQ affinity is a property of the machine, not of any policy value, so it is
-/// measured here and frozen into rodata rather than guessed at or hard-coded --
-/// on the development host the nvidia interrupt is pinned to a single CPU and
-/// has fired 1.27e9 times there against zero everywhere else, which cost the
-/// game's main thread a 116x within-CPU wake penalty (§G21).
+/// measured here rather than guessed at or hard-coded -- on the development
+/// host three device interrupts are 100%-pinned to their own CPUs (nvidia, USB,
+/// NIC), and the nvidia one cost the game's main thread a 116x within-CPU wake
+/// penalty (§G21).
 ///
-/// Two samples of `/proc/interrupts` give a RATE; since-boot totals would keep
-/// flagging a CPU whose interrupt source has long since moved. A CPU is a sink
-/// when it carries at least `HOT_SHARE` times an even split AND takes more than
-/// one interrupt per millisecond -- a stream sparser than that cannot account
-/// for microsecond-scale wake delays. Returns an empty set rather than a
-/// half-measured one if anything about the probe looks wrong.
+/// Judged per IRQ LINE, never per CPU total: a fair-share test on totals is
+/// dominated by the loudest source, so it can only ever flag the loudest sink
+/// and missed two of the three on this host (§G23). Two samples give a RATE;
+/// since-boot totals would keep flagging a CPU whose interrupt source has long
+/// since moved. A line marks its CPU when it fires at least once per
+/// millisecond -- sparser cannot account for microsecond-scale wake delays --
+/// AND lands almost entirely on one CPU, which is what pinned affinity produces
+/// by construction. Returns an empty set rather than a half-measured one if
+/// anything about the probe looks wrong.
 fn probe_irq_hot_cpus(nr_cpus: usize) -> Vec<bool> {
-    /// Multiple of an even per-CPU split above which a CPU is an interrupt sink.
-    const HOT_SHARE: f64 = 4.0;
-    /// Below one interrupt per millisecond the stream is too sparse to matter.
-    const MIN_RATE_HZ: f64 = 1_000.0;
+    /// Below one interrupt per millisecond a line is too sparse to matter.
+    const MIN_LINE_RATE_HZ: f64 = 1_000.0;
+    /// A pinned interrupt is 100% on one CPU by construction; the slack
+    /// tolerates an affinity move mid-window.
+    const SINK_CONCENTRATION: f64 = 0.95;
     const WINDOW: Duration = Duration::from_millis(120);
 
     let none = vec![false; nr_cpus];
-    let Some(a) = read_irq_counts(nr_cpus) else {
+    let Some((cols_a, a)) = read_irq_lines(nr_cpus) else {
         return none;
     };
     std::thread::sleep(WINDOW);
-    let Some(b) = read_irq_counts(nr_cpus) else {
+    let Some((cols_b, b)) = read_irq_lines(nr_cpus) else {
         return none;
     };
-
-    let secs = WINDOW.as_secs_f64();
-    let rates: Vec<f64> = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| y.saturating_sub(*x) as f64 / secs)
-        .collect();
-    let total: f64 = rates.iter().sum();
-    if total <= 0.0 {
+    // A hotplug mid-window shifts what every column means.
+    if cols_a != cols_b {
         return none;
     }
 
-    let fair = total / nr_cpus as f64;
-    let hot: Vec<bool> = rates
-        .iter()
-        .map(|r| *r >= HOT_SHARE * fair && *r >= MIN_RATE_HZ)
-        .collect();
+    let secs = WINDOW.as_secs_f64();
+    let mut hot = vec![false; nr_cpus];
+    for (label, (before, _)) in &a {
+        let Some((after, desc)) = b.get(label) else {
+            continue;
+        };
+        // Only full per-CPU rows can attribute a stream to a CPU; ERR/MIS
+        // style single-total rows cannot.
+        if before.len() != cols_a.len() || after.len() != cols_a.len() {
+            continue;
+        }
+
+        let deltas: Vec<u64> = before
+            .iter()
+            .zip(after.iter())
+            .map(|(x, y)| y.saturating_sub(*x))
+            .collect();
+        let total: u64 = deltas.iter().sum();
+        if (total as f64) < MIN_LINE_RATE_HZ * secs {
+            continue;
+        }
+
+        let Some((peak_col, peak)) = deltas.iter().copied().enumerate().max_by_key(|(_, d)| *d)
+        else {
+            continue;
+        };
+        if peak as f64 >= SINK_CONCENTRATION * total as f64 {
+            let cpu = cols_a[peak_col];
+            if !hot[cpu] {
+                hot[cpu] = true;
+                info!(
+                    "   irq     {label}: {desc} pins CPU {cpu} at {:.0}/s",
+                    total as f64 / secs
+                );
+            }
+        }
+    }
 
     // A probe perturbed by host load must never mis-tune the scheduler: if it
     // wants to condemn half the machine it has measured something other than
@@ -488,38 +518,51 @@ fn probe_irq_hot_cpus(nr_cpus: usize) -> Vec<bool> {
     hot
 }
 
-/// Per-CPU total interrupt counts from `/proc/interrupts`.
+/// Per-line interrupt counts from `/proc/interrupts`, plus the header's
+/// column-to-CPU map.
 ///
-/// Every row is summed, IPIs included: a rescheduling or TLB-shootdown storm
-/// costs the same microseconds as a device stream, and the fair-share test is
-/// relative, so symmetric sources raise every CPU alike and cancel.
-fn read_irq_counts(nr_cpus: usize) -> Option<Vec<u64>> {
+/// Columns are mapped by the header's `CPU<n>` labels, never by position: with
+/// any CPU offline the columns are not contiguous, and a positional map would
+/// attribute a sink to the wrong CPU. Each row keeps its last field (the device
+/// name) so a flagged sink can be named.
+fn read_irq_lines(nr_cpus: usize) -> Option<(Vec<usize>, HashMap<String, (Vec<u64>, String)>)> {
     let text = std::fs::read_to_string("/proc/interrupts").ok()?;
     let mut lines = text.lines();
-    // The header names one column per online CPU and fixes how many of the
-    // leading numeric fields on each row are per-CPU counts.
-    let ncol = lines.next()?.split_whitespace().count().min(nr_cpus);
-    if ncol == 0 {
+    let cols = lines
+        .next()?
+        .split_whitespace()
+        .map(|h| h.strip_prefix("CPU").and_then(|n| n.parse::<usize>().ok()))
+        .collect::<Option<Vec<usize>>>()?;
+    if cols.is_empty() || cols.iter().any(|c| *c >= nr_cpus) {
         return None;
     }
 
-    let mut sums = vec![0u64; nr_cpus];
+    let mut rows = HashMap::new();
     for line in lines {
-        let mut fields = line.split_whitespace();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(label) = fields.first() else {
+            continue;
+        };
         // Row label, e.g. "115:" or "LOC:".
-        if !fields.next()?.ends_with(':') {
+        if !label.ends_with(':') {
             continue;
         }
-        for (cpu, f) in fields.take(ncol).enumerate() {
+
+        let mut counts = Vec::with_capacity(cols.len());
+        for f in &fields[1..] {
+            if counts.len() == cols.len() {
+                break;
+            }
             match f.parse::<u64>() {
-                Ok(v) => sums[cpu] += v,
-                // Trailing type/description columns are not counts; the row is
-                // done once parsing stops succeeding.
+                Ok(v) => counts.push(v),
+                // Trailing type/description columns are not counts.
                 Err(_) => break,
             }
         }
+        let desc = fields.last().copied().unwrap_or("").to_string();
+        rows.insert(label.trim_end_matches(':').to_string(), (counts, desc));
     }
-    Some(sums)
+    Some((cols, rows))
 }
 
 /// Measure one wake + block + switch hop on THIS host.
