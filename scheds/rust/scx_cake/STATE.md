@@ -38,6 +38,44 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### 🏆 G21 SHIPPED — the GPU interrupt owned a CPU, and cake was placing game threads on it
+
+**2026-08-02, interleaved ABBA on live HD2, quiet host, 2/2 arms, zero stalls.**
+`/proc/irq/115/effective_affinity_list` is `13`: the nvidia interrupt has fired
+**1,266,319,129** times on CPU 13 and **zero** times on the other fifteen. Both schedulers
+were handing that CPU to game threads at close to its fair share.
+
+| metric | pre-G21 (A1/A2) | G21 (B1/B2) | delta |
+|---|---|---|---|
+| **`main` mean wake** | 0.79 / 0.79 | **0.47 / 0.48** | **−39.9%** |
+| **`renderer` mean wake** | 0.91 / 0.83 | **0.66 / 0.64** | **−25.3%** |
+| `renderer` CPU 13 share | 3.9% / 4.2% | **0.1% / 0.1%** | 40× |
+| `main` wakes served | 357,541 / 358,354 | 363,050 / 363,422 | **+1.5%** |
+
+Zero overlap between arms. **Score this on the MEAN, not p99** — for `main` the affected
+wakes are rarer than 1-in-100, so they sit above p99 and p99 understates the win 4×
+(−9.3%). Cost: migrations +9.7%, renderer preemptions +9.4% — swapping off the sink IS a
+migration. Work conservation is preserved by construction: with nothing else idle the sink
+is still taken, so the saturated regime is untouched.
+
+**The loader measures interrupt affinity; nothing is hard-coded.** Two samples of
+`/proc/interrupts` give a rate, and a CPU carrying ≥4× an even split while taking more
+than one interrupt per millisecond is a sink, frozen into `cpu_irq_hot` rodata. On this
+host it finds exactly CPU 13 at **4.9×** fair share with the next CPU at 1.2×. It condemns
+nothing if it would condemn half the machine.
+
+**Two things fell out of this that are worth more than the win itself:**
+1. **An idle-depth theory was falsified on the way** — see §G21 in HYPOTHESES.md. Delay
+   appeared to rise monotonically with how long the target CPU had slept, exactly like
+   C-state exit. This host binds **no cpuidle driver**, and the within-CPU control puts 15
+   of 16 CPUs at 1.0–1.6×. The whole effect was CPU 13. **Idle duration is a confounder
+   for IRQ residency, not a lever.**
+2. **The SMT sibling of a sink is itself degraded** — CPU 5 carries 1.30× while its own
+   load FELL. That is G21.1 and it is untested.
+
+**The standing caveat still stands: this is wake latency, a proxy. No frame data yet.**
+
+
 ### 🔬 THE FIVE-DOMAIN SWEEP — cake wins 4 of 7, and the win scales with SHORTNESS
 
 **2026-08-01, retained traces only, no capture.** `bench/wake_maxdecomp.py` now takes a

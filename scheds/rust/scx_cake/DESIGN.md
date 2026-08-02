@@ -81,9 +81,19 @@ with the `sum_exec_runtime` snapshot, and one family of hint words (`qmark`
 "queue may hold work", republished by the owner from its own head peek,
 benign races). Load-time constants live in `const volatile` rodata so
 libbpf's freeze lets the verifier fold them: the SMT sibling map
-(`cpu_sibling`), the CPU id span (`nr_cpu_span`), and on multi-CCD hosts the
-precomputed steal order. The seven `SCX_*` enum values used are rebound to
-CO-RE load-time immediates instead of rodata loads.
+(`cpu_sibling`), the CPU id span (`nr_cpu_span`), the interrupt-sink map
+(`cpu_irq_hot`), and on multi-CCD hosts the precomputed steal order. The seven
+`SCX_*` enum values used are rebound to CO-RE load-time immediates instead of
+rodata loads.
+
+**Interrupt sinks.** A CPU that absorbs a device's interrupt stream makes a
+poor home for a latency thread, which then waits behind the handler rather
+than behind other tasks. The loader samples `/proc/interrupts` twice and marks
+any CPU carrying ≥4× an even split, at more than one interrupt per
+millisecond, as a sink; `cake_select_cpu` then declines it for a cache-warm
+home claim and swaps off it when `select_cpu_dfl` hands it out. **Preference,
+never exclusion** — with no other CPU idle the sink is still used, so a
+saturated machine is unaffected and work conservation cannot be lost.
 
 ## The algorithm
 
@@ -456,3 +466,13 @@ they document the 12.6k-line predecessor and its mutation campaigns, not the
 current design. Live campaign state, the open gap list, and the current
 scoreboard live in [`STATE.md`](./STATE.md), which wins on any conflict with
 this document.
+- **2026-08-02** — G21: interrupt-sink avoidance. The nvidia IRQ is pinned to a
+  single CPU on the development host (1.27e9 interrupts there, zero elsewhere)
+  and both schedulers placed game threads on it at its fair share. The loader
+  now measures interrupt affinity into `cpu_irq_hot` rodata and `select_cpu`
+  prefers a quieter CPU when one is idle. Interleaved ABBA on live Helldivers 2,
+  2/2 arms: `main` mean wake −39.9%, `renderer` −25.3%, renderer's share of the
+  sink 4.2% → 0.1%, wakes served +1.5%. Score on the MEAN — the affected wakes
+  are rarer than 1-in-100 for `main`, so p99 understates it 4×. An idle-depth
+  (C-state) theory was falsified reaching this: the host binds no cpuidle driver
+  and the effect was one CPU, not idle duration.

@@ -282,16 +282,9 @@ static __always_inline bool cake_qmark_test(u32 cpu)
 /* Loader-filled SMT map; -1 means the CPU has no online sibling. */
 const volatile s32 cpu_sibling[MAX_CPUS];
 
-/*
- * Loader-filled: nonzero where a CPU carries a disproportionate share of the
- * host's hardware interrupts, so a task placed there contends with the
- * interrupt stream rather than merely with other tasks. One byte per CPU
- * rather than a bitmap: MAX_CPUS exceeds a word, and a plain load costs less
- * than the index arithmetic a mask would need (§G21).
- */
+/* Loader-filled: nonzero on a CPU that absorbs an interrupt stream (§G21). */
 const volatile u8 cpu_irq_hot[MAX_CPUS];
 
-/* Is this CPU an interrupt sink? Advisory — never a reservation (§G21). */
 static __always_inline bool cake_cpu_irq_hot(s32 cpu)
 {
 	return cpu >= 0 && cpu_irq_hot[(u32)cpu & (MAX_CPUS - 1)];
@@ -662,14 +655,9 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 
 		/*
-		 * Decline an interrupt sink while a quieter CPU is free. dfl
-		 * ranks by idleness and cache distance, neither of which sees
-		 * the interrupt stream, so on this host it hands out the GPU's
-		 * CPU at its full one-in-sixteen share and the task then waits
-		 * behind the interrupt handler. Work-conserving by
-		 * construction: with nothing else idle the sink is still taken,
-		 * because a slow CPU beats no CPU (§G21, and the -19% the
-		 * enqueue-diversion falsification charged for losing that).
+		 * Decline an interrupt sink while a quieter CPU is free; dfl
+		 * ranks by idleness and cache distance and sees no interrupts.
+		 * Work-conserving: nothing else idle keeps the sink (§G21).
 		 */
 		if (cake_cpu_irq_hot(cpu)) {
 			s32 cool = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);

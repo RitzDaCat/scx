@@ -1035,10 +1035,37 @@ cake already wins the >200 µs delay rate 3–5× over native while tying 0.1% l
 link from stall rate to frame tail is unproven. And whether serving `DP-2` elsewhere costs
 *display* latency: it is vblank-adjacent work, and moving it is not free by assumption.
 
-### G21 — the GPU interrupt owns a CPU, and cake places game threads on it
+### G21 — CONFIRMED 2/2: the GPU interrupt owns a CPU, and cake was placing game threads on it
 
-**Registered 2026-08-02. Parent: none — this is a new trunk, and the first experiment in
-the campaign aimed at the QUIET regime.**
+**Registered and measured 2026-08-02. Parent: none — a new trunk, and the first experiment
+in the campaign aimed at the QUIET regime.**
+
+**VERDICT — interleaved ABBA on live Helldivers 2, quiet host, 22 s arms, zero stalls,
+game confirmed rendering in all four arms (~40k renderer wakes each):**
+
+| metric | A1 | A2 | B1 (G21) | B2 (G21) | delta |
+|---|---|---|---|---|---|
+| `main` mean wake | 0.79 | 0.79 | **0.47** | **0.48** | **−39.9%** |
+| `renderer` mean wake | 0.91 | 0.83 | **0.66** | **0.64** | **−25.3%** |
+| `main` p99 | 6.54 | 5.91 | **5.54** | **5.75** | −9.3% |
+| `renderer` CPU 13 share | 3.9% | 4.2% | **0.1%** | **0.1%** | 40× |
+| `main` wakes served | 357,541 | 358,354 | 363,050 | 363,422 | **+1.5%** |
+
+Zero overlap between arms on both roles. **The mean moves far more than p99 because the
+affected wakes are rarer than 1-in-100 for `main` — they sit ABOVE p99 and dominate the
+average.** Score this on the mean; p99 understates it by 4×.
+
+**All three kill conditions passed.** Share fell; wakes served ROSE, so work conservation
+held; and no CPU inherited a >2× penalty — the worst is **CPU 5 at 1.30×**, everything
+else 1.0-1.16×, the expected cost of spreading 2,935 wakes over fifteen CPUs.
+
+**Cost: `main` migrations +9.7%, renderer preemptions +9.4%.** Swapping off the sink is a
+migration, so this is the mechanism working, not a side effect — but it is a real charge
+and the next experiment on this branch should know it is there.
+
+**NEW, and the obvious child: the SMT sibling of an interrupt sink is itself degraded.**
+CPU 5 shares a core with CPU 13 and carries a 1.30× mean penalty while its own load FELL
+(19,551 → 13,012). Deprioritising the sibling as well is untested and is the natural G21.1.
 
 `/proc/irq/115/effective_affinity_list` is `13`. The nvidia interrupt has fired
 **1,266,319,129** times on CPU 13 and **zero** times on the other fifteen. A latency
