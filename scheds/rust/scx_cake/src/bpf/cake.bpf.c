@@ -177,68 +177,6 @@ struct {
 } cake_frame_hist SEC(".maps");
 
 /*
- * DIAGNOSTIC (to be reverted): G24 expense-vs-benefit census. Firing rates
- * for every path the game campaign never audited, under the fitted mission
- * sim. PERCPU_ARRAY + non-atomic local increment per the 2026-06-17 law.
- * Counters sit in the hot path; this build is not a performance arm.
- */
-enum cake_diag_slot {
-	DIAG_SELCPU = 0,	/* ops.select_cpu calls   (denominator) */
-	DIAG_ENQ,		/* ops.enqueue calls      (denominator) */
-	DIAG_DISPATCH,		/* ops.dispatch calls     (denominator) */
-	DIAG_NOTIFY,		/* cake_wake_notify calls (denominator) */
-
-	DIAG_SERIAL_TAKEN,	/* serial handoff returned the waker CPU */
-	DIAG_HOME_TAKEN,	/* cache-warm prev claim taken		*/
-	DIAG_RANKED_IDLE,	/* select_cpu_and claimed an idle CPU	*/
-	DIAG_DFL_IDLE,		/* fallback dfl claimed one instead	*/
-
-	DIAG_R6_TRY,		/* sync-distrust condition hit		*/
-	DIAG_R6_REPICK,		/*   and the re-pick found an idle CPU	*/
-	DIAG_QMARK_TRY,		/* ordered-admission peek taken		*/
-	DIAG_QMARK_DEFER,	/*   and it deferred to an older claim	*/
-
-	DIAG_SYNCGATE_TRY,	/* saturated handoff gate entered	*/
-	DIAG_SYNCGATE_LAG,	/*   entered via SLEEPER_LAG, not SYNC	*/
-	DIAG_SYNCGATE_WAKER,	/*   converged on the waker CPU		*/
-
-	DIAG_KT_IDLE,		/* kthread wake took an idle CPU (G20)	*/
-	DIAG_ENQ_STARVE,	/* starved wake routed global (G12)	*/
-	DIAG_G17_DIVERT,	/* anti-collision diverted to WAKE_DSQ	*/
-	DIAG_PINNED_TRY,	/* pinned-wake preempt evaluated	*/
-	DIAG_PINNED_KICK,	/*   and actually fired			*/
-
-	DIAG_QMARK_SETW,	/* qmark stores that actually wrote	*/
-	DIAG_QMARK_CLRW,
-
-	DIAG_STEAL_TRY,		/* ring steal entered			*/
-	DIAG_STEAL_HIT,		/*   and moved work			*/
-
-	DIAG_SIB_KICK,		/* notify: idle SMT sibling kicked	*/
-	DIAG_PICK_KICK,		/* notify: pick_idle kicked		*/
-	DIAG_NOTIFY_PREEMPT,	/* notify: target-CPU preempt fired	*/
-	DIAG_NEIGH_RUN,		/* neighbour probe loop entered		*/
-	DIAG_NEIGH_HIT,		/*   and preempted a neighbour		*/
-
-	DIAG_NR,
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, DIAG_NR);
-	__type(key, u32);
-	__type(value, u64);
-} cake_diag SEC(".maps");
-
-static __always_inline void diag_inc(u32 slot)
-{
-	u64 *v = bpf_map_lookup_elem(&cake_diag, &slot);
-
-	if (v)
-		(*v)++;
-}
-
-/*
  * This task's mean burst: runtime per voluntary switch, exact to the
  * nanosecond. Supersedes >> log2(nvcsw), which banded (§G11).
  */
@@ -324,19 +262,15 @@ static struct cake_state cake;
 static __always_inline void cake_qmark_set(u32 cpu)
 {
 	cpu &= MAX_CPUS - 1;
-	if (!cake.qmark[cpu].word) {
-		diag_inc(DIAG_QMARK_SETW);
+	if (!cake.qmark[cpu].word)
 		cake.qmark[cpu].word = 1;
-	}
 }
 
 static __always_inline void cake_qmark_clear(u32 cpu)
 {
 	cpu &= MAX_CPUS - 1;
-	if (cake.qmark[cpu].word) {
-		diag_inc(DIAG_QMARK_CLRW);
+	if (cake.qmark[cpu].word)
 		cake.qmark[cpu].word = 0;
-	}
 }
 
 static __always_inline bool cake_qmark_test(u32 cpu)
@@ -660,8 +594,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	bool is_idle = false;
 	s32 cpu;
 
-	diag_inc(DIAG_SELCPU);
-
 
 	/*
 	 * Serial-handoff co-location, for a genuine handoff pair only: a
@@ -687,7 +619,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		    cake_handoff_yields((s32)wc)) {
 			s32 wcpu = (s32)wc;
 
-			diag_inc(DIAG_SERIAL_TAKEN);
 			cake_direct_clamp(p);
 			cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)wcpu,
 					cake_task_slice(p), 0);
@@ -706,7 +637,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    !cake_starved(p) && !cake_cpu_irq_hot(prev_cpu) &&
 	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		diag_inc(DIAG_HOME_TAKEN);
 		cake_direct_clamp(p);
 		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)prev_cpu,
 				cake_task_slice(p), 0);
@@ -727,14 +657,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
 						     ns, 0);
 	}
-	if (cpu >= 0) {
+	if (cpu >= 0)
 		is_idle = true;
-		diag_inc(DIAG_RANKED_IDLE);
-	} else {
+	else
 		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-		if (is_idle)
-			diag_inc(DIAG_DFL_IDLE);
-	}
 	if (is_idle) {
 		/*
 		 * Distrust a WAKE_SYNC return of the waker's own CPU: it can be
@@ -747,16 +673,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			const struct cpumask *ns = cast_mask(nonsink_cpumask);
 			s32 idle;
 
-			diag_inc(DIAG_R6_TRY);
 			if (ns && __COMPAT_HAS_scx_bpf_select_cpu_and)
 				idle = scx_bpf_select_cpu_and(p, prev_cpu, 0,
 							      ns, 0);
 			else
 				idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-			if (idle >= 0) {
-				diag_inc(DIAG_R6_REPICK);
+			if (idle >= 0)
 				cpu = idle;
-			}
 		}
 
 		/*
@@ -768,15 +691,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		    cake_qmark_test((u32)cpu)) {
 			struct task_struct *head;
 
-			diag_inc(DIAG_QMARK_TRY);
 			head = scx_bpf_dsq_peek((u64)(u32)cpu);
 			if (head) {
 				u64 head_vtime = head->scx.dsq_vtime;
 
-				if (time_before(head_vtime, cake_wake_vtime(p))) {
-					diag_inc(DIAG_QMARK_DEFER);
+				if (time_before(head_vtime, cake_wake_vtime(p)))
 					return cpu;
-				}
 			}
 		}
 		cake_direct_clamp(p);
@@ -795,15 +715,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    time_before(p->scx.dsq_vtime + SLEEPER_LAG_NS, cake.frontier.word)) {
 		s32 waker_cpu = (s32)bpf_get_smp_processor_id();
 
-		diag_inc(DIAG_SYNCGATE_TRY);
-		if (!(wake_flags & CAKE_WAKE_SYNC))
-			diag_inc(DIAG_SYNCGATE_LAG);
 		if (bpf_cpumask_test_cpu(waker_cpu, p->cpus_ptr) &&
 		    !scx_bpf_dsq_nr_queued(CAKE_DSQ_LOCAL_ON | (u32)waker_cpu) &&
-		    !scx_bpf_dsq_nr_queued((u64)(u32)waker_cpu)) {
-			diag_inc(DIAG_SYNCGATE_WAKER);
+		    !scx_bpf_dsq_nr_queued((u64)(u32)waker_cpu))
 			return waker_cpu;
-		}
 	}
 
 	return cpu;
@@ -822,7 +737,6 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 {
 	s32 idle;
 
-	diag_inc(DIAG_NOTIFY);
 	if (route == ROUTE_HOME_CLAIM && cake_home_notify(p, tcpu))
 		return;
 
@@ -832,7 +746,6 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 
 		if (sib >= 0 && bpf_cpumask_test_cpu(sib, p->cpus_ptr) &&
 		    scx_bpf_test_and_clear_cpu_idle(sib)) {
-			diag_inc(DIAG_SIB_KICK);
 			scx_bpf_kick_cpu(sib, CAKE_KICK_IDLE);
 			return;
 		}
@@ -840,7 +753,6 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 
 	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (idle >= 0) {
-		diag_inc(DIAG_PICK_KICK);
 		scx_bpf_kick_cpu(idle, CAKE_KICK_IDLE);
 		return;
 	}
@@ -852,10 +764,8 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 	 * that decides neither leaves the wakee on the 5 s watchdog (§R.14).
 	 */
 	if (cake_wake_preempt(p, tcpu,
-			       cake_frame_ns >> FRAME_PREEMPT_PROTECT_SHIFT)) {
-		diag_inc(DIAG_NOTIFY_PREEMPT);
+			       cake_frame_ns >> FRAME_PREEMPT_PROTECT_SHIFT))
 		return;
-	}
 
 	/*
 	 * Globally queued only: hunt a mid-slice compute occupant among the
@@ -866,7 +776,6 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 		u32 cand = (u32)tcpu;
 		u32 pi;
 
-		diag_inc(DIAG_NEIGH_RUN);
 		for (pi = 0; pi < CAKE_NEIGHBOUR_PROBE_DEPTH; pi++) {
 			cand++;
 			if (cand >= nr_cpu_span)
@@ -875,10 +784,8 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 				continue;
 			if (cake_wake_preempt(p, (s32)cand,
 					       cake_frame_ns >>
-					       FRAME_PROBE_PROTECT_SHIFT)) {
-				diag_inc(DIAG_NEIGH_HIT);
+					       FRAME_PROBE_PROTECT_SHIFT))
 				break;
-			}
 		}
 	}
 }
@@ -997,7 +904,6 @@ static __noinline void cake_pinned_wake_preempt(struct task_struct *p __arg_trus
 	u64 clive = cake_occupant_live(tcpu, &cran);
 	u64 lo, dd, pvt;
 
-	diag_inc(DIAG_PINNED_TRY);
 	if (!clive)
 		return;
 
@@ -1005,10 +911,8 @@ static __noinline void cake_pinned_wake_preempt(struct task_struct *p __arg_trus
 	dd = d + SLICE_NS;
 	pvt = lo - SLICE_NS + (dd & ~((u64)((s64)dd >> 63)));
 
-	if (time_before(pvt + HOME_PREEMPT_BASE_MARGIN_NS, clive)) {
-		diag_inc(DIAG_PINNED_KICK);
+	if (time_before(pvt + HOME_PREEMPT_BASE_MARGIN_NS, clive))
 		scx_bpf_kick_cpu(tcpu, CAKE_KICK_PREEMPT);
-	}
 }
 
 /*
@@ -1032,8 +936,6 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 lo, d;
 	s32 idle;
 
-	diag_inc(DIAG_ENQ);
-
 	/*
 	 * Kernel-thread wakes go straight to the selected CPU's local DSQ, so
 	 * essential softirq/workqueue service is bounded by one occupant slice
@@ -1044,9 +946,6 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if ((enq_flags & CAKE_ENQ_WAKEUP) && (p->flags & PF_KTHREAD)) {
 		s32 kcpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-
-		if (kcpu >= 0)
-			diag_inc(DIAG_KT_IDLE);
 
 		cake_direct_clamp(p);
 		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON |
@@ -1073,7 +972,6 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1 &&
 	    cake_starved(p)) {
-		diag_inc(DIAG_ENQ_STARVE);
 		cake_enqueue_wake(p, tcpu);
 		return;
 	}
@@ -1099,7 +997,6 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1 &&
 		    hc && !(hc->flags & PF_IDLE) && !cake_starved(hc)) {
-			diag_inc(DIAG_G17_DIVERT);
 			cake_dsq_insert_vtime(p, (u64)WAKE_DSQ,
 					      cake_task_slice(p),
 					      cake_wake_vtime(p), enq_flags);
@@ -1249,12 +1146,7 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		return true;
 	}
 
-	diag_inc(DIAG_STEAL_TRY);
-	if (cake_ring_steal(ucpu)) {
-		diag_inc(DIAG_STEAL_HIT);
-		return true;
-	}
-	return false;
+	return cake_ring_steal(ucpu);
 }
 
 /*
@@ -1263,7 +1155,6 @@ static __noinline bool cake_dispatch_search(s32 cpu)
  */
 void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 {
-	diag_inc(DIAG_DISPATCH);
 	if (cake_dispatch_search(cpu))
 		return;
 

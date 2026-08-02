@@ -332,56 +332,7 @@ impl<'a> Scheduler<'a> {
 
         self.struct_ops.take();
         info!("🍰 {SCHEDULER_NAME} detached — default scheduler restored");
-        self.report_diag();
         uei_report!(&self.skel, uei)
-    }
-
-    /// DIAGNOSTIC (to be reverted): G24 census dump — raw counters at detach,
-    /// summed across CPUs; rates are derived offline against the denominators.
-    fn report_diag(&self) {
-        const NAMES: [&str; 29] = [
-            "selcpu",
-            "enq",
-            "dispatch",
-            "notify",
-            "serial_taken",
-            "home_taken",
-            "ranked_idle",
-            "dfl_idle",
-            "r6_try",
-            "r6_repick",
-            "qmark_try",
-            "qmark_defer",
-            "syncgate_try",
-            "syncgate_lag",
-            "syncgate_waker",
-            "kt_idle",
-            "enq_starve",
-            "g17_divert",
-            "pinned_try",
-            "pinned_kick",
-            "qmark_setw",
-            "qmark_clrw",
-            "steal_try",
-            "steal_hit",
-            "sib_kick",
-            "pick_kick",
-            "notify_preempt",
-            "neigh_run",
-            "neigh_hit",
-        ];
-        let map = &self.skel.maps.cake_diag;
-        for (i, name) in NAMES.iter().enumerate() {
-            let key = (i as u32).to_ne_bytes();
-            let total: u64 = match map.lookup_percpu(&key, MapFlags::ANY) {
-                Ok(Some(vals)) => vals
-                    .iter()
-                    .map(|v| u64::from_ne_bytes(v.as_slice().try_into().unwrap_or([0; 8])))
-                    .sum(),
-                _ => 0,
-            };
-            info!("   diag    {name:<16} {total}");
-        }
     }
 
     /// Take the winning cadence out of the vote histogram and publish it.
