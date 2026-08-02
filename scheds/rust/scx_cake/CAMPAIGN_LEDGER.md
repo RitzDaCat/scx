@@ -104,8 +104,13 @@ Reconciled scoreboard in CONSTANTS_AUDIT.md.
    Only ~4% of wakes go bad.
 5. **Cake fixed worker interference and created peer interference**: workers block the
    renderer 8.6% (native 42.5%), peers 58.1% (native 18.9%).
-6. **~30% of slow wakes on BOTH schedulers land on an idle CPU** — C-state exit, ~24–93 µs,
-   which no placement policy fixes.
+6. ~~**~30% of slow wakes on BOTH schedulers land on an idle CPU** — C-state exit, ~24–93 µs,
+   which no placement policy fixes.~~ **FALSIFIED 2026-08-02 by G21.** This host binds **no
+   cpuidle driver** (`current_driver = none`), so there is no governor-managed C-state to
+   exit, and a within-CPU control puts 15 of 16 CPUs at a 1.0–1.6× ratio. The effect was
+   **one CPU** — the GPU interrupt sink — and **a placement policy did fix it**: G21 cut
+   `main`'s mean wake −39.9%. "Which no placement policy fixes" was a closed door that was
+   never tested.
 
 ## G21 — interrupt-sink avoidance (2026-08-02, KEPT)
 
@@ -132,4 +137,6 @@ spinners; this one is inert there and acts only when a CPU is actually idle.
    scored on a proxy. Now unattended — see the rig in STATE.md.
 2. G17's **mechanism** is unexplained (peer share 58.1%→56.9% while the tail fell 17%).
 3. `SLICE_NS`'s vtime-unit role — the last architectural constant.
-4. Frame clock bootstraps at 1/60 s on a **240 Hz VRR** display: 4× too slow.
+4. ~~Frame clock bootstraps at 1/60 s~~ — **FALSE, closed 2026-08-02 (G22 §9)**: the loader
+   seeds `cake_frame_ns` to FRAME_PERIOD_MAX_NS and the floor to FRAME_PERIOD_MIN_NS before
+   attach, i.e. the plausibility-band edges, so both consumers start conservative.
