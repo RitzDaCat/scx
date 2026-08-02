@@ -1,4 +1,4 @@
-# scx_cake — games campaign ledger (G10 → G17)
+# scx_cake — games campaign ledger (G10 → G20)
 
 **Purpose: reflect and spot trends at a glance.** STATE.md holds the narrative in
 reverse-chronological sections; this holds one row per experiment so the arc, the
@@ -40,6 +40,8 @@ verdict means never measured — not "fine".
 | **G17** | **anti-collision: never queue behind a served peer** | **WAKE, interleaved** | ✅ **KEPT** | renderer **−17.3%**, main −21.7%, queue −49.2%, fence −14.0% |
 | **G18** | **slice cap takes the PESSIMISTIC frame estimate** | **WAKE, interleaved** | ⚖️ **kept; endpoint untestable** | wake p99 **−16%** 2/2; stalls >2ms **underpowered at n=2** (0–1 per arm) |
 | — | **first FRAME read of the campaign** (G17 vs native) | **FRAME** | ⚖️ **tie on score, win on smoothness** | deadline miss **−53%**, FT stddev **−16%**, p99−med **−13%**; 0.1% low + p99.9−med **tied** |
+| — | **max-stall decomposition** (retained traces, no capture) | **WAKE** | 🚨 **retracts a headline** | perf arms ring buffers per CPU, so G18's 4.78 ms "residual" was its own attach transient. By RATE cake is **3–5× better** than native, not worse |
+| **G20** | **a kthread wake spends an idle CPU, not an occupant** | **STATIC** | **unmeasured** | `DP-2` evicts the renderer **11,518×** under cake vs **431×** native (27×); +10 insns, 0 spills |
 
 ## The frame result (2026-08-01, the campaign's first)
 

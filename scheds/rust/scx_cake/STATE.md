@@ -38,6 +38,75 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### 🚨 RETRACTED — "cake's stalls are unbounded, native's are bounded" was an ARTIFACT
+
+**2026-08-01, second pass. No new capture — `bench/wake_maxdecomp.py` on the retained
+traces.** §WHY 0.1% LOW below claims *"Native's stalls are BOUNDED near 2 ms. Cake's are
+not — 18.05 ms observed."* **That claim is withdrawn. It was measured wrong twice over.**
+
+**Fault 1 — perf arms its ring buffers per CPU, sequentially.** Early in a trace a CPU can
+be running tasks that are not being recorded, and any wait spanning that hole looks
+arbitrarily long. G18's headline 4.78 ms residual sat **5 ms into a 22-second capture**,
+and CPU 011 had **no events at all** across 4.08 ms of it. It is perf's attach transient,
+not a scheduling stall. The tool now drops any event starting before a warmup **and**
+before the run CPU's own first recorded switch.
+
+**Fault 2 — the max is a one-sample statistic.** Ranked by RATE, with the guard on, the
+ordering inverts. Renderer runnable→run delays, per 10k transitions (~50–60k per arm):
+
+| arm | >200 µs | >300 µs | >500 µs |
+|---|---|---|---|
+| **native** (G17-N1) | **124.03** | **24.04** | **10.00** |
+| G17 (P-17a / P-17b) | 50.72 / 29.59 | 8.79 / 3.92 | 3.11 / 1.47 |
+| **G18** (P-18a / P-18b) | **25.33 / 29.42** | **3.48 / 3.70** | **0.99 / 0.84** |
+
+**Cake is 3–5× BETTER than native on long delays, not worse.** And **G18 beat G17 on the
+max class too** — >500 µs went 3.11/1.47 → 0.99/0.84, **2/2 no overlap** — which was never
+measured because G18 registered a rare-event *count* instead of a *rate*.
+
+**Consequences, all of them:** the planned queue-depth work is **dead** (QUEUE is 0–5 of
+each arm's events; **HOLD is 85–90%** in cake *and* native). "Bound the worst case with
+queue-depth awareness" was aimed at a mechanism that barely exists. §WHY 0.1% LOW's
+*ratio* argument (p99 is 121× too small) still stands — only its stall table is retracted.
+
+### 🎯 G20 — cake preempts the renderer 2× as often as native, and 74% is ONE kthread
+
+**Same traces, same tool.** Splitting every renderer switch-out by how it lost the CPU:
+
+| | cake (P-18a) | native (G17-N1) |
+|---|---|---|
+| preempted (`prev_state=R`) | **22,800** | 11,383 |
+| yielded (slept) | 38,300 | 41,188 |
+| **preempted share** | **37%** | **22%** |
+| median run before being preempted | **50 µs** | **216 µs** |
+| **`DP-2` took the CPU** (runs <200 µs) | **11,518 (73.7%)** | **431 (7.8%)** |
+
+**`DP-2` — the display-connector kthread on this 240 Hz VRR panel — evicts the render
+thread 523 times a second under cake and 20 times a second under native. 27×.** It is by
+far the largest behavioural gap found between the two schedulers on this game.
+
+**MECHANISM, and it is one branch.** `cake_enqueue`'s kthread arm inserts into
+`SCX_DSQ_LOCAL_ON | tcpu`, and a LOCAL_ON insert **rescheds the target CPU**. So bounded
+softirq/workqueue service is bought with a mid-burst eviction of whoever was there. Native
+places the same kthread by fairness and only preempts when it wins on lag.
+
+**G20 (built, `603d82e8e`, UNMEASURED): try an idle CPU first.** One
+`scx_bpf_pick_idle_cpu` — the same kfunc, same arguments, already called later in the same
+callback — and fall back to the assigned CPU only when the machine is full. `cake_enqueue`
+201 → 211 insns, TOTAL 1433 → 1443, **zero spills and zero fills in every function**,
+divides unchanged at 11.
+
+**Registered endpoint: renderer >200 µs delay RATE per 10k, interleaved 18a/20a/20b/18b,**
+live game under 8-spinner load. A rate, not a count — that is the G18 lesson. ~160 events
+per arm gives ±8%, so a 20% move is testable. **Kill conditions:** the throughput set
+regresses, or the `DP-2` preemption share does not fall.
+
+**Two things this does NOT yet establish, and neither may be skipped.** Whether those
+evictions cost *frames* — cake already wins the delay rate 3–5× while **tying** 0.1% low,
+so the link from stall rate to frame tail is unproven. And whether serving `DP-2`
+elsewhere costs *display* latency: it is vblank-adjacent work, and moving it is not free
+by assumption. Both need the frame A/B.
+
 ### ⚖️ G18 MEASURED — p99 −16%, and my endpoint was untestable (2026-08-01)
 
 Interleaved G17-vs-G18, one run (17a 18a 18b 17b), live HD2, 8 spinners verified 8/8,

@@ -1012,6 +1012,39 @@ game's dispatches, so it cannot directly cause a 17% tail move. Working hypothes
 routing other hot continuations global frees CPUs and shortens the queues the renderer
 lands behind. Unproven.
 
+### G20 — a kthread wake spends an idle CPU, not an occupant
+
+`cake_enqueue`'s kthread arm inserts into `SCX_DSQ_LOCAL_ON | tcpu`, and a LOCAL_ON insert
+**rescheds the target CPU**. Bounded softirq/workqueue service is therefore bought with a
+mid-burst eviction of whatever was running there.
+
+Measured on the retained G17/G18 traces with `bench/wake_maxdecomp.py` (no new capture).
+Cake preempts the renderer **22,800** times per 22 s against native's **11,383**, at a
+median of **50 µs** into its run where native lets it run **216 µs**. Of the short (<200 µs)
+preempted runs, **73.7% hand the CPU to `DP-2`** — the display-connector kthread on this
+240 Hz VRR panel — **11,518 times under cake against 431 under native, 27×**. That is the
+largest behavioural gap found between the two schedulers on this game.
+
+An idle CPU serves the kthread just as promptly and evicts nobody, so try one first and
+fall back to the assigned CPU only when the machine is full. One `scx_bpf_pick_idle_cpu`,
+the same kfunc with the same arguments already called later in the same callback:
+`cake_enqueue` 201 → 211 insns, TOTAL 1433 → 1443, zero spills and zero fills.
+
+**Not established, and neither may be skipped.** Whether those evictions cost *frames* —
+cake already wins the >200 µs delay rate 3–5× over native while tying 0.1% low, so the
+link from stall rate to frame tail is unproven. And whether serving `DP-2` elsewhere costs
+*display* latency: it is vblank-adjacent work, and moving it is not free by assumption.
+
+### R.23 — the two guards `wake_maxdecomp.py` cannot run without
+
+perf arms its per-CPU ring buffers **sequentially**, so early in a trace a CPU can be
+running tasks that are not being recorded, and any wait spanning that hole measures
+arbitrarily long. This produced G18's headline 4.78 ms "residual": it sat 5 ms into a
+22-second capture and CPU 011 had no recorded events across 4.08 ms of it. Events are
+therefore dropped unless they begin after a warmup **and** after the run CPU's own first
+recorded switch. The companion rule is to score a **rate**, never a max or a count at one
+threshold — the max is a one-sample statistic and inverted the cake-vs-native ordering.
+
 ### G14 / G15 / G16 — FALSIFIED, do not retry without new evidence
 
 Three attempts on the renderer's tail, all built, measured and reverted.
