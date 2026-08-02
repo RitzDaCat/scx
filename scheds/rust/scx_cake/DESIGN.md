@@ -89,11 +89,16 @@ rodata loads.
 **Interrupt sinks.** A CPU that absorbs a device's interrupt stream makes a
 poor home for a latency thread, which then waits behind the handler rather
 than behind other tasks. The loader samples `/proc/interrupts` twice and marks
-any CPU carrying ≥4× an even split, at more than one interrupt per
-millisecond, as a sink; `cake_select_cpu` then declines it for a cache-warm
-home claim and swaps off it when `select_cpu_dfl` hands it out. **Preference,
-never exclusion** — with no other CPU idle the sink is still used, so a
-saturated machine is unaffected and work conservation cannot be lost.
+a sink per IRQ **line**: a line firing at least once per millisecond with ≥95%
+of its deltas on one CPU pins that CPU (§G23 — a fair-share test on CPU totals
+could only ever flag the loudest sink; this host has three). `ops.init` folds
+the flags into a `nonsink` cpumask, and `cake_select_cpu` runs the kernel's
+own ranked idle pick against it via `scx_bpf_select_cpu_and`, falling back to
+the whole machine when nothing quieter is idle. The claim made is always the
+claim used — the G21 pick-then-veto shape abandoned the sink's test-and-cleared
+idle bit. **Preference, never exclusion** — with no other CPU idle the sink is
+still used, so a saturated machine is unaffected and work conservation cannot
+be lost. The cache-warm home claim still declines a hot `prev_cpu` outright.
 
 ## The algorithm
 
@@ -466,6 +471,15 @@ they document the 12.6k-line predecessor and its mutation campaigns, not the
 current design. Live campaign state, the open gap list, and the current
 scoreboard live in [`STATE.md`](./STATE.md), which wins on any conflict with
 this document.
+- **2026-08-02** — G23: per-line sink detection + mask-based avoidance
+  (UNMEASURED — endpoint registered in HYPOTHESES.md §G23). Review of G21 found
+  its detector needs ≥25% of total interrupt volume (only the loudest sink can
+  flag — G22 found three, and the USB sink is the worst CPU for `Window &
+  Input`) and its dfl-then-swap abandons the idle claim dfl made. Replaced by:
+  per-IRQ-line detection (≥1 kHz, ≥95% one CPU, header-label column mapping),
+  a `nonsink` cpumask built at attach, and `scx_bpf_select_cpu_and` with plain
+  dfl as the saturated fallback. Live probe replication flags {5, 13} where the
+  old rule saw only 13. Zero spills throughout; divide count unchanged at 11.
 - **2026-08-02** — G21: interrupt-sink avoidance. The nvidia IRQ is pinned to a
   single CPU on the development host (1.27e9 interrupts there, zero elsewhere)
   and both schedulers placed game threads on it at its fair share. The loader
