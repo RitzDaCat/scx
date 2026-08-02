@@ -38,6 +38,69 @@ to their operational traps; their full arcs are in git history.*
 
 ## THE WORK RIGHT NOW
 
+### 🔬 THE FIVE-DOMAIN SWEEP — cake wins 4 of 7, and the win scales with SHORTNESS
+
+**2026-08-01, retained traces only, no capture.** `bench/wake_maxdecomp.py` now takes a
+comma-separated role list and does every domain in ONE `perf script` pass. Delays
+>200 us per 10k runnable->run transitions, G17 rotation (cake vs native, same run):
+
+| domain | thread | native N1/N2 | cake C1/C2 | verdict |
+|---|---|---|---|---|
+| **input** | `Window & Input` | 294.6 / 93.2 | **39.0 / 47.8** | **cake 2/2, 4.5x** |
+| **audio (game)** | `FAudio_AudioCli` | 288.3 / 80.8 | **31.7 / 40.6** | **cake 2/2, ~5x** |
+| **render** | `renderer` | 124.0 / 87.0 | **46.7 / 47.0** | **cake 2/2, 2.2x** |
+| **GPU submit** | `vkd3d_queue` | 42.0 / 18.7 | **13.2 / 15.5** | **cake 2/2, 1.5x** |
+| network | `PartyNetworking` | 159.0 / 108.9 | 36.0 / **162.2** | **overlap** -- n~555, unusable |
+| audio (RT) | `data-loop.0` | 2.2 / 1.5 | 2.8 / 3.1 | native, ~2 events/10k -- noise |
+| IO | `DirectStorage W` | 10,707 vs 41 transitions | | **NOT COMPARABLE** -- scene state |
+
+**THE LAW THIS SUGGESTS: cake's advantage scales inversely with the thread's burst.**
+FAudio (5 us burst) 5.0x, input (6 us) 4.5x, renderer (40 us) 2.2x. **`data-loop.0` is the
+exception that proves it -- it is SCHED_FIFO, so cake never schedules it**, and both
+schedulers show ~2 events per 10k. Cake cannot help what it does not own.
+
+**Consequence: G10-G20 optimised the renderer, the LONGEST-burst thread in the set, where
+the win is smallest.** Input and game audio were never scored once.
+
+**Two domains remain unmeasured, and neither is a null.** Network has ~555 transitions per
+arm -- one cake arm is the worst of all four, which at that n means nothing. IO differed
+by 250x in transition count between arms (asset streaming in one arm only). Both need a
+capture designed for them.
+
+### 🔁 G14/G15/G16 RECHECKED ON INPUT — no resurrection, and G15's falsification CONFIRMED
+
+**The worry was that all three were killed on renderer evidence alone.** Rechecked all 12
+retained arms across five domains. Cake-vs-native ratio within each rotation (lower is
+better; ratios rather than raw rates because the native arms swing 2-4x between
+rotations):
+
+| experiment | input ratio | renderer ratio |
+|---|---|---|
+| **G17 (shipped)** | **0.22** | **0.44** |
+| G14 | 0.20 | 0.40 |
+| G15 | **0.64** | **0.95** |
+| G16 | 0.39 | 0.60 |
+
+**No branch reopens.** G14 matches shipped rather than beating it, G16 sits between, and
+**G15 is worst on input as well as renderer -- an independent confirmation of its
+falsification from a domain nobody looked at when it was killed.** The renderer-only
+verdicts were not systematically wrong. *Caveat: cross-run ratios, not interleaved pairs;
+this is weaker evidence than the original cake-vs-cake reads and is only strong enough to
+decline a resurrection, never to re-falsify.*
+
+### 🚧 THE HARNESS IS NOW THE FLOOR ON WHAT CAKE CAN DEMONSTRATE
+
+**`python3` -- the wake-latency capture wrapper -- is the single worst CPU holder in 6 of
+12 arms, with holds up to 3513 us**, and it lands almost exclusively in the CAKE arms.
+That is not cake placing it badly: in the native arms the game's own workers hold longer,
+so the harness never becomes the maximum. **Cake removed the real holders and the
+instrument became the largest one left.**
+
+Two consequences. Cake's measured numbers are **understated**, not inflated. And any
+future change that improves on G17/G18 will be measuring against a ~3 ms artefact it
+cannot beat. **Fix before the next rotation:** nice/affinity-isolate the capture wrapper
+off the game's CPUs, or run the parse after the capture window rather than during it.
+
 ### 🏆 INPUT LATENCY — cake's largest measured game win, and nobody had ever scored it
 
 **2026-08-01, retained G17 rotation (interleaved cake-vs-native, 8-spinner load, same
