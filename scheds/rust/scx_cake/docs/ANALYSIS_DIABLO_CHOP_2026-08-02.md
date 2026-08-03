@@ -224,6 +224,17 @@ remains is the compositor/KMS/VRR/dual-monitor layer and the wine-wayland
 present path: vrr test, monitor test (both live, no restart), wayland-off
 (restart).
 
+## Run 8 — VRR OFF on DP-2 (20:40): FALSIFIED, ten down
+
+vrrpolicy set to never (verified), logged, restored to automatic (verified).
+n=2913, median 5.12 ms, severe **32.03%**, band 31-40 ms, gpu 52%. Adaptive
+sync is not the stall. Note: severe% has crept 24.9 -> 29.2 -> 32.0 across
+the evening's runs — scene-dependence or session aging, unattributed.
+Remaining suspects, all in the fingerprint-indicted layer: the 60 Hz
+secondary's influence on KWin flip scheduling (monitor test, no restart —
+windows may jump when DP-3 drops), the wine-wayland present path (restart),
+and KWin compositing/no-direct-scanout for a borderless surface.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
