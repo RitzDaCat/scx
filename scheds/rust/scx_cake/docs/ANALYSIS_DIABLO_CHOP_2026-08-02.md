@@ -267,6 +267,19 @@ persist either; D4 video-settings persistence in this prefix is unreliable
 (verify on disk before logging), and/or true fullscreen instead of windowed.**
 Monitor test and wayland-off unchanged.
 
+## Host physical audit (21:0x) — all clean, one config drift
+
+22 s sample during play: **disk** nvme0n1 essentially idle (2 reads/s, 0.6%
+util, awaits <2.5 ms) — IO falsified; **PSI** cpu/io/mem all 0.00 avg10;
+**swap** untouched (98 GB free); **Tctl 55 C**; **CPU freq** boosting to
+5549 MHz, mean-of-mins 5114 MHz, single benign idle dip (cpu4, 603 MHz).
+None of these can produce fixed-duration 20-35 ms singleton present waits.
+
+**Config drift found:** governor `powersave` + EPP `balance_performance` —
+this box's expected state is EPP=performance (per project memory). Not the
+band's cause (wrong failure shape), but a standing perf tax; restore
+separately from this hunt.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
