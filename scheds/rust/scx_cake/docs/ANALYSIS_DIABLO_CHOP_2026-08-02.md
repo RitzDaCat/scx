@@ -235,6 +235,38 @@ secondary's influence on KWin flip scheduling (monitor test, no restart —
 windows may jump when DP-3 drops), the wine-wayland present path (restart),
 and KWin compositing/no-direct-scanout for a borderless surface.
 
+## Flag provenance + game-config audit (20:5x) — WITH A CORRECTION
+
+**CORRECTION — run 3's "limiter falsified" is VOID.** LocalPrefs.txt right
+now reads `MaxForegroundFPS "222"` with `LimitForegroundFPS "1"`: the cap-400
+change never persisted (as run 6's median already hinted), so run 3 compared
+222 against 222 and tested nothing. The in-game limiter is BACK on the
+suspect list — its sleep/wake per frame is present-adjacent and fires ~222x/s.
+Also on disk: `LimitBackgroundFPS "1"` / `MaxBackgroundFPS "221"`, and
+`DisplayModeWindowMode "1"` — the game runs WINDOWED/borderless, so every
+frame is KWin-composited (no direct scanout), load-bearing given the
+swapper-wake fingerprint. QualityPreset "2" — the Ultra change did not
+persist either; D4 video-settings persistence in this prefix is unreliable
+(Reflex "0" DID persist).
+
+**Flag provenance (user asked: what is forced that I did not set):**
+- User launch options (Steam shortcut): PROTON_DXVK_LOWLATENCY,
+  VKD3D_CONFIG=descriptor_heap (invalid token), PROTON_ENABLE_WAYLAND,
+  PROTON_USE_NTSYNC, mangohud, --in-process-gpu.
+- proton-cachyos script defaults (grep-verified in `proton`): DXVK_CONFIG
+  (async off, 14 compiler threads, GPL auto), DXVK_ASYNC=0,
+  DXVK_ENABLE_NVAPI=1, WINE_DISABLE_FULLSCREEN_HACK=1, WINE_MOVE_HACK=1,
+  WINE_USE_EGL=1, PROTON_NO_STEAMINPUT, esync+fsync enables.
+- **protonfixes layer (auto-applied, NOT user-set): WINE_UPSCALER_REPLACE=
+  fsr4** via `protonfixes/upscalers.py`, with a managed `dlss_version` dir in
+  this game's compatdata — proton-cachyos actively swaps upscaler DLLs for
+  this game; exact trigger condition unverified. On an NVIDIA+DLSS title this
+  is the one genuinely-forced surprise found.
+
+**Next in-game tests (no restart): disable LimitForegroundFPS entirely
+(verify on disk before logging), and/or true fullscreen instead of windowed.**
+Monitor test and wayland-off unchanged.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
