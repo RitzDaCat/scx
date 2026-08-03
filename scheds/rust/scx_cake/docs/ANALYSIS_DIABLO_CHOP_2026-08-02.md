@@ -61,6 +61,41 @@ Brave, play 30 s, re-log frames via the MangoHud socket. Severe% collapsing
 implicates the browser; unchanged severe% while caches warm implicates
 recompilation (it also decays on its own as the cache fills).
 
+## The elimination chain (same evening, retest + decomposition)
+
+**Clean-field retest** (user's Brave closed; the 15-thread `Thread<NN>` pool
+turned out to be the ASSISTANT HARNESS's own Playwright headless browser —
+SwiftShader software-GL, killed for the retest; a measurable noise source
+this project's own tooling put on the box):
+
+| | run 1 (churn) | run 2 (clean field) |
+|---|---|---|
+| severe (>2× median) | 24.92% | **25.47%** |
+| median | 4.46 ms | 4.09 ms |
+| gpu / cpu load | 64% / 19.5% | 49% / 13.9% |
+
+Severe rate is INVARIANT to removing all external load → contention
+falsified. Temporal shape: **1,102 / 897 isolated single-frame spikes, mean
+run length 1.0, uniform 23-27% across every third of both captures** →
+focus-loss throttling falsified (needs one contiguous block), shader-cache
+warming heavily disfavored (needs bursts + decay). The pattern is
+metronomic: ~3 fast frames, one 20-35 ms frame.
+
+**Scheduler kill-shot** (`wake_maxdecomp.py`, 200 µs threshold, same
+session): vkd3d_queue 18 / vkd3d-swapchain 132 / RenderJobWorker 95 events
+per 10k transitions above 200 µs, **zero events above 1 ms on every role**;
+worst holders are kwin_wayland at 224-252 µs and worker-self at 589 µs. The
+cake slice-cap/preemption theory for a 30/s hitch cadence is dead — three
+orders of magnitude short in magnitude and rate. Caveat: sched trace window
+(19:29) precedes the frame logs (19:35/19:41) by ~6 min, same session.
+
+**Standing attribution:** frame *pacing* on the present path — Diablo's
+limiter / vkd3d-proton swapchain rhythm / 240 Hz VRR interplay (the
+3-fast-1-slow shape is a fence/present-queue signature) — or engine-internal
+waits. Game-config territory, not scheduler territory. First knob to try:
+an in-game FPS cap (~120) or vsync toggle; a pacing sawtooth flattens under
+a cap, an engine wait does not.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
