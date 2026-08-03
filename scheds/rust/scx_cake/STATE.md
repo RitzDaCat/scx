@@ -54,22 +54,24 @@ during active play + P4 bench screen (`docs/REVIEW_G21_G23_2026-08-02.md` §resu
 receipts and steps); (2) the two dead-branch deletions + game screen; (3) syncgate
 simplification; (4) G25 steal-walk hypothesis; (5) serial-handoff trade decision.
 
-### 🔧 R.24 BUILT 2026-08-03, endpoint pending — cross-multiplied divide elimination
+### ✅ R.24 SCREENED 2026-08-03 — cross-multiplied divide elimination, KEPT
 
-**Hypothesis + proofs in HYPOTHESES.md §R.24; census in `docs/CENSUS_ARITH_2026-08-03.md`.**
-Both transforms committed: `6471262e1` (frame_observe — its divide ran on EVERY
-ops.running at ctx-switch rate and the 2–40 ms gate discarded it for every non-frame
-task) and `b607264ad` (handoff_yields). Exact by algebra, fast/slow-arm at 2^32 operand
-width; spills 0 everywhere, static divides still 11 (both now cold-arm), zero warnings
-both profiles. No game screen owed — decisions bit-identical.
+**Hypothesis, proofs, and the measured ledger in HYPOTHESES.md §R.24; census in
+`docs/CENSUS_ARITH_2026-08-03.md`.** Commits `6471262e1` (frame_observe — its divide
+ran on EVERY ops.running at ctx-switch rate and the 2–40 ms gate discarded it for
+every non-frame task) and `b607264ad` (handoff_yields). Exact by algebra, fast/slow-arm
+at 2^32 operand width; spills 0, static divides still 11 (both now cold-arm), zero
+warnings both profiles. No game screen owed — decisions bit-identical.
 
-**Endpoint BLOCKED on host state:** `artifact ensure` refuses while sched_ext is
-enabled, and the attached cake is a root-owned manual `sudo ./scx_cake` (pts/8, started
-2026-08-02 20:10) that the sudoless session cannot stop. To run: stop that process
-(Ctrl-C its terminal), then `artifact ensure` at `bacf0a817` (receipt A) and at
-`b607264ad` (receipt B), then `exact-pair --receipt-a A --receipt-b B --workload
-perf-sched-pipe --blocks 2 --execute`, same for `mutex-handoff` (~16 min total).
-Does not touch G23's parked resume order below.
+**Endpoint (two `--blocks 2` cake-vs-cake exact-pairs, diagnostic tier, arms
+hash-verified): no kill fired, change kept.** mutex-handoff = TIE (−0.56% both blocks,
+under the 1% tie threshold, noise matched 8.9%/8.9%) — the R.24b gate did not regress
+its own benchmark. perf-sched-pipe: both blocks favor R.24 (+5.12%/+0.52%) but block 1
+had mismatched noise (arm-A slots at 27%/18% ext CPU vs B 6–11%) so only the +0.52%
+tie is credible. The predicted sub-1% win is below 2-block resolution; unsized by
+design. Arithmetic axis now fully mapped — remaining census items (task_slice cap-arm
+pre-check, steal-ring walk) are speculative/G25 territory. G23's parked resume order
+below is untouched.
 
 ### 🚧 G23 IN FLIGHT — every sink, not just the loudest; delete the swap's leaked claim
 

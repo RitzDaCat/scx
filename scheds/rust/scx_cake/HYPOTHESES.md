@@ -1239,6 +1239,19 @@ bit-identical (fast arm ⟺ original algebraically; slow arm is the original ver
 **Kills:** verifier reject; any spill regression (must stay 0); any decision-changing
 diff; screen regression beyond noise. Budget: 2 commits + 1 screen.
 
+**MEASURED 2026-08-03 — SCREEN PASSED, KEEP; win unsized at this tier.** Commits
+`6471262e1` + `b607264ad`; endpoint = two cake-vs-cake exact-pairs, `--blocks 2`
+(diagnostic tier), arms verified (all rows `scx_cake`, hashes `ecbb4016`/`d0bccf67`).
+perf-sched-pipe `exact_pair_20260803T155754Z`: both blocks favor R.24 (+5.12%,
++0.52% usec/op) but block 1's arm-A slots saw 27%/18% external CPU vs B's 6–11% —
+mismatched noise, so the +5.12% is false-data risk and only block 2's +0.52% (a tie)
+is credible. mutex-handoff `exact_pair_20260803T160323Z`: −0.56% both blocks, under
+the 1% practical-tie threshold, ranges overlap, noise matched 8.9%/8.9% — TIE, and
+the R.24b gate demonstrably did not regress its own benchmark. No kill fired. Net:
+identity transforms confirmed free at screen resolution; the predicted sub-1% win is
+below what 2 diagnostic blocks can resolve — sizing it would need 8 blocks, which an
+identity-preserving change does not owe.
+
 ### G14 / G15 / G16 — FALSIFIED, do not retry without new evidence
 
 Three attempts on the renderer's tail, all built, measured and reverted.
