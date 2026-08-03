@@ -296,6 +296,23 @@ hold durations is the mixed-refresh compositor path's signature. The monitor
 test (DP-3 off, no restart) is now the decisive discriminator; wayland-off
 is the fix-side test behind it.
 
+## Run 9 — monitor test, DP-3 compositor-disabled (20:52): PARTIAL CONFIRMATION
+
+(Physical power-off left DP-3 enabled+connected in KWin — the test required
+`kscreen-doctor output.DP-3.disable`, verified, and re-enable after,
+verified.) n=4519, med 6.27 ms, severe **18.34%** (from 32.03%), rate
+26.3/s, gap p50 33.2 ms CV 0.38, **dur p50 15.2 ms** (from 28.8), p95 16.15,
+p99.9 22.1, max 38.9.
+
+**Read: removing the 60 Hz output subtracts exactly one 16.7 ms quantum from
+every stall and halves the severe rate — DP-3 is a CONFIRMED CONTRIBUTOR.
+But the ~30 Hz gating beat survives with a ~15-16.7 ms hold on a
+240 Hz-only desktop.** A 60 Hz-quantized hold with no 60 Hz display present
+points at an internal 60 Hz pacing fallback in the surface's present path —
+the wine-native-Wayland frame-callback/feedback layer (hypothesis,
+unverified). The wayland-off restart is the closing test; it is also the
+community-reported fix for this driver's pacing immaturity.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
