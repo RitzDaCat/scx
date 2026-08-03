@@ -481,19 +481,28 @@ static __noinline bool cake_system_serial(void)
  *
  * Cannot be exact: ALLOW_QUEUED_WAKEUP hides the waker and cake keeps no
  * per-task state, so this refuses a bad bet rather than proving a good one.
+ *
+ * The verdict is burst < ran + max, cross-multiplied to sum_exec <
+ * (ran + max) * nvcsw so the gate spends no divide; operands >= 2^32 take
+ * the exact divide path instead (§R.24).
  */
 static __noinline bool cake_handoff_yields(s32 tcpu)
 {
 	struct task_struct *curr = scx_bpf_cpu_curr(tcpu);
-	u64 ran, burst;
+	u64 ran, burst, lim, n;
 
 	if (!curr || !curr->scx.dsq_vtime)
 		return true;
 
 	ran = bpf_ktime_get_ns() -
 	      cake.run[(u32)tcpu & (MAX_CPUS - 1)].stamp;
-	burst = cake_burst_ns(curr);
+	n = curr->nvcsw | 1;
+	lim = ran + cake_handoff_max_ns;
 
+	if (!((lim | n) >> 32))
+		return curr->se.sum_exec_runtime < lim * n;
+
+	burst = cake_burst_ns(curr);
 	return burst <= ran || burst - ran < cake_handoff_max_ns;
 }
 
