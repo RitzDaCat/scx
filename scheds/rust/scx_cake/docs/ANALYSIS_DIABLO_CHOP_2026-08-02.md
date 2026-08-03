@@ -154,6 +154,32 @@ next restart drops PROTON_ENABLE_WAYLAND, the one after swaps
 PROTON_DXVK_LOWLATENCY -> PROTON_VKD3D_LOWLATENCY (new in 0703, DX12
 waitable-swapchain pacing).
 
+## vkd3d-low-latency source review (netborg-afps fork, shipped opt-in in 0703)
+
+Reviewed at commit `565d695`. Mechanism: on the game's Reflex SIMULATION_START
+marker the layer computes a per-frame delay from the PREVIOUS frame's GPU
+timeline (outlier-filtered, no averaging) and sleeps the game thread so CPU
+work lands just-in-time for the GPU -- classic latency-optimal pacing done
+inside vkd3d. Two engagement modes (framepacer_bridge.cpp:109): NVIDIA_Reflex
+when the game calls SetSleepMode (D4 must have Reflex ON in settings, via
+dxvk-nvapi), else a WaitableDXGISwapchain fallback needing no game support.
+Sleep primitive (threaded_sleep.h): helper thread does the coarse OS sleep to
+t-150us, caller SPINS the last 150us -- the comment says the buffer exists
+"so the scheduler cannot fail to miss t". Two precision wakes per frame:
+prime cake territory (measured 1-2us wake means; an IRQ-sink CPU's 40us mean
+would eat a third of that buffer -- G23's sink avoidance directly protects
+this pacer).
+
+Fit for OUR band: honest read is MITIGATION, not targeted fix -- the
+VRR-specific pacing paths (getVrrDelay, LOW_LATENCY_VRR, vblank derivation)
+are PRESENT BUT COMMENTED OUT at this commit, so it does not model VRR
+deadlines; but no-overlap CPU frames + waitable swapchain (queue depth ~1)
+should shrink multi-frame present blocks if the band is queue backpressure.
+Limitations (README): needs Sim-Start+Present-Begin markers for Reflex mode,
+no frame generation, no Intel (36-bit timestamps), CPU parallelism reduced
+by design. Ladder rung 3 stands: swap PROTON_DXVK_LOWLATENCY ->
+PROTON_VKD3D_LOWLATENCY, enable Reflex in D4, one variable per restart.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
