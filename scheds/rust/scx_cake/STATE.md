@@ -54,14 +54,22 @@ during active play + P4 bench screen (`docs/REVIEW_G21_G23_2026-08-02.md` §resu
 receipts and steps); (2) the two dead-branch deletions + game screen; (3) syncgate
 simplification; (4) G25 steal-walk hypothesis; (5) serial-handoff trade decision.
 
-### 🔧 R.24 REGISTERED 2026-08-03 — cross-multiplied divide elimination (arithmetic identity)
+### 🔧 R.24 BUILT 2026-08-03, endpoint pending — cross-multiplied divide elimination
 
 **Hypothesis + proofs in HYPOTHESES.md §R.24; census in `docs/CENSUS_ARITH_2026-08-03.md`.**
-Two divides spend their quotient on a comparison: `cake_frame_observe` (fires every
-ops.running at ctx-switch rate, quotient discarded for every non-frame task) and
-`cake_handoff_yields`. Cross-multiply both, exact, fast/slow-arm at 2^32 operand width.
-Endpoint: `--blocks 2` cake-vs-cake screen (futex/pipe are the instruments). No game
-screen owed — decisions bit-identical. Does not touch G23's parked resume order below.
+Both transforms committed: `6471262e1` (frame_observe — its divide ran on EVERY
+ops.running at ctx-switch rate and the 2–40 ms gate discarded it for every non-frame
+task) and `b607264ad` (handoff_yields). Exact by algebra, fast/slow-arm at 2^32 operand
+width; spills 0 everywhere, static divides still 11 (both now cold-arm), zero warnings
+both profiles. No game screen owed — decisions bit-identical.
+
+**Endpoint BLOCKED on host state:** `artifact ensure` refuses while sched_ext is
+enabled, and the attached cake is a root-owned manual `sudo ./scx_cake` (pts/8, started
+2026-08-02 20:10) that the sudoless session cannot stop. To run: stop that process
+(Ctrl-C its terminal), then `artifact ensure` at `bacf0a817` (receipt A) and at
+`b607264ad` (receipt B), then `exact-pair --receipt-a A --receipt-b B --workload
+perf-sched-pipe --blocks 2 --execute`, same for `mutex-handoff` (~16 min total).
+Does not touch G23's parked resume order below.
 
 ### 🚧 G23 IN FLIGHT — every sink, not just the loudest; delete the swap's leaked claim
 
