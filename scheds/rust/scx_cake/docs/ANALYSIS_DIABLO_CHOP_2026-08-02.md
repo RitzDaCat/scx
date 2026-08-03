@@ -134,6 +134,16 @@ mechanism itself still fires. Strongest remaining discriminators unchanged:
 disable the 60 Hz secondary (no restart), then drop PROTON_ENABLE_WAYLAND
 (restart).
 
+## Proton version correction (20:4x)
+
+All runs 1-5 and the sched trace ran under **proton-cachyos 0702** (maintainer
+statement: 0703 installed only after run 5; the live game process predates the
+install, and the earlier "already on 0703" check read the on-disk version, not
+the loaded one). 0703 adds opt-in `PROTON_VKD3D_LOWLATENCY=1` (DX12 waitable-
+swapchain frame pacing — directly on the indicted layer). Next-restart order to
+preserve discrimination: (1) restart with NO flag changes = isolates 0702->0703;
+(2) drop PROTON_ENABLE_WAYLAND; (3) swap DXVK->VKD3D lowlatency flag.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
