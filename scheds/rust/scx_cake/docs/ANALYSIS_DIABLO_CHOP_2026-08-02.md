@@ -212,6 +212,18 @@ test (kscreen, no restart); (3) wayland-off restart; (4) 0703's
 PROTON_VKD3D_LOWLATENCY as the eventual replacement pacer if Reflex itself
 is the problem layer.
 
+## Run 7 — Reflex OFF (20:38): FALSIFIED, suspect nine down
+
+LocalPrefs verified `Reflex "0"` before the run, same game instance.
+n=2933, median 5.40 ms, severe **29.22%**, band 31-40 ms, gpu 54%. The
+driver-side Reflex gate is not the stall. Eliminated set now: external
+churn, focus, shader-warm, in-game limiter, MangoHud, DLSS, proton
+0702->0703, GPU clocks, Reflex — every userspace-configurable layer inside
+the game/runtime. Consistent with the swapper-wake fingerprint, what
+remains is the compositor/KMS/VRR/dual-monitor layer and the wine-wayland
+present path: vrr test, monitor test (both live, no restart), wayland-off
+(restart).
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
