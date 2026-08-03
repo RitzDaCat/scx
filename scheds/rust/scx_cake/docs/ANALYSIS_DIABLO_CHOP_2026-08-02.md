@@ -313,6 +313,18 @@ the wine-native-Wayland frame-callback/feedback layer (hypothesis,
 unverified). The wayland-off restart is the closing test; it is also the
 community-reported fix for this driver's pacing immaturity.
 
+## Run 10 — locked baseline for the wayland A/B (20:57)
+
+Conditions verified live: PROTON_ENABLE_WAYLAND=1 in /proc, LocalPrefs
+400/400 caps, QualityPreset 2, Reflex "1" (silently re-enabled itself — third
+settings mutation tonight), both monitors enabled. n=5157, med 5.63 ms,
+severe **18.23%** at 29.5/s, dur p50 **14.2 ms**, gap p50 31 ms CV 0.39,
+p99.9 20.3, max 31.6, gpu 71%. The metronome persists at ~30 Hz with
+~one-quantum holds; profile matches run 9 (DP-3 off) even though DP-3 is
+back on — the second quantum did not return after the output cycle /
+settings churn, unattributed. B-side next: identical everything, wayland
+flag removed.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
