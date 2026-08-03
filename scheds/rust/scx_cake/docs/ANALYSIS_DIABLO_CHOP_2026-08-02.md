@@ -325,6 +325,29 @@ back on — the second quantum did not return after the output cycle /
 settings churn, unattributed. B-side next: identical everything, wayland
 flag removed.
 
+## Run 11 — XWayland B-side (21:04): WAYLAND FALSIFIED
+
+User removed BOTH PROTON_ENABLE_WAYLAND and PROTON_DXVK_LOWLATENCY (absence
+verified in /proc of new pid 100129; NTSYNC + VKD3D_CONFIG unchanged).
+n=4387, med 5.59, severe **22.20%** at 30.7/s, gap p50 29.9 ms **CV 0.31**,
+dur p50 17.0 ms, p99.9 24.9, gpu 62%. Against the locked A-side (18.23%,
+29.5/s, 14.2 ms): the ~30 Hz metronome with 60 Hz-quantized holds is FULLY
+INTACT on XWayland — the wine-native-Wayland driver is not the root cause
+(and dxvk-lowlatency is falsified as a necessary cause alongside).
+
+**Field after ~15 falsifications — two suspects remain:**
+1. **KWin's per-surface treatment of a WINDOWED game** (DisplayModeWindowMode
+   "1"): both X11 and Wayland paths composite a windowed surface through
+   KWin; HD2 at 0.008% severe on the same compositor ran FULLSCREEN. Window
+   mode is the one host-side variable never yet tested.
+2. **The engine's own ~30 Hz tick** (sim/server cadence): would be invariant
+   to every host change by construction, matches the swapper-wake (timer/net
+   IRQ) fingerprint and the online-game tick model.
+
+Discriminator: true Fullscreen in D4 display settings (Apply; disk-verify
+DisplayModeWindowMode changes) — collapses = KWin windowed-surface
+treatment; survives = engine-internal, and the host is exonerated end to end.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
