@@ -120,6 +120,20 @@ warming ✗, in-game limiter ✗, MangoHud overlay ✗, scheduler ✗ (wake tier
 stall/preempt tier). Standing: native-Wayland present path (test: drop
 `PROTON_ENABLE_WAYLAND=1`, restart, re-log), then engine-internal waits.
 
+## Run 5 — user settings change, perceived smooth (20:14)
+
+n=2632, median 10.35 ms (~97 fps, GPU 68%), severe 23.75% — same pid, same
+launch options, both monitors up. The median DOUBLED (heavier per-frame GPU
+work at lower fps) yet the spike band did not move: 20-34 ms in this run as
+in all four before it, across cap 222/400, load/no-load, HUD on/off, and a
+2.4x median change. **The stall is a fixed-absolute-duration event (~20-35
+ms ~= 1-2 periods of the 60 Hz secondary display) hitting ~a quarter of
+presents.** Perception improved because the RELATIVE excursion shrank
+(5-8x -> 2-3x of median) and ~97 fps sits deep in the VRR window — the
+mechanism itself still fires. Strongest remaining discriminators unchanged:
+disable the 60 Hz secondary (no restart), then drop PROTON_ENABLE_WAYLAND
+(restart).
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
