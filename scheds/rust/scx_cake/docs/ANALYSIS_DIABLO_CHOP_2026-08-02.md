@@ -96,6 +96,30 @@ waits. Game-config territory, not scheduler territory. First knob to try:
 an in-game FPS cap (~120) or vsync toggle; a pacing sawtooth flattens under
 a cap, an engine wait does not.
 
+## Runs 3-4 + launch-option audit (same evening)
+
+| run | severe | median | note |
+|---|---|---|---|
+| 3: cap 222→400 | 21.66% | 4.28 ms | median stays pinned ≈ display period (240 Hz = 4.17 ms) → **present-bound, limiter falsified** |
+| 4: cap 400, HUD hidden | 22.04% | 4.15 ms | **MangoHud overlay falsified** (one 347 ms outlier, single event) |
+
+Launch options, verified live in `/proc/80488/environ`:
+`PROTON_DXVK_LOWLATENCY=1` — live; targets DXVK's d3d11 limiter, D4 is
+DX12/vkd3d-proton → believed inert (training knowledge, unverified).
+`VKD3D_CONFIG=descriptor_heap` — live; **NOT a valid vkd3d-proton token**
+(verified against upstream README option list); a no-op that may also
+replace distro defaults — remove. `PROTON_ENABLE_WAYLAND=1` — live
+(WAYLAND_DISPLAY set): native wine-wayland presentation, the newest layer in
+exactly the path the evidence indicts — **top remaining suspect**.
+`PROTON_USE_NTSYNC=1` — live; wake service measured healthy under it, keep.
+`--in-process-gpu` — NOT in the game cmdline (verified); consumed by the
+launcher's CEF, irrelevant.
+
+**Elimination ledger:** external CPU churn ✗, focus-throttle ✗, shader-cache
+warming ✗, in-game limiter ✗, MangoHud overlay ✗, scheduler ✗ (wake tier and
+stall/preempt tier). Standing: native-Wayland present path (test: drop
+`PROTON_ENABLE_WAYLAND=1`, restart, re-log), then engine-internal waits.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
