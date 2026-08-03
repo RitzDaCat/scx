@@ -348,6 +348,37 @@ Discriminator: true Fullscreen in D4 display settings (Apply; disk-verify
 DisplayModeWindowMode changes) — collapses = KWin windowed-surface
 treatment; survives = engine-internal, and the host is exonerated end to end.
 
+## Run 12 — BARE ENVIRONMENT (21:1x): THE STALL TRAIN COLLAPSES
+
+User removed ALL startup items (verified in /proc pid 101693: no MANGOHUD,
+no NTSYNC, no VKD3D_CONFIG, no lowlatency, no wayland — stock proton env).
+Kernel-side measurement (no game-side instrument needed; the fence-wait rate
+was validated against severe-frame rate all night):
+
+| role | >=15ms waits/s instrumented | bare | drop |
+|---|---|---|---|
+| vkd3d_fence | 23.4/s | **0.7/s** | 33x |
+| vkd3d_queue | 18.4/s | **0.7/s** | 26x |
+| vkd3d-swapchain | 7.8/s | **0.4/s** | 20x |
+
+**CORRECTION, owed and owned: the earlier "MangoHud falsified" (run 4) was
+an INVALID test.** It removed the overlay DRAW (no_display) while the Vulkan
+layer stayed injected and hooking every present — it discriminated pixels,
+not the hook. The maintainer's direct question ("is it possible the
+mangohud?") was argued down with that invalid falsification. The user's
+flicker observation was the tell.
+
+**Caveat: four variables removed at once** (MangoHud layer, PROTON_USE_NTSYNC,
+VKD3D_CONFIG token, --in-process-gpu; XALIA flipped 0->1). MangoHud's layer
+is the leading candidate (present hook + flicker + CUSTOMIZED build);
+ntsync second. One-variable confirm: relaunch with ONLY mangohud re-added.
+
+**PROJECT IMPLICATION if MangoHud confirms: the capture instrument itself
+can inject a ~30 Hz stall train into a game.** HD2 measured 0.008% severe
+under the same MangoHud, so it is game-interaction-specific (D4+vkd3d), but
+every future D4 capture must cross-check against the kernel-side fence-wait
+rate, and the customized MangoHud build needs a bisect.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
