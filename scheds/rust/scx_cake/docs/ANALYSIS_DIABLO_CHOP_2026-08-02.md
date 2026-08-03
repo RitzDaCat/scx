@@ -280,6 +280,22 @@ this box's expected state is EPP=performance (per project memory). Not the
 band's cause (wrong failure shape), but a standing perf tax; restore
 separately from this hunt.
 
+## Cadence analysis (21:1x) — a ~30 Hz metronome quantized on 60 Hz periods
+
+| run | spikes/s | inter-spike gap p50 | gap CV | dur comb on 16.67 ms |
+|---|---|---|---|---|
+| 6 | 31.8 | 32.5 ms | 0.41 | 42% |
+| 7 | 27.2 | 38.7 ms | **0.19 (metronome)** | 37% |
+| 8 | 29.2 | 37.6 ms | **0.28 (metronome)** | 50% |
+
+The spike train ticks at ~27-32 Hz with gap p50 32-39 ms — i.e. every OTHER
+vblank of the 60 Hz secondary — and spike durations cluster at 16.7 / 29.2 /
+33.3 ms (60 Hz multiples dominate the comb in runs 7-8; duration clusters
+run7: 29.2ms x379, 25.0 x189, 33.3 x182). A ~30 Hz beat with 60 Hz-quantized
+hold durations is the mixed-refresh compositor path's signature. The monitor
+test (DP-3 off, no restart) is now the decisive discriminator; wayland-off
+is the fix-side test behind it.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
