@@ -144,6 +144,16 @@ swapchain frame pacing — directly on the indicted layer). Next-restart order t
 preserve discrimination: (1) restart with NO flag changes = isolates 0702->0703;
 (2) drop PROTON_ENABLE_WAYLAND; (3) swap DXVK->VKD3D lowlatency flag.
 
+## Run 6 — proton-cachyos 0703, flags unchanged (20:24)
+
+n=4286, median 4.74 ms, severe **23.66%**, gpu 51%, same 20-37 ms band.
+The 0702->0703 upgrade alone is falsified as a fix — condition seven the
+band has survived. (Median returned to the ~4.7 ms regime, so the run-5
+graphics change did not persist across the restart.) Ladder unchanged:
+next restart drops PROTON_ENABLE_WAYLAND, the one after swaps
+PROTON_DXVK_LOWLATENCY -> PROTON_VKD3D_LOWLATENCY (new in 0703, DX12
+waitable-swapchain pacing).
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
