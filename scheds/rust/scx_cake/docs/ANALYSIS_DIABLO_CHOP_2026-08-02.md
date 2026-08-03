@@ -180,6 +180,38 @@ no frame generation, no Intel (36-bit timestamps), CPU parallelism reduced
 by design. Ladder rung 3 stands: swap PROTON_DXVK_LOWLATENCY ->
 PROTON_VKD3D_LOWLATENCY, enable Reflex in D4, one variable per restart.
 
+## Deep hunt (fresh 25 s trace, GPU clocks, full flag audit, on-disk prefs)
+
+**Waker fingerprint — the stall is below userspace.** Block-gap decomposition
+of the fresh trace: every >=15 ms wait on the render chain ends with waker =
+`swapper` (fence 581/586, queue 460/460, swapchain 192/196) — hardware
+interrupts waking from idle, i.e. GPU/display signals arriving 15-48 ms late.
+kwin appears 7 times in 3,400+ long wakes; no userspace component is holding
+anything. Fence-thread long waits (~23/s) match the severe-frame rate.
+
+**GPU clocks falsified as a cause:** pclk pinned 2745 MHz, mclk 10501, zero
+power/thermal violations across 22 s of play at SM 50-75%.
+
+**Full env audit notables (live /proc):** wayland forced at DLL level
+(`winex11.drv=d;winewayland.drv=b`), fullscreen hack disabled, esync+fsync+
+ntsync all requested (ntsync wins), `WINE_UPSCALER_REPLACE=fsr4` on an NVIDIA
+box (oddity, effect unverified; DLSS-off run says not the band), Steam overlay
++ fossilize layers present (also present on HD2 at 0.008% severe — weak).
+Launch path is a Steam non-Steam shortcut (pressure-vessel SLR), not bare
+Battle.net.
+
+**On-disk D4 prefs (LocalPrefs.txt): `Vsync "0"`, `Reflex "2"` (= enabled +
+boost).** NEW PRIME SUSPECT: with DXVK_ENABLE_NVAPI=1, Reflex markers reach
+the NVIDIA driver's VK_NV_low_latency2 sleep path TODAY (stock vkd3d
+translation). A driver-side frame gate mispredicting under wayland+VRR
+explains the full invariance set and the swapper-wake fingerprint. Test is
+in-game Reflex OFF — applies live, no restart.
+
+**Test order now:** (1) Reflex OFF in-game, re-log; (2) vrr test / monitor
+test (kscreen, no restart); (3) wayland-off restart; (4) 0703's
+PROTON_VKD3D_LOWLATENCY as the eventual replacement pacer if Reflex itself
+is the problem layer.
+
 ## Artifacts
 
 - Frame log: `~/Benchmarks/Diablo IV_2026-08-02_19-35-54.csv` (+ summary)
