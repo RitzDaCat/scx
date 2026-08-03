@@ -1218,6 +1218,27 @@ therefore dropped unless they begin after a warmup **and** after the run CPU's o
 recorded switch. The companion rule is to score a **rate**, never a max or a count at one
 threshold — the max is a one-sample statistic and inverted the cake-vs-native ordering.
 
+### R.24 — cross-multiplied divide elimination (registered 2026-08-03)
+
+**Hypothesis:** two of the 11 hot-path divides spend their quotient on a comparison, so
+the comparison can be cross-multiplied and the divide skipped — bit-identical decisions,
+~15–25 cycles → ~6–8 per site. (a) `cake_frame_observe`: the divide runs on EVERY
+`ops.running` (ctx-switch rate) and the 2–40 ms range gate then discards it for every
+non-frame-cadence task; `per < MIN ⟺ delta < MIN·n`, `per > MAX ⟺ delta ≥ (MAX+1)·n`.
+(b) `cake_handoff_yields`: `S/n ≤ ran ∨ S/n − ran < H ⟺ S < (ran+H)·n`. Both keep the
+original divide on a `__noinline`-free slow arm gated at operand width 2^32 (overflow
+exactness; a 99-day 500 Hz compositor crosses 2^32 nvcsw and must stay observed), same
+fast/slow shape as `CAKE_RECIP_RUNTIME_FAST_MAX`. Full census:
+`docs/CENSUS_ARITH_2026-08-03.md`.
+
+**Steps:** one commit per site (a, b). **Endpoint:** `--blocks 2` cake-vs-cake screen —
+futex/pipe are the sensitive instruments (4–5M switches/s integrates the per-switch
+saving; predicted ~0.7–1.6% of a core returned on futex-class loads). **No game screen
+owed:** placement, preemption, and slice policy are untouched — every decision is proven
+bit-identical (fast arm ⟺ original algebraically; slow arm is the original verbatim).
+**Kills:** verifier reject; any spill regression (must stay 0); any decision-changing
+diff; screen regression beyond noise. Budget: 2 commits + 1 screen.
+
 ### G14 / G15 / G16 — FALSIFIED, do not retry without new evidence
 
 Three attempts on the renderer's tail, all built, measured and reverted.

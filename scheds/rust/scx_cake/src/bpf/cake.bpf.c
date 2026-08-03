@@ -207,13 +207,24 @@ static __always_inline bool cake_starved(const struct task_struct *p)
 /*
  * Fold this task's mean wake cadence into the frame clock: a display-coupled
  * thread reports the frame period directly, and casts one vote for it (§G11).
+ * The range gate is cross-multiplied so the off-cadence majority — every
+ * ops.running caller — never divides; nvcsw >= 2^32 takes the exact divide
+ * path instead (§R.24).
  */
 __noinline void cake_frame_observe(struct task_struct *p __arg_trusted, u64 now)
 {
-	u64 per = (now - p->start_time) / (p->nvcsw | 1);
+	u64 n = p->nvcsw | 1;
+	u64 delta = now - p->start_time;
 	struct cake_frame_bucket *b;
+	u64 per;
 	u32 idx;
 
+	if (!(n >> 32) &&
+	    (delta < FRAME_PERIOD_MIN_NS * n ||
+	     delta >= (FRAME_PERIOD_MAX_NS + 1) * n))
+		return;
+
+	per = delta / n;
 	if (per < FRAME_PERIOD_MIN_NS || per > FRAME_PERIOD_MAX_NS)
 		return;
 
