@@ -275,14 +275,33 @@ static struct cake_state cake;
  * on one line. The plain read is the common case and costs no bus traffic; the
  * atomic fires only on an actual empty<->nonempty transition (§G25, §R.10).
  */
+/* DIAGNOSTIC ONLY (§G25 census) — per-CPU, non-atomic, per the GAME_DIAG law. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CENSUS_SLOTS);
+	__type(key, u32);
+	__type(value, u64);
+} cake_census SEC(".maps");
+
+static __always_inline void census(u32 slot)
+{
+	u64 *v = bpf_map_lookup_elem(&cake_census, &slot);
+
+	if (v)
+		*v += 1;
+}
+
 static __always_inline void cake_qmark_set(u32 cpu)
 {
 	u64 bit;
 
 	cpu &= MAX_CPUS - 1;
 	bit = 1ULL << (cpu & 63);
-	if (!(cake.qmask[cpu >> 6] & bit))
+	census(CENSUS_SET_CALLS);
+	if (!(cake.qmask[cpu >> 6] & bit)) {
+		census(CENSUS_SET_ATOMIC);
 		__atomic_fetch_or(&cake.qmask[cpu >> 6], bit, __ATOMIC_RELAXED);
+	}
 }
 
 static __always_inline void cake_qmark_clear(u32 cpu)
@@ -291,8 +310,11 @@ static __always_inline void cake_qmark_clear(u32 cpu)
 
 	cpu &= MAX_CPUS - 1;
 	bit = 1ULL << (cpu & 63);
-	if (cake.qmask[cpu >> 6] & bit)
+	census(CENSUS_CLR_CALLS);
+	if (cake.qmask[cpu >> 6] & bit) {
+		census(CENSUS_CLR_ATOMIC);
 		__atomic_fetch_and(&cake.qmask[cpu >> 6], ~bit, __ATOMIC_RELAXED);
+	}
 }
 
 static __always_inline bool cake_qmark_test(u32 cpu)
@@ -1098,22 +1120,27 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 	u32 cw = (u32)-1;	/* which qmask word `m` holds; none yet */
 	u64 m = 0;
 
+	census(CENSUS_RING_CALLS);
 	for (i = 1; i < MAX_CPUS; i++) {
 		u32 idx = ucpu + i, wi;
 
 		if (i >= nr)
 			break;
+		census(CENSUS_RING_STEPS);
 		if (idx >= nr)
 			idx -= nr;
 		wi = (idx >> 6) & (QMASK_WORDS - 1);
 		if (wi != cw) {
+			census(CENSUS_WORD_LOADS);
 			cw = wi;
 			m = cake.qmask[wi];
 		}
 		if (!(m & (1ULL << (idx & 63))))
 			continue;
-		if (cake_move_to_local((u64)idx))
+		if (cake_move_to_local((u64)idx)) {
+			census(CENSUS_RING_HITS);
 			return true;
+		}
 	}
 #endif
 

@@ -115,4 +115,17 @@ enum consts {
 	QMASK_WORDS	= MAX_CPUS / 64,
 };
 
+/* DIAGNOSTIC ONLY (§G25 census) — revert with the commit that adds it. */
+enum cake_census_slot {
+	CENSUS_RING_CALLS = 0,	/* cake_ring_steal entered */
+	CENSUS_RING_STEPS,	/* ring iterations executed */
+	CENSUS_RING_HITS,	/* moved work local */
+	CENSUS_WORD_LOADS,	/* qmask word actually loaded in the walk */
+	CENSUS_SET_CALLS,	/* cake_qmark_set entered */
+	CENSUS_SET_ATOMIC,	/* ... and the bit really changed */
+	CENSUS_CLR_CALLS,	/* cake_qmark_clear entered */
+	CENSUS_CLR_ATOMIC,	/* ... and the bit really changed */
+	CENSUS_SLOTS,
+};
+
 #endif /* __CAKE_INTF_H */
