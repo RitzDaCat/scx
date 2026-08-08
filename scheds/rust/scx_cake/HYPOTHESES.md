@@ -1970,3 +1970,66 @@ above it would only ever be served by their owners. `ops.init` refuses that rath
 silently under-scanning.
 
 Raw small DSQ ids are safe: the kernel reserves only bit-63 builtin ids.
+
+---
+
+### G25 — the steal ring asks one question fifteen times (registered 2026-08-07)
+
+**Parent:** G24's census — `cake_ring_steal` walks on **93-98% of all dispatches for a
+~1% hit** (STATE.md §G24). Parent status CONFIRMED, so this is buildable.
+
+**Mechanism claim.** `cake.qmark[]` is `struct cake_slot` at `STATE_SLOT_BYTES` = 128 B
+per CPU (`cake.bpf.c:263`, `_Static_assert :241`). The miss walk therefore probes up to
+**15 distinct cache lines, each owned and dirtied by a different CPU**. The cost is
+coherence traffic, not the 10 conditional branches. One u64 bitmap answers the same
+question from **one** line.
+
+**Anti-herd stagger is preserved exactly, not approximately.** The walk starts at
+`ucpu + 1` (§R.7). Rotating the mask right by `self + 1` maps CPU `c + 1 + i` to bit
+position `i`, so `ctz` returns the first CPU **in the current walk order**. Proved
+exhaustively over all 16 CPUs × all 65,536 masks: **1,048,576 cases, 0 mismatches**
+(`/tmp/order_equiv.c`, 2026-08-07). Same victim, every case — this is a pure cost
+change, and by the R.24 precedent it owes no game screen on decision grounds.
+
+**Priced before building** — `bench/qmark_price.c`, diagnostic/non-ingesting, reader
+pinned, 2M iters, median of 5 reps, **6 rounds with arm order alternated AB/BA**:
+
+| writers | WALK15 med (min-max) | BITMAP1 med | delta |
+|---|---:|---:|---:|
+| quiet (lines shared-clean) | 2.89 (2.86-2.93) | 0.27 | **-90.5%** |
+| slow (~10 us flips) | 2.95 (2.91-2.97) | 0.24 | **-91.9%** |
+| fast (continuous flips) | 355.33 (334.44-361.37) | 41.07 | **-88.4%** |
+
+**Static shape** (`clang -target bpf`, de Bruijn multiply + 64 B table, no loop):
+24 insns / 1 branch / 0 calls, versus `cake_ring_steal`'s 47 / 10 / 2.
+
+**Endpoint.** Wake latency on the HD2 render roles, plus a P4 bench screen. NOT the
+microbenchmark — that is the price, not the verdict.
+
+**Prediction, on the record before the measurement.** The saving per dispatch is the
+regime's row: **~2.6 ns** if qmark lines sit shared-clean, **~314 ns** if they are
+continuously invalidated. At the census rate (151k ring walks/s) that is **0.04% of a
+core versus 4.7%** — a 130x spread on the same change. `cake_qmark_set/_clear` already
+test before storing, so the honest prior is the **quiet** row, and **the expected frame
+effect is near zero**. A null here confirms the pricing; it does not falsify the change.
+
+**Kill conditions.** (1) The atomic RMW needed for cross-CPU bit updates measures worse
+than the walk on a contended bench — this breaks the atomic-free release hot path, which
+is the real cost being traded. (2) Verifier rejection. (3) A runnable-task stall, i.e.
+a lost bit strands work.
+
+**Budget:** 3 commits. **Open edge:** `cpu_steal_order` (`:1060`) encodes CCD locality as
+an arbitrary permutation a rotate cannot express; it is `#if`'d out on this single-CCD
+machine and the walk arm stays intact for multi-CCD rather than silently regressing.
+
+**BUILT 2026-08-07, UNCOMMITTED, review findings open — see
+`docs/REVIEW_G25_2026-08-07.md`.** Independent adversarial review returned SHIP WITH
+FIXES. Ring order confirmed by a wider proof than the registration's (3,026,000 trials,
+30 spans to 1024 CPUs, 0 mismatches). Five open defects: `__sync_fetch_and_or` JITs to a
+CMPXCHG spin loop (`__atomic_fetch_or` RELAXED gives one `lock or`); the once-read `self`
+snapshot widens check-then-act so a bit set during pass 1 is invisible to pass 3 and a
+task can strand; `cake_ring_steal` 0/0 → 8/13 spills and 52 → 160 insns; atomic sites
+1 → 6; `comment_lint.py` density 0.69 → 0.78 over the 0.70 cap. **Verifier acceptance
+UNVERIFIED** (no `veristat` on PATH). **`bench/fnspills.py` is BLIND on this toolchain** —
+its `r10 [-+] \d+` regex cannot match llvm-objdump 22's `r10 - 0x8`, so every zero-spill
+claim made with it on this clang is vacuous until the regex is fixed.

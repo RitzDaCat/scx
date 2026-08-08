@@ -14,8 +14,12 @@ out = subprocess.run(["llvm-objdump", "-d", "-r", obj],
                      capture_output=True, text=True).stdout
 
 # store: *(u64 *)(r10 - N) = rX      fill: rX = *(u64 *)(r10 - N)
-st = re.compile(r"\*\(u\d+ \*\)\(r10 [-+] \d+\)\s*=")
-ld = re.compile(r"=\s*\*\(u\d+ \*\)\(r10 [-+] \d+\)")
+# llvm-objdump >= 17 prints the offset in hex ("r10 - 0x8"); older builds printed
+# decimal. Accept both — a decimal-only regex silently reports ZERO spills for
+# every function on a hex toolchain (found 2026-08-07).
+_OFF = r"(?:0x[0-9a-fA-F]+|\d+)"
+st = re.compile(rf"\*\(u\d+ \*\)\(r10 [-+] {_OFF}\)\s*=")
+ld = re.compile(rf"=\s*\*\(u\d+ \*\)\(r10 [-+] {_OFF}\)")
 fn = re.compile(r"^[0-9a-f]+ <(.+)>:")
 
 cur, rows = None, collections.OrderedDict()

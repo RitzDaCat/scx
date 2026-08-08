@@ -73,6 +73,35 @@ design. Arithmetic axis now fully mapped — remaining census items (task_slice 
 pre-check, steal-ring walk) are speculative/G25 territory. G23's parked resume order
 below is untouched.
 
+### 📊 BRANCH THESIS PRICED 2026-08-07 — `docs/BRANCH_THESIS_2026-08-07.md`
+
+Maintainer question: could a "master algorithm" reach the same verdicts with fewer
+branches and a shorter hot path? **Half falsified, half confirmed, CENSUS + STATIC
+only.** Fresh whole-object census: **1302 insns / 189 conditional branches / 121 calls**,
+branch density uniform at ~0.145 — no outlier function. The densest tree (`ops.enqueue`,
+159/22) is reached on **0.142%** of a game's dispatches. Every measured win (G21 −39.9%
+mean wake, G13, G17, G18) *added* work and changed the question asked.
+
+**AMENDED same day on maintainer pushback ("schedulers are won and lost at the nanosecond
+level").** Correct — unit is **ns × ops/sec**: 156,483 dispatches/s, `cake_select_cpu` on
+99.86% of them. The nanoseconds decide it; the question is WHICH. Of three competing terms
+in that function — 44 branches (~3 ns mispredicted), **27 kfunc calls**, **49 memory ops** —
+the branch term is the smallest and was the only one originally priced. **The thesis is
+alive at the steal ring**, and for a memory reason: `cake.qmark[]` is 128 B per slot
+(`cake.bpf.c:246`), so `cake_ring_steal` (`:1047`) probes **up to 15 remotely-dirtied cache
+lines per dispatch** on 93-98% of dispatches for a ~1% hit. G25 candidate: one u64 bitmap
+word.
+
+**G25 PRICED 2026-08-07 — `bench/qmark_price.c`, diagnostic/non-ingesting, quiet machine.**
+Reader-side wallclock, 15×128 B miss walk vs one u64 + `ffs`, atomic writers so the
+bitmap pays its own contention. **6 rounds, arm order alternated AB/BA; medians: quiet
+2.89 → 0.27 ns (−90.5%), slow 2.95 → 0.24 ns (−91.9%), fast 355.33 → 41.07 ns (−88.4%).**
+WALK15 quiet spread 2.4% across rounds; no material order artifact. The bitmap wins in
+EVERY regime by 11-12×,
+and the current walk's worst case is **336 ns/dispatch** = 5.2% of a core at 156k
+dispatches/s. Transition-rate census now SIZES the win, it no longer decides it. Full
+ledger + the retracted defective run in `docs/BRANCH_THESIS_2026-08-07.md` §5b.
+
 ### 🚧 G23 IN FLIGHT — every sink, not just the loudest; delete the swap's leaked claim
 
 **Registered 2026-08-02, full registration in HYPOTHESES.md §G23.** Two defects in G21's
