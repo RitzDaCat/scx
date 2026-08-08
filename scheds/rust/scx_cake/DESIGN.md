@@ -77,7 +77,7 @@ Created at `init`: one custom vtime DSQ **per possible CPU** (`dsq_id ==
 cpu`) and one global wake queue (`WAKE_DSQ`). All mutable shared state is a
 single BSS struct of 128-byte-stride slots (no false sharing, no hot-path
 atomics): the vtime frontier, a per-CPU run slot pairing the run-start stamp
-with the `sum_exec_runtime` snapshot, and one family of hint words (`qmark`
+with the `sum_exec_runtime` snapshot, and one family of hint words (`qmask`
 "queue may hold work", republished by the owner from its own head peek,
 benign races). Load-time constants live in `const volatile` rodata so
 libbpf's freeze lets the verifier fold them: the SMT sibling map
@@ -259,7 +259,8 @@ For a **continuation** (slice-expiry or preempt requeue):
 
 ### dispatch — one ordering rule
 
-Peek my own head and republish my `qmark` from it — one conditional store, so
+Peek my own head and republish my bit in `qmask` from it — one conditional
+atomic, so
 the line every stealer polls is not invalidated to write back the value it
 already held. Two *lockless*
 `scx_bpf_dsq_peek` snapshots order own-vs-wake by earliest vtime with
@@ -270,7 +271,7 @@ lose: 1× everywhere leaves +34% futex on the table, 2× everywhere collapses
 futex to below native). A stranded peer ages into sleeper class as the
 frontier advances — the starvation seal is structural, no rescue path.
 Consume order is **own → wake**, then the staggered two-half-loop ring steal
-gated by per-CPU `qmark` hints (dispatch 199→68 ns/call), then keep-running slice
+gated by the `qmask` queue-hint bitmask (dispatch 199→68 ns/call), then keep-running slice
 refill when everything is visibly empty.
 
 On a build host with more than one L3/CCD domain, the Rust loader precomputes a
@@ -447,7 +448,7 @@ any kind.
   with the divert it guarded; the sleeper clamp computed per arm rather than
   hoisted; `OVF_DSQ` plus both of its rescues deleted under NO BUCKETS —
   the ordering rule already conserves work, because a continuation left on its
-  owner's queue is qmarked and any CPU going idle finds it on the ring walk.
+  owner's bit is set in `qmask` and any CPU going idle finds it on the ring walk.
   Then a second pass on the laws themselves: `nr_cpu_ids` moved out of mutable
   BSS into frozen rodata (`nr_cpu_span`); `qmark` republished with one
   conditional store instead of clear-then-remark; the dead
@@ -490,3 +491,41 @@ this document.
   are rarer than 1-in-100 for `main`, so p99 understates it 4×. An idle-depth
   (C-state) theory was falsified reaching this: the host binds no cpuidle driver
   and the effect was one CPU, not idle duration.
+
+### 2026-08-08 — G25: the steal-ring queue hint becomes a bitmask
+
+`cake.qmark[]` was one `struct cake_slot` per CPU, 128 B apart, so
+`cake_ring_steal`'s miss walk probed up to `nr-1` distinct remotely-dirtied cache
+lines — on 93-98% of all dispatches for a ~1% hit. It is now ONE BIT PER CPU in
+`cake.qmask[QMASK_WORDS]`: 1024 bits is 128 B, one cache-isolation slot, against
+the old 128 KB array. A span of 64 or fewer answers the whole ring from a single
+snapshotted load.
+
+Ring order, the `cpu+1` start and the anti-herd stagger are unchanged; brute-forced
+against the old walk over every `(nr, ucpu)` for `nr` in [1,129], 0 mismatches.
+
+The bit is shared, so set/clear take an atomic RMW and the release hot path is no
+longer atomic-free — `__atomic_fetch_or/and` RELAXED, never `__sync_fetch_and_*`
+(the `__sync` form requests a fetch the caller discards and the x86 JIT lowers that
+to a CMPXCHG retry loop). `cake_qmark_publish` is `__noinline` so LLVM cannot hoist
+the mark update above the peek that decides it.
+
+**Priced (`bench/qmark_price.c`, 6 rounds, arm order alternated, ns per ring
+decision).** BITMAP-N is the pre-snapshot shape that reloaded the shared word each
+step; BITMAP-1 is what shipped:
+
+| writers | WALK15 | BITMAP-N | BITMAP-1 |
+|---|---:|---:|---:|
+| quiet | 2.85 | 3.38 (**+18.3%**) | **0.18 (−93.6%)** |
+| slow | 2.91 | 0.49 | **0.24 (−91.7%)** |
+| fast | 367.50 | 71.48 | **35.68 (−90.3%)** |
+
+The snapshot is load-bearing: without it the change REGRESSES the quiet regime,
+which is cake's expected operating point. Missing a bit raised mid-walk costs a
+steal and never liveness — core's `activate->wakeup_preempt` reschedules the owner
+regardless.
+
+**Open:** this puts 16 CPUs' marks in one word, which §R.10's "preserve the 128 B
+inter-CPU stride in every case" previously forbade (`099c1a547` deleted
+`CAKE_QMARK_SLOT_BYTES` for exactly that). Deliberate reversal, maintainer's call,
+recorded here so it is not mistaken for an oversight.

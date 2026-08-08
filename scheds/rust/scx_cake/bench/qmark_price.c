@@ -145,6 +145,33 @@ static uint64_t walk15(uint32_t self)
 	return hits;
 }
 
+/*
+ * The shape G25 shipped BEFORE the snapshot fix: one word, but reloaded on
+ * every ring step because the mark test was inlined inside the loop. Prices
+ * what 15 coherence misses SERIALISED ON ONE LINE cost, versus WALK15's 15
+ * misses spread over 15 lines. Without this arm the "fast" row flatters the
+ * bitmap by comparing a 1-load arm to a 15-load arm.
+ */
+static uint64_t bitmapN(uint32_t self)
+{
+	uint64_t hits = 0;
+	uint64_t mine = 1ull << self;
+
+	for (uint64_t n = 0; n < ITERS; n++) {
+		for (uint32_t i = 1; i < NR_CPU; i++) {
+			uint32_t idx = (self + i) & (NR_CPU - 1);
+			uint64_t w = atomic_load_explicit(&bitmap,
+							  memory_order_relaxed);
+
+			if (w & ~mine & (1ull << idx)) {
+				hits++;
+				break;
+			}
+		}
+	}
+	return hits;
+}
+
 /* G25 candidate: one word, mask off self, ffs. */
 static uint64_t bitmap1(uint32_t self)
 {
@@ -186,7 +213,7 @@ static double price(uint64_t (*fn)(uint32_t), uint32_t self)
 }
 
 static void run(const char *label, enum wmode m, int bmap_writers,
-		double *out_walk, double *out_bmap)
+		double *out_walk, double *out_bmapn, double *out_bmap)
 {
 	pthread_t th[NR_CPU];
 	long started = 0;
@@ -211,8 +238,12 @@ static void run(const char *label, enum wmode m, int bmap_writers,
 	}
 
 	pin(0);
-	*out_walk = bmap_writers ? -1.0 : price(walk15, 0);
-	*out_bmap = bmap_writers ? price(bitmap1, 0) : -1.0;
+	if (bmap_writers) {
+		*out_bmapn = price(bitmapN, 0);
+		*out_bmap = price(bitmap1, 0);
+	} else {
+		*out_walk = price(walk15, 0);
+	}
 
 	if (m != W_QUIET) {
 		writers_go = 0;
@@ -250,7 +281,7 @@ int main(int argc, char **argv)
 {
 	static const char *const MODE[3] = { "quiet", "slow", "fast" };
 	static const enum wmode WM[3] = { W_QUIET, W_SLOW, W_FAST };
-	double w[3][MAX_ROUNDS], b[3][MAX_ROUNDS], ign;
+	double w[3][MAX_ROUNDS], n[3][MAX_ROUNDS], b[3][MAX_ROUNDS], ign;
 	int rounds = argc > 1 ? atoi(argv[1]) : 6;
 
 	if (rounds < 1 || rounds > MAX_ROUNDS)
@@ -269,23 +300,25 @@ int main(int argc, char **argv)
 
 		for (int m = 0; m < 3; m++) {
 			if (bfirst) {
-				run(MODE[m], WM[m], 1, &ign, &b[m][r]);
-				run(MODE[m], WM[m], 0, &w[m][r], &ign);
+				run(MODE[m], WM[m], 1, &ign, &n[m][r], &b[m][r]);
+				run(MODE[m], WM[m], 0, &w[m][r], &ign, &ign);
 			} else {
-				run(MODE[m], WM[m], 0, &w[m][r], &ign);
-				run(MODE[m], WM[m], 1, &ign, &b[m][r]);
+				run(MODE[m], WM[m], 0, &w[m][r], &ign, &ign);
+				run(MODE[m], WM[m], 1, &ign, &n[m][r], &b[m][r]);
 			}
 		}
-		printf("round %d (%s first): ", r + 1, bfirst ? "BITMAP1" : "WALK15");
+		printf("round %d (%s first): ", r + 1, bfirst ? "BITMAP" : "WALK15");
 		for (int m = 0; m < 3; m++)
-			printf("%s %.2f/%.2f  ", MODE[m], w[m][r], b[m][r]);
+			printf("%s %.2f/%.2f/%.2f  ", MODE[m], w[m][r],
+			       n[m][r], b[m][r]);
 		printf("\n");
 	}
 
-	printf("\n%-8s %10s %10s %10s %10s %10s %9s\n", "writers",
-	       "WALK med", "WALK min", "WALK max", "BMAP med", "BMAP max", "delta");
+	printf("\n%-8s %11s %11s %11s %11s %11s\n", "writers",
+	       "WALK15", "BITMAP-N", "BITMAP-1", "N vs WALK", "1 vs WALK");
 	for (int m = 0; m < 3; m++) {
 		double wm = median_d(w[m], rounds), bm = median_d(b[m], rounds);
+		double nm = median_d(n[m], rounds);
 		double wlo = w[m][0], whi = w[m][0], bhi = b[m][0];
 
 		for (int r = 1; r < rounds; r++) {
@@ -296,8 +329,10 @@ int main(int argc, char **argv)
 			if (b[m][r] > bhi)
 				bhi = b[m][r];
 		}
-		printf("%-8s %10.2f %10.2f %10.2f %10.2f %10.2f %8.2f%%\n",
-		       MODE[m], wm, wlo, whi, bm, bhi, 100.0 * (bm - wm) / wm);
+		(void)wlo; (void)whi; (void)bhi;
+		printf("%-8s %11.2f %11.2f %11.2f %10.2f%% %10.2f%%\n",
+		       MODE[m], wm, nm, bm,
+		       100.0 * (nm - wm) / wm, 100.0 * (bm - wm) / wm);
 	}
 	printf("\nNegative delta = BITMAP1 is faster. Medians across rounds.\n");
 	return 0;

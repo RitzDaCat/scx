@@ -1985,11 +1985,20 @@ coherence traffic, not the 10 conditional branches. One u64 bitmap answers the s
 question from **one** line.
 
 **Anti-herd stagger is preserved exactly, not approximately.** The walk starts at
-`ucpu + 1` (§R.7). Rotating the mask right by `self + 1` maps CPU `c + 1 + i` to bit
-position `i`, so `ctz` returns the first CPU **in the current walk order**. Proved
-exhaustively over all 16 CPUs × all 65,536 masks: **1,048,576 cases, 0 mismatches**
-(`/tmp/order_equiv.c`, 2026-08-07). Same victim, every case — this is a pure cost
-change, and by the R.24 precedent it owes no game screen on decision grounds.
+`ucpu + 1` (§R.7) and the shipped code keeps that loop verbatim, wrapping with one
+subtraction. Same victim, every case — this is a pure cost change, and by the R.24
+precedent it owes no game screen on decision grounds. Confirmed twice by independent
+brute force: every `(nr, ucpu)` for `nr ∈ [1,129]`, **0 mismatches**, 0 self-indices,
+0 out-of-range, exactly `nr-1` distinct visits.
+
+**NOT SHIPPED — the rotate + `ctz` design this section was registered with.** The
+registration proposed rotating the mask right by `self + 1` so `ctz` returns the first
+CPU in walk order (proved over 1,048,576 cases, `/tmp/order_equiv.c`, 2026-08-07), with
+a static shape of 24 insns / 1 branch / 0 calls. **Review killed it**: `ctz` lowers to a
+de Bruijn multiply plus an `ld_imm64` .rodata pointer plus a byte load — the
+constant-in-rodata law — and the three-pass scheme it needed cost 8 spills / 13 fills.
+`edafb27e5` ships a 15-iteration bit walk instead: **41 insns, 10 branches, 1 call, 0
+spills**. Do not "restore" the rotate; it was measured and rejected.
 
 **Priced before building** — `bench/qmark_price.c`, diagnostic/non-ingesting, reader
 pinned, 2M iters, median of 5 reps, **6 rounds with arm order alternated AB/BA**:
@@ -2000,8 +2009,29 @@ pinned, 2M iters, median of 5 reps, **6 rounds with arm order alternated AB/BA**
 | slow (~10 us flips) | 2.95 (2.91-2.97) | 0.24 | **-91.9%** |
 | fast (continuous flips) | 355.33 (334.44-361.37) | 41.07 | **-88.4%** |
 
-**Static shape** (`clang -target bpf`, de Bruijn multiply + 64 B table, no loop):
-24 insns / 1 branch / 0 calls, versus `cake_ring_steal`'s 47 / 10 / 2.
+**⚠ THE TABLE ABOVE DOES NOT PRICE THE SHIPPED CODE (round-2 review, 2026-08-08).**
+`BITMAP1` takes exactly ONE load (`bench/qmark_price.c:148-159`); the shipped walk
+inlines `cake_qmark_test` inside the loop back-edge, so it reloads the shared word up to
+`nr-1` times. The quiet and slow rows still bound it (that line is L1-hot), but the
+**`fast` row does not transfer**: 15 misses serialised on one contended line is not 15
+misses spread over 15 lines, and it may be worse than the code it replaces. Re-price with
+a 15-reload arm before claiming the contended regime.
+
+**Open, and a MAINTAINER CALL:** `STATE.md:2276` log entry 11 (`099c1a547`) deleted
+`CAKE_QMARK_SLOT_BYTES` *because* it allowed sixteen CPUs' marks to false-share one line,
+opting out of §R.10's "preserve the 128 B inter-CPU stride in every case". G25 ships that
+layout unconditionally. Deliberate reversal or oversight — needs a ledger entry either
+way.
+
+**Round-2 review findings: `docs/REVIEW_G25_ROUND2_2026-08-08.md`.** All five round-1
+defects confirmed fixed; read-then-atomic proved safe against lost bits (every writer of
+bit *c* runs under CPU *c*'s rq lock). Open: the pricing gap above, `cake_dispatch_search`
+0/0 → 1/2 spills from LLVM hoisting the mark update above `scx_bpf_dsq_peek`, and
+`DESIGN.md:80, 262, 273, 452` still saying `qmark`/per-CPU.
+
+**Verifier ACCEPTED and attach smoke PASSED 2026-08-08** — receipt
+`20260808T103747Z_g25-bitmask_e2eba2f9475f`, binary sha256 `af0b47b1…`, 12 s attached on
+the live desktop, no stall, clean detach, `ops` empty after.
 
 **Endpoint.** Wake latency on the HD2 render roles, plus a P4 bench screen. NOT the
 microbenchmark — that is the price, not the verdict.

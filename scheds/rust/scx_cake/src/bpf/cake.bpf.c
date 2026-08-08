@@ -301,6 +301,20 @@ static __always_inline bool cake_qmark_test(u32 cpu)
 	return cake.qmask[cpu >> 6] & (1ULL << (cpu & 63));
 }
 
+/*
+ * Republish this CPU's mark from a head peek. Deliberately __noinline: inlined,
+ * LLVM shares the bit and word address between the set and clear arms, hoists
+ * both ABOVE the peek call that decides between them, and pins them across it —
+ * evicting the caller's own cpu id to the stack (§G25).
+ */
+static __noinline void cake_qmark_publish(u32 cpu, bool queued)
+{
+	if (queued)
+		cake_qmark_set(cpu);
+	else
+		cake_qmark_clear(cpu);
+}
+
 /* Loader-filled SMT map; -1 means the CPU has no online sibling. */
 const volatile s32 cpu_sibling[MAX_CPUS];
 
@@ -1055,9 +1069,11 @@ kick_idle:
  * fewer CPUs answers every probe from ONE cache line instead of one 128 B slot
  * per CPU (§G25). The own-offset start is the anti-herd stagger (§R.7).
  *
- * The mark is re-read at each step and never snapshotted: a bit raised while
- * the walk is in flight must still be seen, or the wake it stands for waits for
- * its own CPU. One subtraction wraps the index — no modulo.
+ * The word is snapshotted, reloaded only when the walk crosses into another
+ * one, so a span of 64 or fewer costs a SINGLE load for the whole ring. Missing
+ * a bit raised mid-walk costs a steal and never liveness — the owner is
+ * rescheduled by core's activate->wakeup_preempt regardless (see ops.enqueue).
+ * One subtraction wraps the index — no modulo.
  */
 static __noinline bool cake_ring_steal(u32 ucpu)
 {
@@ -1079,15 +1095,24 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 			return true;
 	}
 #else
+	u32 cw = (u32)-1;	/* which qmask word `m` holds; none yet */
+	u64 m = 0;
+
 	for (i = 1; i < MAX_CPUS; i++) {
-		u32 idx = ucpu + i;
+		u32 idx = ucpu + i, wi;
 
 		if (i >= nr)
 			break;
 		if (idx >= nr)
 			idx -= nr;
-		if (cake_qmark_test(idx) &&
-		    cake_move_to_local((u64)idx))
+		wi = (idx >> 6) & (QMASK_WORDS - 1);
+		if (wi != cw) {
+			cw = wi;
+			m = cake.qmask[wi];
+		}
+		if (!(m & (1ULL << (idx & 63))))
+			continue;
+		if (cake_move_to_local((u64)idx))
 			return true;
 	}
 #endif
@@ -1142,13 +1167,10 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	 * Own queue first, global wake queue second, with a one-slice margin.
 	 * The margin is HYSTERESIS, not fairness slack: without it every CPU
 	 * takes the global lock first and the wake-storm serialisation returns.
-	 * The head peek republishes qmark with one conditional store (§R.3).
+	 * The head peek republishes the mark with one conditional store (§R.3).
 	 */
 	own = scx_bpf_dsq_peek((u64)ucpu);
-	if (own)
-		cake_qmark_set(ucpu);
-	else
-		cake_qmark_clear(ucpu);
+	cake_qmark_publish(ucpu, own);
 	wake = scx_bpf_dsq_peek((u64)WAKE_DSQ);
 	if (wake) {
 		u64 wv = wake->scx.dsq_vtime;
