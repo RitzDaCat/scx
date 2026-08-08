@@ -330,35 +330,6 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // DIAGNOSTIC ONLY (§G25 census) -- revert with the commit that adds it.
-        {
-            const NAMES: [&str; bpf_intf::cake_census_slot_CENSUS_SLOTS as usize] = [
-                "ring_calls",
-                "ring_steps",
-                "ring_hits",
-                "word_loads",
-                "set_calls",
-                "set_atomic",
-                "clr_calls",
-                "clr_atomic",
-            ];
-            let map = &self.skel.maps.cake_census;
-            let mut tot = [0u64; bpf_intf::cake_census_slot_CENSUS_SLOTS as usize];
-            for (idx, slot) in tot.iter_mut().enumerate() {
-                let key = (idx as u32).to_ne_bytes();
-                if let Ok(Some(percpu)) = map.lookup_percpu(&key, MapFlags::ANY) {
-                    for cpu in &percpu {
-                        if cpu.len() >= 8 {
-                            *slot += u64::from_ne_bytes(cpu[..8].try_into().unwrap());
-                        }
-                    }
-                }
-            }
-            for (name, val) in NAMES.iter().zip(tot.iter()) {
-                info!("G25-CENSUS {name}={val}");
-            }
-        }
-
         self.struct_ops.take();
         info!("🍰 {SCHEDULER_NAME} detached — default scheduler restored");
         uei_report!(&self.skel, uei)
