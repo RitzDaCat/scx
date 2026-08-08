@@ -256,38 +256,49 @@ struct cake_state {
 	/* ktime the global wake queue was last consumed by ANY CPU (§R.16). */
 	struct cake_slot wake_served;
 	/*
-	 * "DSQ[i] may hold work" hint gating the steal ring, so a going-idle
-	 * dispatch stops hashing empty queues. Written only under CPU i's rq
-	 * lock; a stale mark is benign by construction (§R.10).
+	 * "DSQ[i] may hold work" hint gating the steal ring, one bit per CPU, so
+	 * a going-idle dispatch reads QMASK_WORDS words instead of probing one
+	 * 128 B slot per CPU. A stale bit is benign by construction (§G25).
 	 */
-	struct cake_slot qmark[MAX_CPUS];
+	u64 qmask[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 };
+
+_Static_assert(sizeof(((struct cake_state *)0)->qmask) <= STATE_SLOT_BYTES,
+	       "qmask must fit one cache-isolation slot");
 
 static struct cake_state cake;
 
 
 /*
- * Test before writing: every stealer's ring walk reads qmark, so storing the
- * value already there invalidates remote copies for nothing (§R.10).
+ * Test before writing, now for a second reason: the bit lives in a word shared
+ * with 63 other CPUs, so an unconditional atomic would serialise every dispatch
+ * on one line. The plain read is the common case and costs no bus traffic; the
+ * atomic fires only on an actual empty<->nonempty transition (§G25, §R.10).
  */
 static __always_inline void cake_qmark_set(u32 cpu)
 {
+	u64 bit;
+
 	cpu &= MAX_CPUS - 1;
-	if (!cake.qmark[cpu].word)
-		cake.qmark[cpu].word = 1;
+	bit = 1ULL << (cpu & 63);
+	if (!(cake.qmask[cpu >> 6] & bit))
+		__atomic_fetch_or(&cake.qmask[cpu >> 6], bit, __ATOMIC_RELAXED);
 }
 
 static __always_inline void cake_qmark_clear(u32 cpu)
 {
+	u64 bit;
+
 	cpu &= MAX_CPUS - 1;
-	if (cake.qmark[cpu].word)
-		cake.qmark[cpu].word = 0;
+	bit = 1ULL << (cpu & 63);
+	if (cake.qmask[cpu >> 6] & bit)
+		__atomic_fetch_and(&cake.qmask[cpu >> 6], ~bit, __ATOMIC_RELAXED);
 }
 
 static __always_inline bool cake_qmark_test(u32 cpu)
 {
 	cpu &= MAX_CPUS - 1;
-	return cake.qmark[cpu].word;
+	return cake.qmask[cpu >> 6] & (1ULL << (cpu & 63));
 }
 
 /* Loader-filled SMT map; -1 means the CPU has no online sibling. */
@@ -1039,22 +1050,27 @@ kick_idle:
 }
 
 /*
- * Staggered ring steal: walk the other CPUs' queues, marked ones first, and
- * move the first task found. Two constant-start half-loops from cpu+1 rather
- * than a modulo — no wrap arithmetic, verifier-friendly — with the own-offset
- * start as a zero-cost anti-herd stagger (§R.7).
+ * Staggered ring steal: visit the other CPUs' queues in ring order from cpu+1
+ * and move the first task found. The marks are a BITMASK, so a span of 64 or
+ * fewer CPUs answers every probe from ONE cache line instead of one 128 B slot
+ * per CPU (§G25). The own-offset start is the anti-herd stagger (§R.7).
+ *
+ * The mark is re-read at each step and never snapshotted: a bit raised while
+ * the walk is in flight must still be seen, or the wake it stands for waits for
+ * its own CPU. One subtraction wraps the index — no modulo.
  */
 static __noinline bool cake_ring_steal(u32 ucpu)
 {
 	u32 nr = nr_cpu_span;
-	u32 i, idx;
-
+	u32 i;
 
 #if CAKE_NR_CCDS > 1 && CAKE_CCD_STEAL_POLICY > 0
 	/* One precomputed locality order avoids verifier-multiplying scan loops. */
 	if (ucpu >= CAKE_NR_CPUS)
 		return true;
 	for (i = 0; i < MAX_CPUS; i++) {
+		u32 idx;
+
 		if (i >= CAKE_NR_CPUS || i + 1 >= nr)
 			break;
 		idx = cpu_steal_order[ucpu * CAKE_NR_CPUS + i];
@@ -1063,19 +1079,15 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 			return true;
 	}
 #else
-	for (i = 0; i < MAX_CPUS; i++) {	/* upper half: cpu+1 .. nr-1 */
-		idx = ucpu + 1 + i;
-		if (idx >= nr)
+	for (i = 1; i < MAX_CPUS; i++) {
+		u32 idx = ucpu + i;
+
+		if (i >= nr)
 			break;
+		if (idx >= nr)
+			idx -= nr;
 		if (cake_qmark_test(idx) &&
 		    cake_move_to_local((u64)idx))
-			return true;
-	}
-	for (i = 0; i < MAX_CPUS; i++) {	/* lower half: 0 .. cpu-1 */
-		if (i >= ucpu)
-			break;
-		if (cake_qmark_test(i) &&
-		    cake_move_to_local((u64)i))
 			return true;
 	}
 #endif

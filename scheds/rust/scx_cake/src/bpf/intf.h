@@ -110,6 +110,9 @@ enum consts {
 	 */
 	MAX_CPUS	= 1024,
 	WAKE_DSQ	= MAX_CPUS,
+
+	/* The steal-ring queue hint, one bit per CPU (§G25). */
+	QMASK_WORDS	= MAX_CPUS / 64,
 };
 
 #endif /* __CAKE_INTF_H */
