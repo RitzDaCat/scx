@@ -15,6 +15,7 @@ Usage:
   capture_preflight.py --game helldivers2 [--arms 2] [--duration 30] [--settle 10]
 """
 import argparse
+import json
 import re
 import os
 import shutil
@@ -71,11 +72,27 @@ def main():
     newest, binpath, why = None, None, "run: bash cakebench artifact ensure"
     if os.path.isdir(builds):
         for d in sorted(os.listdir(builds), reverse=True):
-            m = re.search(r"head-([0-9a-f]{12})", d)
             cand = os.path.join(builds, d, "scx_cake")
-            if not m or not os.path.exists(cand):
+            if not os.path.exists(cand):
                 continue
-            rhead = m.group(1)
+            # The commit a receipt was built from is RECORDED in its own
+            # receipt json. Parsing it out of the directory NAME only works for
+            # receipts labelled "head-<sha12>", so any receipt built with a
+            # descriptive label was invisible here and the gate demanded a
+            # rebuild that `artifact ensure` then declined as already fresh --
+            # an unbreakable loop on a receipt that was valid all along
+            # (2026-08-08). Prefer the json; keep the name as a fallback.
+            rhead = None
+            try:
+                with open(os.path.join(builds, d, "artifact_receipt.json")) as fh:
+                    rhead = json.load(fh).get("git_head")
+            except (OSError, ValueError):
+                pass
+            if not rhead:
+                m = re.search(r"head-([0-9a-f]{12})", d)
+                if not m:
+                    continue
+                rhead = m.group(1)
             same = subprocess.run(
                 f"git -C {REPO} diff --quiet {rhead} HEAD -- scheds/rust/scx_cake/src",
                 shell=True).returncode == 0
