@@ -52,7 +52,9 @@ reverted `254ed3667`, revert verified by empty source diff.
 **SESSION PARKED 2026-08-02 evening. Resume order:** (1) G23 endpoint — HD2 ABBA
 during active play + P4 bench screen (`docs/REVIEW_G21_G23_2026-08-02.md` §resume has
 receipts and steps); (2) the two dead-branch deletions + game screen; (3) syncgate
-simplification; (4) G25 steal-walk hypothesis; (5) serial-handoff trade decision.
+simplification; (4) G25 steal-walk hypothesis; (5) serial-handoff trade decision; (6) G26
+frame-laxity campaign — registered 2026-08-09 (HYPOTHESES.md §G26, research in
+`docs/RESEARCH_ADPF_LLF_2026-08-09.md`), Phase A observe-only producer first.
 
 ### ✅ R.24 SCREENED 2026-08-03 — cross-multiplied divide elimination, KEPT
 

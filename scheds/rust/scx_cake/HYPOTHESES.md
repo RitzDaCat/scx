@@ -2063,3 +2063,33 @@ task can strand; `cake_ring_steal` 0/0 → 8/13 spills and 52 → 160 insns; ato
 UNVERIFIED** (no `veristat` on PATH). **`bench/fnspills.py` is BLIND on this toolchain** —
 its `r10 [-+] \d+` regex cannot match llvm-objdump 22's `r10 - 0x8`, so every zero-spill
 claim made with it on this clang is vacuous until the regex is fixed.
+
+### G26 — frame-laxity input: schedule by predicted visible-frame consequence (registered 2026-08-09)
+
+**Parent:** the frame-aware research + external-review corrections
+(`docs/RESEARCH_ADPF_LLF_2026-08-09.md`) and the never-built criticality-scoped
+protector design (2026-07-09). This is a NEW INPUT per the design law: no behavioral
+signal cake owns carries the present deadline or says which wake sits on the frame's
+critical path.
+
+**Hypothesis.** A per-frame laxity signal — `present_deadline − now − remaining_cpu_work`,
+produced by a Vulkan-layer → broker → BPF-map pipeline (sensors verified on this rig
+2026-08-09: `VK_EXT_present_timing`, `VK_KHR_present_wait2`, `VK_NV_low_latency2`) and
+consumed as a banded EDZL-style override at `cake_wake_preempt` (`cake.bpf.c:449`) —
+tightens render latency beyond G25 (deadline-miss rate, p99.9 − median, 0.1% low)
+without regressing the bench suite. G25 stays the control and the low-confidence
+fallback in every phase.
+
+**Steps.** A: observe-only producer, zero scheduler change (overhead A/A screen).
+B: shadow census — count contested wakes the band would redirect; correlate with
+missed frames. C: negative gate only — suppress preempt/migration when the frame is
+early. D: positive override when late — separate commit, separate screen.
+
+**Endpoint.** C and D each: HD2 ABBA (severe-frame screen; score 0.1% low,
+p99.9 − median, deadline-miss rate) plus a `--blocks 2` bench screen. B is
+attribution, never a verdict.
+
+**Kills.** Producer overhead visible in Phase A's A/A; census ≈ 0 across ≥2 present
+modes or workloads (kills the PROXY — retry needs a different sensor tier, not this
+one rebuilt); C or D regresses its game ABBA with no repairable mechanism named.
+Cross-repo producer work is time-boxed per session; at 2× budget, re-diagnose.
