@@ -22,6 +22,9 @@ upstream `ff86d6588`; pre-rebase state in `backup/nightly-pre-rebase-20260818`),
 at this commit (17 commits → `backup/nightly-17-commits-20260819`: the R.28 arc —
 1.1.3 wallclock campaign, mode-flip root cause, per-task geometry, veto bisect,
 live WoW confirm); all hashes cited below resolve via those local backup branches.
+2026-08-25: PR #3767 merged upstream (`4a2ab1fce`) with ALL of nightly's scx_cake
+content (subtree hash identical) — nightly reset onto upstream/main; pre-reset state
+in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 </details>
 
