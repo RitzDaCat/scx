@@ -432,6 +432,42 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // DIAGNOSTIC PROBE — per-arm placement census (revert before scoring).
+        {
+            const NAMES: [&str; 9] = [
+                "select_calls",
+                "serial",
+                "home_warm",
+                "park_reached",
+                "park_prev",
+                "park_mbox",
+                "opt_reached",
+                "opt_hit",
+                "ranked",
+            ];
+            let mut tot = [0u64; NAMES.len()];
+            for (i, t) in tot.iter_mut().enumerate() {
+                let key = (i as u32).to_ne_bytes();
+                if let Ok(Some(percpu)) =
+                    self.skel.maps.cake_stats.lookup_percpu(&key, MapFlags::ANY)
+                {
+                    for cpu in &percpu {
+                        if cpu.len() >= 8 {
+                            *t += u64::from_ne_bytes(cpu[..8].try_into().unwrap());
+                        }
+                    }
+                }
+            }
+            let sel = tot[0].max(1) as f64;
+            for (i, name) in NAMES.iter().enumerate() {
+                info!(
+                    "   arms    {name:<13} {:>12}  {:>6.2}% of select",
+                    tot[i],
+                    tot[i] as f64 * 100.0 / sel
+                );
+            }
+        }
+
         if let Some(bss) = self.skel.maps.bss_data.as_mut() {
             let ev = &bss.cake_events;
             info!(

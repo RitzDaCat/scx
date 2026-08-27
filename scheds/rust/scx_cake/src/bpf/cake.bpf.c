@@ -1043,6 +1043,41 @@ static __always_inline void cake_direct_clamp(struct task_struct *p)
 static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted);
 
 
+/*
+ * DIAGNOSTIC PROBE — not for scoring. Per-arm placement census for
+ * ops.select_cpu, so the mailbox hit rate is a measurement instead of an
+ * assumption (STATE.md pillar 3 lists it unmeasured). Per-CPU map, plain
+ * increment on this CPU's own copy: no atomic, no shared line, same shape
+ * as cake_frame_hist. REVERT before any scoring run.
+ */
+enum cake_stat {
+	CAKE_STAT_SELECT = 0,		/* ops.select_cpu entries */
+	CAKE_STAT_SERIAL,		/* serial-handoff arm placed */
+	CAKE_STAT_HOME,			/* prev-cpu warm home claim placed */
+	CAKE_STAT_PARK_REACHED,		/* cake_park_take called */
+	CAKE_STAT_PARK_PREV,		/* park_take won on prev warmth */
+	CAKE_STAT_PARK_MBOX,		/* park_take won on the mailbox */
+	CAKE_STAT_OPT_REACHED,		/* cake_optimistic_place called */
+	CAKE_STAT_OPT_HIT,		/* cake_optimistic_place placed */
+	CAKE_STAT_RANKED,		/* fell through to the ranked pick */
+	CAKE_STAT_NR,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CAKE_STAT_NR);
+	__type(key, u32);
+	__type(value, u64);
+} cake_stats SEC(".maps");
+
+static __always_inline void cake_stat_inc(u32 idx)
+{
+	u64 *v = bpf_map_lookup_elem(&cake_stats, &idx);
+
+	if (v)
+		(*v)++;
+}
+
 /* Affinity by direct bitmap read (§G54, the §M7 idea applied to cpumask):
  * one load chain instead of a helper crossing. Constant offset only — the
  * verifier refuses a variable-offset load through a trusted cpumask; the
@@ -1071,8 +1106,10 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 		u32 pc = (u32)prev_cpu & (MAX_CPUS - 1);
 
 		if ((cake_idle_words[pc >> 6] >> (pc & 63)) & 1 &&
-		    !cpu_irq_hot[pc] && cake_affine(p, prev_cpu))
+		    !cpu_irq_hot[pc] && cake_affine(p, prev_cpu)) {
 			ocpu = prev_cpu;
+			cake_stat_inc(CAKE_STAT_PARK_PREV);
+		}
 	}
 	if (ocpu < 0) {
 		u32 slot = cake_core_slot(wc);
@@ -1084,6 +1121,7 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 			if (cake_affine(p, mcpu)) {
 				cake_mailbox[slot].word = 0;
 				ocpu = mcpu;
+				cake_stat_inc(CAKE_STAT_PARK_MBOX);
 			}
 		}
 	}
@@ -1176,6 +1214,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	bool is_idle = false;
 	s32 cpu;
 
+	cake_stat_inc(CAKE_STAT_SELECT);
+
 
 	/*
 	 * Serial-handoff co-location, for a genuine handoff pair only: a
@@ -1213,6 +1253,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			cake_direct_clamp(p);
 			cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)wcpu,
 					cake_task_slice_cached(p), 0);
+			cake_stat_inc(CAKE_STAT_SERIAL);
 			return wcpu;
 		}
 	}
@@ -1235,6 +1276,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		cake_direct_clamp(p);
 		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)prev_cpu,
 				cake_task_slice_cached(p), 0);
+		cake_stat_inc(CAKE_STAT_HOME);
 		return prev_cpu;
 	}
 
@@ -1245,8 +1287,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * pair with the walk ahead of this block re-priced §G53's tails.
 	 */
 	if (cake_idle_nr) {
-		s32 ocpu = cake_park_take(p, prev_cpu);
+		s32 ocpu;
 
+		cake_stat_inc(CAKE_STAT_PARK_REACHED);
+		ocpu = cake_park_take(p, prev_cpu);
 		if (ocpu >= 0)
 			return ocpu;
 	}
@@ -1259,10 +1303,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * the mailbox-miss fallback.
 	 */
 	{
-		s32 ocpu = cake_optimistic_place(p);
+		s32 ocpu;
 
-		if (ocpu >= 0)
+		cake_stat_inc(CAKE_STAT_OPT_REACHED);
+		ocpu = cake_optimistic_place(p);
+		if (ocpu >= 0) {
+			cake_stat_inc(CAKE_STAT_OPT_HIT);
 			return ocpu;
+		}
 	}
 
 	/*
@@ -1274,6 +1322,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	{
 		u32 sgen = cake_sink_gen;
 		const struct cpumask *ns;
+
+		cake_stat_inc(CAKE_STAT_RANKED);
 
 		/* One predictable compare catches a sink republish (§G30). */
 		if (sgen != nonsink_gen)
