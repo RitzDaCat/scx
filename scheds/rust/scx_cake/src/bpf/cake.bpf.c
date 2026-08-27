@@ -1095,10 +1095,11 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 	return ocpu;
 }
 
-/* Optimistic first-fit from the census (§G53): affinity is the only gate,
- * placement is unverified — the mailbox-miss fallback. A subprogram so the
- * walk costs select_cpu's frame nothing (§R.11). */
-static __noinline s32 cake_optimistic_place(struct task_struct *p __arg_trusted)
+/* Wide-host census walk. A cpumask load needs a CONSTANT word index -- the
+ * verifier refuses a variable one through a trusted pointer -- so past one
+ * word affinity stays a kfunc. Its own subprogram, so the register pressure
+ * of that crossing stays in this frame instead of the narrow path's (§R.8). */
+static __noinline s32 cake_census_walk_wide(struct task_struct *p __arg_trusted)
 {
 	u32 wi;
 
@@ -1114,15 +1115,50 @@ static __noinline s32 cake_optimistic_place(struct task_struct *p __arg_trusted)
 			s32 ocpu = (s32)(base + __builtin_ctzll(w));
 
 			w &= w - 1;
-			if (!bpf_cpumask_test_cpu(ocpu, p->cpus_ptr))
-				continue;
-			cake_direct_clamp(p);
-			cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)ocpu,
-					cake_task_slice_cached(p), 0);
-			return ocpu;
+			if (bpf_cpumask_test_cpu(ocpu, p->cpus_ptr))
+				return ocpu;
 		}
 	}
 	return -1;
+}
+
+/* Optimistic first-fit from the census (§G53): affinity is the only gate,
+ * placement is unverified — the mailbox-miss fallback. A subprogram so the
+ * walk costs select_cpu's frame nothing (§R.11).
+ *
+ * The census and the affinity mask are the SAME bitmap shape, so within one
+ * word the per-bit kfunc becomes a shift against a word loaded once: no call
+ * in the walk, nothing to keep callee-saved across one, and @p is not touched
+ * again until the placement. Rodata gate, so the verifier deletes the wide
+ * arm at load on every host inside one word (§G54). */
+static __noinline s32 cake_optimistic_place(struct task_struct *p __arg_trusted)
+{
+	s32 ocpu = -1;
+
+	if (nr_cpu_span <= 64) {
+		u64 idle = cake_idle_words[0];
+		u64 aff = p->cpus_ptr->bits[0];
+		u32 k;
+
+		for (k = 0; k < 2 && idle; k++) {
+			s32 c = (s32)__builtin_ctzll(idle);
+
+			idle &= idle - 1;
+			if ((aff >> (c & 63)) & 1) {
+				ocpu = c;
+				break;
+			}
+		}
+	} else {
+		ocpu = cake_census_walk_wide(p);
+	}
+
+	if (ocpu < 0)
+		return -1;
+	cake_direct_clamp(p);
+	cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)ocpu,
+			cake_task_slice_cached(p), 0);
+	return ocpu;
 }
 
 /*
