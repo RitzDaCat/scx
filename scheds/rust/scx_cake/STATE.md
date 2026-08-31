@@ -32,6 +32,29 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-08-31 — FFXI wake campaign (§G39-B'), machine left on EEVDF
+(detached), two probe commits on top of `4951242a4`: `d38308fb3` (census,
+revert before scoring) + `6e2653a8b` (§G39-B' behind `--toggle g39b`).**
+
+Census run 20260831 (menu regime, 516k selects): `cake_wake_preempt` was
+UNREACHABLE (wp_attempt=0) — home-routed wakees sit in tcpu's own local DSQ,
+which no other CPU may serve, yet the notify short-circuited to an idle-CPU
+kick that cannot serve them; the wakee waits out the occupant's whole slice.
+The play-regime tails (wined3d_cs HOLD 1.6-2.4 ms, 100% of >1 ms events,
+runtimes equal = not starvation) are exactly this shape. §G39-B' adds the
+preempt attempt at the notify (route != GLOBAL) and in the continuation arm
+(census iteration: wine threads ride the continuation arm, starved_turn false,
+enqueue_wake never reached). Menu A/B ×2 (eevdf/cake0/cake1): g39b=1 NEUTRAL
+at menu, migrations kept (5.4-6.4k vs eevdf 37-44k), 0 preempts fired (regime
+too idle to hold >187 us behind a local wakee). Menu p50-p99 gap vs eevdf is
+the BPF cost floor (sel 85.8 ns measured) — K2 lane, not BPF-side.
+
+Owed: play-regime 9-min ABBA (fires the preempt — wined3d_cs holds are the
+firable shape); pipe weld guard (blocks-2) BEFORE hardwire; iteration-3 knob
+if the protect window binds at play: PREEMPT_PROTECT_SHIFT 4 -> 7.
+Data: `scx_cake_bench/runs/ffxi_wake_20260830/PLAN_G39B.md` +
+`history/wake_latency/ffxi{2,3}-*` + runner logs `g39b2-*`.
+
 **PICKUP 2026-08-21 EOD — machine left on EEVDF, nothing attached, all
 background jobs stopped.** Code tip `60b238311` (§G38.1-repaired + §G40; §G39-B
 aborted), tip receipt `20260821T155506Z_head-5e0e8244b21a` built + attach-tested.
