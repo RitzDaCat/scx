@@ -434,7 +434,7 @@ impl<'a> Scheduler<'a> {
 
         // DIAGNOSTIC PROBE — per-arm placement census (revert before scoring).
         {
-            const NAMES: [&str; 9] = [
+            const NAMES: [&str; 16] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -444,6 +444,13 @@ impl<'a> Scheduler<'a> {
                 "opt_reached",
                 "opt_hit",
                 "ranked",
+                "wp_attempt",
+                "wp_tiny",
+                "wp_small",
+                "wp_protect",
+                "wp_vtime",
+                "wp_starved",
+                "wp_fired",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {

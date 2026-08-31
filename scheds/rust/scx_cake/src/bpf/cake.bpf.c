@@ -801,6 +801,48 @@ static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
 }
 
 /*
+ * DIAGNOSTIC PROBE — not for scoring. Per-arm placement census for
+ * ops.select_cpu, so the mailbox hit rate is a measurement instead of an
+ * assumption (STATE.md pillar 3 lists it unmeasured). Per-CPU map, plain
+ * increment on this CPU's own copy: no atomic, no shared line, same shape
+ * as cake_frame_hist. REVERT before any scoring run.
+ */
+enum cake_stat {
+	CAKE_STAT_SELECT = 0,		/* ops.select_cpu entries */
+	CAKE_STAT_SERIAL,		/* serial-handoff arm placed */
+	CAKE_STAT_HOME,			/* prev-cpu warm home claim placed */
+	CAKE_STAT_PARK_REACHED,		/* cake_park_take called */
+	CAKE_STAT_PARK_PREV,		/* park_take won on prev warmth */
+	CAKE_STAT_PARK_MBOX,		/* park_take won on the mailbox */
+	CAKE_STAT_OPT_REACHED,		/* cake_optimistic_place called */
+	CAKE_STAT_OPT_HIT,		/* cake_optimistic_place placed */
+	CAKE_STAT_RANKED,		/* fell through to the ranked pick */
+	CAKE_STAT_WP_ATTEMPT,		/* wake_preempt reached with a live occupant */
+	CAKE_STAT_WP_TINY,		/* wakee burst <= 4us (microsecond-class shape) */
+	CAKE_STAT_WP_SMALL,		/* wakee burst <= 64us */
+	CAKE_STAT_WP_PROTECT,		/* rejected: protect window not met */
+	CAKE_STAT_WP_VTIME,		/* rejected: vtime bar */
+	CAKE_STAT_WP_STARVED,		/* rejected: pipeline-stage veto */
+	CAKE_STAT_WP_FIRED,		/* kick issued */
+	CAKE_STAT_NR,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CAKE_STAT_NR);
+	__type(key, u32);
+	__type(value, u64);
+} cake_stats SEC(".maps");
+
+static __always_inline void cake_stat_inc(u32 idx)
+{
+	u64 *v = bpf_map_lookup_elem(&cake_stats, &idx);
+
+	if (v)
+		(*v)++;
+}
+
+/*
  * Wake preemption: kick @tcpu off its occupant for @p, but only once the
  * occupant has run at least @min_ran and @p out-deserves its LIVE vtime.
  *
@@ -819,19 +861,40 @@ static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
 	u64 ran = 0;
 	u64 live = cake_occupant_live(tcpu, &ran);
 	struct task_struct *curr;
+	u64 se = p->se.sum_exec_runtime;
+	u64 n = p->nvcsw | 1;
 
-	if (!live || ran < (u64)SLICE_NS >> protect_shift ||
-	    !time_before(p->scx.dsq_vtime, live))
+	/* §G39-B' census: which gate refuses the microsecond-class successor.
+	 * Counters only -- behavior is identical to the ungated build. Shape
+	 * buckets are cross-multiplied so the census spends no divide (§R.24). */
+	cake_stat_inc(CAKE_STAT_WP_ATTEMPT);
+	if (!((4096 | n) >> 32) && se < 4096 * n)
+		cake_stat_inc(CAKE_STAT_WP_TINY);
+	if (!((65536 | n) >> 32) && se < 65536 * n)
+		cake_stat_inc(CAKE_STAT_WP_SMALL);
+
+	if (!live)
 		return false;
+	if (ran < (u64)SLICE_NS >> protect_shift) {
+		cake_stat_inc(CAKE_STAT_WP_PROTECT);
+		return false;
+	}
+	if (!time_before(p->scx.dsq_vtime, live)) {
+		cake_stat_inc(CAKE_STAT_WP_VTIME);
+		return false;
+	}
 
 	/*
 	 * Never preempt a pipeline stage; tested last so rejections stay
 	 * cheap (§G10.5).
 	 */
 	curr = cake_cpu_curr(tcpu);
-	if (curr && cake_starved(curr))
+	if (curr && cake_starved(curr)) {
+		cake_stat_inc(CAKE_STAT_WP_STARVED);
 		return false;
+	}
 
+	cake_stat_inc(CAKE_STAT_WP_FIRED);
 	scx_bpf_kick_cpu(tcpu, CAKE_KICK_PREEMPT);
 	return true;
 }
@@ -1042,41 +1105,6 @@ static __always_inline void cake_direct_clamp(struct task_struct *p)
 
 static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted);
 
-
-/*
- * DIAGNOSTIC PROBE — not for scoring. Per-arm placement census for
- * ops.select_cpu, so the mailbox hit rate is a measurement instead of an
- * assumption (STATE.md pillar 3 lists it unmeasured). Per-CPU map, plain
- * increment on this CPU's own copy: no atomic, no shared line, same shape
- * as cake_frame_hist. REVERT before any scoring run.
- */
-enum cake_stat {
-	CAKE_STAT_SELECT = 0,		/* ops.select_cpu entries */
-	CAKE_STAT_SERIAL,		/* serial-handoff arm placed */
-	CAKE_STAT_HOME,			/* prev-cpu warm home claim placed */
-	CAKE_STAT_PARK_REACHED,		/* cake_park_take called */
-	CAKE_STAT_PARK_PREV,		/* park_take won on prev warmth */
-	CAKE_STAT_PARK_MBOX,		/* park_take won on the mailbox */
-	CAKE_STAT_OPT_REACHED,		/* cake_optimistic_place called */
-	CAKE_STAT_OPT_HIT,		/* cake_optimistic_place placed */
-	CAKE_STAT_RANKED,		/* fell through to the ranked pick */
-	CAKE_STAT_NR,
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, CAKE_STAT_NR);
-	__type(key, u32);
-	__type(value, u64);
-} cake_stats SEC(".maps");
-
-static __always_inline void cake_stat_inc(u32 idx)
-{
-	u64 *v = bpf_map_lookup_elem(&cake_stats, &idx);
-
-	if (v)
-		(*v)++;
-}
 
 /* Affinity by direct bitmap read (§G54, the §M7 idea applied to cpumask):
  * one load chain instead of a helper crossing. Constant offset only — the
