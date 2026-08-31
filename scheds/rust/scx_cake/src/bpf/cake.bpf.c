@@ -1819,6 +1819,15 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 				      cake_task_slice_cached(p),
 					 vt, enq_flags);
 
+		/* §G39-B' iteration 2: the continuation arm is where the wine
+		 * RPC chain actually waits (census run 20260831: starved_turn
+		 * false, enqueue_wake never reached). A local insert behind a
+		 * live occupant owes tcpu a preempt attempt; a decline keeps
+		 * today's flow. The pinned shape below already had its own. */
+		if (cake_tog_g39b && (enq_flags & CAKE_ENQ_WAKEUP) &&
+		    p->nr_cpus_allowed > 1)
+			cake_wake_preempt(p, tcpu, PREEMPT_PROTECT_SHIFT);
+
 		if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed == 1)
 			cake_pinned_wake_preempt(p, tcpu, d);
 	}
