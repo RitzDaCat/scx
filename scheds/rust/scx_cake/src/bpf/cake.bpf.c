@@ -197,6 +197,7 @@ const volatile u64 cake_handoff_max_ns		= 1464;
  * exception. Scaffolding; defaults are tip behavior (STATE.md 2026-08-22).
  */
 const volatile u8 cake_tog_g46;				/* departing-slice cache (§G46) */
+const volatile u8 cake_tog_g39b;			/* home-notify preempt (§G39-B') */
 const volatile u8 cake_tog_m6;				/* occupant mirror (§M6) */
 const volatile u8 cake_tog_g51;				/* idle-depth model (§G51) */
 const volatile u8 cake_tog_g52;				/* preferred-core rank (§G52) */
@@ -1526,6 +1527,16 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 	s32 idle;
 
 	if (route == ROUTE_HOME_CLAIM && cake_home_notify(p, tcpu))
+		return 0;
+
+
+	/* §G39-B': a home-routed wakee sits in tcpu's own local queue, which
+	 * no other CPU may serve -- the census (run 20260831) shows the idle
+	 * kick firing here while the wakee still waits out the occupant's
+	 * whole slice. The notification tcpu owes is a preempt attempt; a
+	 * decline falls through to today's flow unchanged. */
+	if (cake_tog_g39b && route != ROUTE_GLOBAL &&
+	    cake_wake_preempt(p, tcpu, PREEMPT_PROTECT_SHIFT))
 		return 0;
 
 	idle = cake_pick_idle_clean(p);

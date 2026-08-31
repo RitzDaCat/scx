@@ -167,6 +167,7 @@ impl<'a> Scheduler<'a> {
                 _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
             };
             match name {
+                "g39b" => rodata.cake_tog_g39b = on,
                 "g46" => rodata.cake_tog_g46 = on,
                 "m6" => rodata.cake_tog_m6 = on,
                 "g51" => rodata.cake_tog_g51 = on,
@@ -176,7 +177,8 @@ impl<'a> Scheduler<'a> {
             }
         }
         info!(
-            "   toggle  g46={} g51={} g52={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} m6={} m7={}",
+            rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
             rodata.cake_tog_g52,
