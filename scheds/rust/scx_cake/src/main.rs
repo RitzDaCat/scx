@@ -173,17 +173,27 @@ impl<'a> Scheduler<'a> {
                 "g51" => rodata.cake_tog_g51 = on,
                 "g52" => rodata.cake_tog_g52 = on,
                 "g56" => rodata.cake_tog_g56 = on,
+                "g57" => rodata.cake_tog_g57 = on,
+                "g58" => rodata.cake_tog_g58 = on,
+                "g59" => rodata.cake_tog_g59 = on,
                 "m7" => rodata.cake_tog_m7 = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
+        // §G59 reads the §G51 mirror, so it forces the producer on.
+        if rodata.cake_tog_g59 == 1 {
+            rodata.cake_tog_g51 = 1;
+        }
         info!(
-            "   toggle  g39b={} g46={} g51={} g52={} g56={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} m6={} m7={}",
             rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
             rodata.cake_tog_g52,
             rodata.cake_tog_g56,
+            rodata.cake_tog_g57,
+            rodata.cake_tog_g58,
+            rodata.cake_tog_g59,
             rodata.cake_tog_m6,
             rodata.cake_tog_m7
         );
@@ -201,6 +211,27 @@ impl<'a> Scheduler<'a> {
         }
         if rodata.cake_tog_g51 == 1 && deepest_us == 0 {
             info!("   g51     no cpuidle driver: depth model inert");
+        }
+        // §G58: the lead covers the deepest exit twice over; a host without
+        // a cpuidle table gets the fixed default. Never a refusal.
+        rodata.cake_prewake_lead_ns = if deepest_us > 0 {
+            u64::from(deepest_us) * 2 * 1000
+        } else {
+            bpf_intf::consts_PREWAKE_LEAD_DEFAULT_NS as u64
+        };
+        if rodata.cake_tog_g58 == 1 {
+            info!(
+                "   g58     pre-wake lead {} us ({})",
+                rodata.cake_prewake_lead_ns / 1000,
+                if deepest_us > 0 {
+                    "2x deepest exit"
+                } else {
+                    "default, no cpuidle"
+                }
+            );
+        }
+        if rodata.cake_tog_g59 == 1 && deepest_us == 0 {
+            info!("   g59     no cpuidle table: depth pick is first fit");
         }
         let mut perf_seen = false;
         for c in 0..*NR_CPU_IDS {
@@ -483,7 +514,7 @@ impl<'a> Scheduler<'a> {
 
         // DIAGNOSTIC PROBE — per-arm placement census (revert before scoring).
         {
-            const NAMES: [&str; 16] = [
+            const NAMES: [&str; 19] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -500,6 +531,9 @@ impl<'a> Scheduler<'a> {
                 "wp_vtime",
                 "wp_starved",
                 "wp_fired",
+                "free_pick",
+                "prewake_fire",
+                "reserved_take",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {

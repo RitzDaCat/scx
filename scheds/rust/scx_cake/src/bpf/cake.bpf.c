@@ -173,7 +173,20 @@ struct cake_run_slot {
 	 */
 	u64 occupant;
 	u64 mirror_vtime;
-	u64 pad[STATE_SLOT_WORDS - 7];
+	/*
+	 * §G57: when this CPU's occupant is predicted to leave it, written by
+	 * running on a line it already dirties. A saturated wake reads its
+	 * mask's slots and queues behind the earliest.
+	 */
+	u64 free_at;
+	/*
+	 * §G58: pre-wake reservation, pid and expiry. The timer callback
+	 * writes both for an idle CPU; the named task's wake consumes it, every
+	 * other placement skips the CPU until the expiry.
+	 */
+	u64 reserved_pid;
+	u64 reserved_until;
+	u64 pad[STATE_SLOT_WORDS - 10];
 };
 
 enum {
@@ -221,6 +234,13 @@ const volatile u8 cpu_perf_rank[MAX_CPUS];
  * the §G25 walk. All loader-filled from runtime topology.
  */
 const volatile u8 cake_tog_g56;			/* banded steal fold (§G56) */
+const volatile u8 cake_tog_g57;			/* earliest-free pick (§G57) */
+const volatile u8 cake_tog_g58;			/* frame pre-wake (§G58) */
+const volatile u8 cake_tog_g59;			/* idle-depth pick (§G59) */
+
+/* §G58: how far ahead of a predicted wake the reservation fires. Loader:
+ * twice the deepest cpuidle exit latency, or the default without a table. */
+const volatile u64 cake_prewake_lead_ns;
 const volatile u8 cake_cpu_llc[MAX_CPUS];	/* cpu -> compact LLC index */
 const volatile u64 cake_llc_qword[MAX_LLCS];	/* LLC membership, word 0 */
 const volatile u8 cake_llc_order[MAX_LLCS][MAX_LLCS]; /* band steal order */
@@ -838,6 +858,9 @@ enum cake_stat {
 	CAKE_STAT_WP_VTIME,		/* rejected: vtime bar */
 	CAKE_STAT_WP_STARVED,		/* rejected: pipeline-stage veto */
 	CAKE_STAT_WP_FIRED,		/* kick issued */
+	CAKE_STAT_FREE_PICK,		/* §G57 placed behind an earlier-free CPU */
+	CAKE_STAT_PREWAKE_FIRE,		/* §G58 timer fired on an idle CPU */
+	CAKE_STAT_RESERVED_TAKE,	/* §G58 wake took its reservation */
 	CAKE_STAT_NR,
 };
 
@@ -1133,6 +1156,145 @@ static __always_inline bool cake_affine(struct task_struct *p, s32 cpu)
 	return bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
 }
 
+/* §G58: is @c held for a task other than @p right now? One slot read; the
+ * line belongs to an idle CPU, so it is quiet. */
+static __always_inline bool cake_reserved_for_other(const struct task_struct *p,
+						    u32 c, u64 now)
+{
+	struct cake_run_slot *rs = &cake.run[c & (MAX_CPUS - 1)];
+	u64 rp = rs->reserved_pid;
+
+	return rp && rp != (u64)(u32)p->pid &&
+	       time_before(now, rs->reserved_until);
+}
+
+/* §G59: the exit latency this idle CPU would pay, from the §G51 mirror and
+ * the loader's table. Zero when unknown, which ranks as shallow. */
+static __always_inline u64 cake_idle_exit_ns(u32 c)
+{
+	u32 cs = cake_irq_live[c & (MAX_CPUS - 1)].cstate;
+
+	if (!cs)
+		return 0;
+	return (u64)cake_cstate_exit_us[(cs - 1) & (CAKE_CSTATE_TABLE - 1)] *
+	       NSEC_PER_USEC;
+}
+
+/*
+ * §G59 pick over the census: among the first DEPTH_SCAN_MAX affine idle
+ * CPUs, the one with the smallest exit latency; ties keep census order, so
+ * with the table empty this IS the §G53 first fit. §G58 reservations for
+ * other tasks are skipped. Narrow hosts only; wide hosts keep the walk.
+ */
+static __noinline s32 cake_shallowest_idle(struct task_struct *p __arg_trusted)
+{
+	u64 idle = cake_idle_words[0];
+	u64 aff = p->cpus_ptr->bits[0];
+	u64 best_exit = ~0ULL;
+	u64 now = 0;
+	s32 best = -1;
+	u32 k;
+
+	if (cake_tog_g58)
+		now = bpf_ktime_get_ns();
+	for (k = 0; k < DEPTH_SCAN_MAX && idle; k++) {
+		u32 c = (u32)__builtin_ctzll(idle);
+		u64 e;
+
+		idle &= idle - 1;
+		if (!((aff >> (c & 63)) & 1))
+			continue;
+		if (cake_tog_g58 && cake_reserved_for_other(p, c, now))
+			continue;
+		e = cake_tog_g59 ? cake_idle_exit_ns(c) : 0;
+		if (e < best_exit) {
+			best_exit = e;
+			best = (s32)c;
+		}
+		if (!e)
+			break;
+	}
+	return best;
+}
+
+/*
+ * §G57 consumer: a wake with nothing idle in its mask picks the affine CPU
+ * in its home LLC whose occupant is predicted to leave first, from the run
+ * slots' free_at, and queues there instead of behind its home occupant.
+ * The move must clear FREE_MOVE_MARGIN: a partner about to yield keeps the
+ * wake home, which is what protects the messaging herd, and a mid-burst
+ * worker loses it, which is what unstrands the game. A stale slot (older
+ * than a slice: an RT or idle occupant) is never a target and never moved
+ * from. Narrow hosts only.
+ */
+static __noinline s32 cake_free_pick(struct task_struct *p __arg_trusted,
+				     s32 tcpu)
+{
+	u32 t = (u32)tcpu & (MAX_CPUS - 1);
+	u64 aff = p->cpus_ptr->bits[0];
+	u64 w, now, home_at, best_at;
+	s32 best = -1;
+	u32 k;
+
+	if (nr_cpu_span > 64 || (aff & cake_idle_words[0]))
+		return -1;
+	w = aff & cake_llc_qword[cake_cpu_llc[t] & (MAX_LLCS - 1)];
+	w &= ~(1ULL << (t & 63));
+	if (!w)
+		return -1;
+
+	now = bpf_ktime_get_ns();
+	home_at = cake.run[t].free_at;
+	if (time_before(home_at + SLICE_NS, now))
+		return -1;
+	best_at = home_at;
+	for (k = 0; k < 64 && w; k++) {
+		u32 c = (u32)__builtin_ctzll(w);
+		u64 at = cake.run[c & (MAX_CPUS - 1)].free_at;
+
+		w &= w - 1;
+		if (time_before(at + SLICE_NS, now))
+			continue;
+		if (time_before(at, best_at)) {
+			best_at = at;
+			best = (s32)c;
+		}
+	}
+	if (best < 0 ||
+	    !time_before(best_at + ((u64)SLICE_NS >> FREE_MOVE_MARGIN_SHIFT),
+			 home_at))
+		return -1;
+	return best;
+}
+
+/*
+ * §G58 consumer: the reservation the pre-wake timer left on prev for THIS
+ * task. Read before every other placement claim: the CPU was kicked awake
+ * for this wake, so the vetoes that would send the task elsewhere (turn
+ * starvation, a busy sibling) are already priced into the prediction.
+ */
+static __noinline s32 cake_reserved_take(struct task_struct *p __arg_trusted,
+					 s32 prev_cpu)
+{
+	u32 c = (u32)prev_cpu & (MAX_CPUS - 1);
+	struct cake_run_slot *rs = &cake.run[c];
+
+	if (rs->reserved_pid != (u64)(u32)p->pid)
+		return -1;
+	if (!time_before(bpf_ktime_get_ns(), rs->reserved_until)) {
+		rs->reserved_pid = 0;
+		return -1;
+	}
+	if (!cake_affine(p, prev_cpu) ||
+	    !scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		return -1;
+	rs->reserved_pid = 0;
+	cake_stat_inc(CAKE_STAT_RESERVED_TAKE);
+	cake_direct_clamp(p);
+	cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | c, cake_task_slice_cached(p), 0);
+	return prev_cpu;
+}
+
 /* §G54 consumer: prev-warmth first (census bit, optimistic), then this
  * waker's own core mailbox. Both place without a consuming claim — a stale
  * entry costs one occupant wait, the §G53-measured trade. A subprogram so
@@ -1148,7 +1310,9 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 		u32 pc = (u32)prev_cpu & (MAX_CPUS - 1);
 
 		if ((cake_idle_words[pc >> 6] >> (pc & 63)) & 1 &&
-		    !cpu_irq_hot[pc] && cake_affine(p, prev_cpu)) {
+		    !cpu_irq_hot[pc] && cake_affine(p, prev_cpu) &&
+		    !(cake_tog_g58 &&
+		      cake_reserved_for_other(p, pc, bpf_ktime_get_ns()))) {
 			ocpu = prev_cpu;
 			cake_stat_inc(CAKE_STAT_PARK_PREV);
 		}
@@ -1160,12 +1324,28 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 		if (mbox) {
 			s32 mcpu = (s32)(u32)((mbox & ~CAKE_PARK_CORE) - 1);
 
-			if (cake_affine(p, mcpu)) {
+			if (cake_affine(p, mcpu) &&
+			    !(cake_tog_g58 &&
+			      cake_reserved_for_other(p, (u32)mcpu,
+						      bpf_ktime_get_ns()))) {
 				cake_mailbox[slot].word = 0;
 				ocpu = mcpu;
 				cake_stat_inc(CAKE_STAT_PARK_MBOX);
 			}
 		}
+	}
+	/*
+	 * §G59: a parked CPU deep in idle loses to a shallower affine one.
+	 * The mailbox entry is already consumed; the parker re-parks at its
+	 * next idle entry, so a lost entry costs one wake's fallback.
+	 */
+	if (ocpu >= 0 && cake_tog_g59 && nr_cpu_span <= 64 &&
+	    cake_idle_exit_ns((u32)ocpu)) {
+		s32 alt = cake_shallowest_idle(p);
+
+		if (alt >= 0 && alt != ocpu &&
+		    cake_idle_exit_ns((u32)alt) < cake_idle_exit_ns((u32)ocpu))
+			ocpu = alt;
 	}
 	if (ocpu < 0)
 		return -1;
@@ -1216,17 +1396,21 @@ static __noinline s32 cake_optimistic_place(struct task_struct *p __arg_trusted)
 	s32 ocpu = -1;
 
 	if (nr_cpu_span <= 64) {
-		u64 idle = cake_idle_words[0];
-		u64 aff = p->cpus_ptr->bits[0];
-		u32 k;
+		if (cake_tog_g58 || cake_tog_g59) {
+			ocpu = cake_shallowest_idle(p);
+		} else {
+			u64 idle = cake_idle_words[0];
+			u64 aff = p->cpus_ptr->bits[0];
+			u32 k;
 
-		for (k = 0; k < 2 && idle; k++) {
-			s32 c = (s32)__builtin_ctzll(idle);
+			for (k = 0; k < 2 && idle; k++) {
+				s32 c = (s32)__builtin_ctzll(idle);
 
-			idle &= idle - 1;
-			if ((aff >> (c & 63)) & 1) {
-				ocpu = c;
-				break;
+				idle &= idle - 1;
+				if ((aff >> (c & 63)) & 1) {
+					ocpu = c;
+					break;
+				}
 			}
 		}
 	} else {
@@ -1298,6 +1482,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			cake_stat_inc(CAKE_STAT_SERIAL);
 			return wcpu;
 		}
+	}
+
+	/* §G58: a CPU kicked awake for this exact wake is taken first. */
+	if (cake_tog_g58 && prev_cpu >= 0) {
+		s32 rcpu = cake_reserved_take(p, prev_cpu);
+
+		if (rcpu >= 0)
+			return rcpu;
 	}
 
 	/*
@@ -1789,6 +1981,27 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	d  = p->scx.dsq_vtime - lo;
 
 	/*
+	 * §G57: with nothing idle in the mask, queue behind the CPU predicted
+	 * to free first rather than the home occupant. No kick is owed: the
+	 * target dispatches at that moment by construction, and the ring can
+	 * still lift the task earlier. Both arms below are the strand shape
+	 * this replaces (§S.8 field report).
+	 */
+	if (cake_tog_g57 && (enq_flags & CAKE_ENQ_WAKEUP) &&
+	    p->nr_cpus_allowed > 1) {
+		s32 fcpu = cake_free_pick(p, tcpu);
+
+		if (fcpu >= 0) {
+			cake_stat_inc(CAKE_STAT_FREE_PICK);
+			cake_qmark_set((u32)fcpu);
+			cake_dsq_insert_vtime(p, (u64)(u32)fcpu,
+					      cake_task_slice_cached(p),
+					      cake_wake_vtime(p), enq_flags);
+			return;
+		}
+	}
+
+	/*
 	 * STAGE wakeups are global, everything else is local -- the routing key
 	 * is the wakeup bit AND the burst class (§G10.2). Single-CPU tasks take
 	 * the continuation arm regardless (§R.14).
@@ -2096,6 +2309,93 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 }
 
 /*
+ * §G58 frame pre-wake. A display-coupled thread blocks with a known cycle,
+ * so its next wake is a prediction, not a surprise: one timer per CPU,
+ * armed at block time for the predicted wake minus the lead. The callback
+ * reserves the CPU for that pid and kicks it out of idle, so the wake finds
+ * a core already awake and held. A miss costs one idle kick and one unused
+ * reservation window; nothing is ever queued or preempted on a prediction.
+ */
+struct cake_prewake {
+	struct bpf_timer timer;
+	u64 pid;
+	u64 cpu;
+	u64 window;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct cake_prewake);
+} cake_prewake_map SEC(".maps");
+
+static int cake_prewake_fire(void *map, void *key, void *value)
+{
+	struct cake_prewake *pw = value;
+	u32 c = (u32)pw->cpu & (MAX_CPUS - 1);
+	struct cake_run_slot *rs = &cake.run[c];
+
+	/* Busy now: the prediction found a running CPU; nothing to hold. */
+	if (!((cake_idle_words[c >> 6] >> (c & 63)) & 1))
+		return 0;
+	cake_stat_inc(CAKE_STAT_PREWAKE_FIRE);
+	rs->reserved_pid = pw->pid;
+	rs->reserved_until = bpf_ktime_get_ns() + pw->window;
+	scx_bpf_kick_cpu((s32)c, CAKE_KICK_IDLE);
+	return 0;
+}
+
+/*
+ * The arm half, from stopping on a block. Same vote gate as the frame
+ * clock (a thread that sleeps most of its life), raw cycle inside the
+ * engine band, then next wake = this wake + cycle, less what already ran.
+ * A cycle shorter than the lead cannot be pre-woken and is left alone.
+ */
+static __noinline void cake_prewake_arm(struct task_struct *p __arg_trusted,
+					u64 used)
+{
+	u64 now = bpf_ktime_get_ns();
+	u64 n = p->nvcsw | 1;
+	u64 delta = now - p->start_time;
+	struct cake_prewake *pw;
+	u64 per, delay;
+	u32 c;
+
+	if ((p->se.sum_exec_runtime << 1) >= delta)
+		return;
+	if (!(n >> 32) &&
+	    (delta < FRAME_PERIOD_MIN_NS * n ||
+	     delta >= (FRAME_PERIOD_MAX_NS + 1) * n))
+		return;
+	per = delta / n;
+	if (per < FRAME_PERIOD_MIN_NS || per > FRAME_PERIOD_MAX_NS)
+		return;
+	/*
+	 * Only the published frame cadence arms a timer: the argmax bucket the
+	 * loader elected, so a desktop full of 60 Hz sleepers does not become
+	 * a kick storm when the game runs at another rate. No clock, no arm.
+	 */
+	if (!cake_frame_ns ||
+	    (per >> FRAME_BUCKET_SHIFT) != (cake_frame_ns >> FRAME_BUCKET_SHIFT))
+		return;
+	if (per <= used + cake_prewake_lead_ns)
+		return;
+	delay = per - used - cake_prewake_lead_ns;
+
+	c = (u32)p->thread_info.cpu & (MAX_CPUS - 1);
+	pw = bpf_map_lookup_elem(&cake_prewake_map, &c);
+	if (!pw)
+		return;
+	pw->pid = (u64)(u32)p->pid;
+	pw->cpu = c;
+	pw->window = per >> PREWAKE_WINDOW_SHIFT;
+	if (pw->window < cake_prewake_lead_ns * PREWAKE_WINDOW_MULT)
+		pw->window = cake_prewake_lead_ns * PREWAKE_WINDOW_MULT;
+	bpf_timer_start(&pw->timer, delay, 0);
+}
+
+/*
  * ops.running — stamp the per-CPU run start and advance the global vtime
  * frontier to this task's deadline.
  *
@@ -2116,6 +2416,14 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
 	run->stamp = now;
 	run->sum = p->se.sum_exec_runtime;
+
+	/*
+	 * §G57: the grant is twice the burst when uncapped, so half of it is
+	 * the burst estimate with no divide; a capped grant still ends at the
+	 * slice, so the estimate never lands after the CPU's next dispatch.
+	 */
+	if (cake_tog_g57)
+		run->free_at = now + (p->scx.slice >> 1);
 
 	/* Occupant mirror publish (§M6): the line is already dirty here. */
 	if (cake_tog_m6) {
@@ -2183,6 +2491,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 	if (cake_tog_g46)
 		cake_slice_publish(p);
+	if (cake_tog_g58 && !runnable)
+		cake_prewake_arm(p, used);
 }
 
 /*
@@ -2299,6 +2609,26 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 	ret = scx_bpf_create_dsq(WAKE_DSQ, -1);
 	if (ret)
 		return ret;
+
+	/* §G58: one timer per CPU, initialised here as scx_layered does. */
+	if (cake_tog_g58) {
+		bpf_for(i, 0, nr) {
+			u32 k = (u32)i;
+			struct cake_prewake *pw =
+				bpf_map_lookup_elem(&cake_prewake_map, &k);
+
+			if (!pw)
+				return -ENOENT;
+			ret = bpf_timer_init(&pw->timer, &cake_prewake_map,
+					     CLOCK_MONOTONIC);
+			if (ret)
+				return ret;
+			ret = bpf_timer_set_callback(&pw->timer,
+						     cake_prewake_fire);
+			if (ret)
+				return ret;
+		}
+	}
 
 	/* Seed the §G45 census; every later transition corrects it. */
 	{

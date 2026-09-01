@@ -32,6 +32,26 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-09-01 EOD — three published-state constructs BUILT on nightly
+behind toggles, machine left on EEVDF (detached). Nothing scored: the box
+carried the FFXI server + browser all evening and the strand rig read 30x
+within-arm spread, so every number below is a liveness proof, not a result.**
+
+| toggle | construct | live proof (strand rig, census at detach) |
+|---|---|---|
+| `g57` | earliest-free pick: `running` publishes `free_at`; a saturated wake scans its LLC mask and queues behind the CPU predicted to free first | saturated peer rig: 19,018 placements = 9.2% of selects |
+| `g58` | frame pre-wake (§G28 built + a reservation): `stopping` arms a per-CPU BPF timer at the predicted wake minus lead; the fire reserves + idle-kicks the CPU; `select_cpu` takes the reservation first | idle rig: 14,173 fires, 6,997 takes (precise 1 kHz cadence, ungated); with the argmax-cadence gate the rig thread no longer arms and the box's 252 Hz cadence fires 6-7k/10 s, 0 takes at a 100 us window — window widened to cycle/16, retest owed |
+| `g59` | idle-depth pick over the §G51 mirror (forces g51); §G58 reservations skipped by other tasks | attach-clean; INERT here (no cpuidle driver), first-fit by construction |
+
+Owed, in order: (1) quiet-box strand rig ABBA off/g57 both modes + messaging t16
+(the §S.8 herd guard is now time-based, `FREE_MOVE_MARGIN_SHIFT`); (2) g58 retest
+with the widened window, then the tail question — two of four idle-rig on-arm
+runs read p999 39 us vs off 13-15, always the first arm after a switch; (3) g59
+ships to Lestat on the fix branch once (1) settles; (4) hardware audit (§G58/§G59
+touch loader probes); (5) census probe revert before any scoring. Fix branch
+`fix/cake-1.2.1-llc-overflow` unchanged at `f27950e9d`; today's review +
+isolation data under §S.8.
+
 **PICKUP 2026-08-31 — FFXI wake campaign (§G39-B'), machine left on EEVDF
 (detached), two probe commits on top of `4951242a4`: `d38308fb3` (census,
 revert before scoring) + `6e2653a8b` (§G39-B' behind `--toggle g39b`).**
@@ -105,6 +125,9 @@ Board (live, movable): claude.ai/code/artifact/98701cdf-e541-48c5-8dfc-07109a311
 | 27 | **M2** frame-clock trio is dead plumbing (maintainer audit) | VERIFIED 2026-08-23: cake_frame_ns/floor/slice have zero BPF readers (decl-only; §G11 comment admits it); votes still paid on display threads | decision: demote voting to loader-side telemetry or land a consumer; separate commit + wallclock screen |
 | 28 | **M6** occupant mirror — subscribe, don't query (maintainer audit) | **BUILT `9f344d8da`** behind `--toggle m6`; first mirrored ABBA: NULL on the one clean pair (select_cpu 187=187 ns, no coherence tax; slot 3 noise-contaminated) — the deref chains were warm-line cheap in the appsim regime | park pending a quiet-machine screen; handoff_yields stays on deref (needs live sum_exec) |
 | 25 | **G49** core-contended via idle-smtmask (component audit) | registered 2026-08-23; same audit | build behind toggle: smtmask bit replaces the sibling cpu_curr deref; A/A + wallclock |
+| 33 | **G57** earliest-free pick (published `free_at`) | **BUILT 2026-09-01** behind `--toggle g57`; live: 9.2% of selects placed on the saturated rig; `enqueue` 2→4 static spills (both arms in object) | quiet-box strand rig ABBA both modes + messaging t16; the time-based herd guard replaces the §S.8 depth gate that cost messaging −40% |
+| 34 | **G58** frame pre-wake = §G28 BUILT + reservation | **BUILT 2026-09-01** behind `--toggle g58`; BPF timer per CPU, argmax-cadence gate, reservation window cycle/16 floored 2x lead; live: 6,997 takes on a 1 kHz cadence (ungated) | retest gated + widened window; p999 tail question on the idle rig; game screen needs a cpuidle host for the C-state half |
+| 35 | **G59** idle-depth pick (§G51 consumer) | **BUILT 2026-09-01** behind `--toggle g59` (forces g51); attach-clean, inert on this host | ships to Lestat's 9950X3D with the fix branch; unmeasurable here |
 
 **TOGGLE CAMPAIGN (2026-08-22, maintainer-directed):** §G43–§G46 each sit behind a
 `const volatile` rodata toggle (`--toggle gNN=0|1`) so ONE binary serves both arms of
@@ -1725,6 +1748,74 @@ as the prev-CPU arm). Full audit and the candidate ranking:
   verdict); wide-host hierarchical summary word (O(log) search) recorded,
   not built.
 
+#### §G57 — earliest-free pick: the occupant publishes when it leaves (registered + BUILT 2026-09-01, "nodes that don't talk" program) `<- §S.8 field report, §G17, §M6`
+
+- Hypothesis: the saturated-mask strand (§S.8: a wake behind one busy CPU's
+  private queue, no other server) is a missing edge between occupant and
+  wakee. `ops.running` writes `free_at = now + slice/2` into the run slot it
+  already dirties (uncapped grant = 2x burst, so half is the burst estimate
+  with no divide; a capped grant ends at the slice, so the estimate never
+  lands after the CPU's next dispatch). A wake with nothing idle in its mask
+  scans the affine CPUs of its home LLC (one qword AND, ctz walk, one slot
+  read each) and queues behind the earliest. Move only when the gain clears
+  `SLICE_NS >> FREE_MOVE_MARGIN_SHIFT` (94 us): a partner about to yield
+  keeps the wake home — the t32/t64 herd guard as TIME, replacing the
+  fix-branch depth gate that measured messaging t16 −40% when loosened.
+- Built behind `--toggle g57`; hook precedes the wake/continuation split in
+  `ops.enqueue`; no kick owed (the target dispatches at `free_at` by
+  construction, the ring can lift earlier). Stale slots (older than a slice:
+  RT or idle occupant) are never targets and never moved from. Narrow hosts.
+- Live 2026-09-01: saturated peer rig 19,018 placements (9.2% of selects);
+  idle rig 0-83 (correct: nothing saturated). Unscored — box noisy.
+- Endpoint: strand rig both modes, quiet box, ABBA off/on: over-1ms and p99
+  at or below the fix branch's committed numbers; messaging t16 within the
+  off arm's spread; pipe flat.
+- Aborts: messaging outside spread (the herd guard failed); any stall; a
+  new spill in `cake_select_cpu`.
+
+#### §G58 — frame pre-wake: the scheduler acts before ttwu (registered + BUILT 2026-09-01) `<- §G28 (this is its build), §G54, §G11`
+
+- Hypothesis: §G28 as built, plus a reservation. A display-coupled thread's
+  next wake is predictable from its own cycle, so `ops.stopping` on a block
+  arms a per-CPU `bpf_timer` (scx_layered precedent; init in the sleepable
+  `ops.init`) at `cycle − used − lead`. The fire, if the CPU is idle, writes
+  `reserved_pid/until` into the run slot and idle-kicks the CPU, paying the
+  C-state exit before the wake. `select_cpu` takes the reservation before
+  every other claim; `park_take`/`optimistic_place` skip a CPU reserved for
+  another pid inside the window. Lead = 2x deepest cpuidle exit (loader), or
+  `PREWAKE_LEAD_DEFAULT_NS` (50 us) without a table; window = cycle >> 4
+  floored at 2x lead (prediction error scales with the cycle).
+- Gates: the frame-clock vote gate (sleeps most of its life, cycle inside
+  the engine band) AND the elected argmax bucket — only the published frame
+  cadence arms, so a desktop of 60 Hz sleepers is not a kick storm. No
+  clock, no arm. A miss costs one idle kick and one unused window; nothing
+  is queued or preempted on a prediction. One divide on the block path,
+  under the toggle.
+- Live 2026-09-01: ungated, 1 kHz rig cadence: 14,173 fires / 6,997 takes
+  per 10 s (~75% of the cadence's wakes landed on the reserved CPU). Gated,
+  the box's 252 Hz argmax fired 6-7k per 10 s with 0 takes at the 100 us
+  window — widened to cycle/16, retest owed. Two of four on-arm idle-rig
+  runs read p999 39 us vs off 13-15 (always the first arm after a switch).
+- Endpoint: wake-to-run of the elected cadence thread with deep idle
+  available; then a game screen (severe-frame ratio) on a cpuidle host.
+  This host has no cpuidle driver, so the C-state half is unmeasurable here.
+- Aborts: A/A tail cost on the idle rig; power artifacts; any stall.
+
+#### §G59 — idle-depth pick: the §G51 consumer (registered + BUILT 2026-09-01) `<- §G51, §G53, §G54`
+
+- Hypothesis: among affine idle CPUs, the shallowest C-state (exit latency
+  from the loader table via the §G51 mirror) beats census order; a parked
+  mailbox CPU deep in idle loses to a shallower affine one. Compares at most
+  `DEPTH_SCAN_MAX` (4) candidates; ties keep census order, so an empty table
+  IS the §G53 first fit. Composes with §G58 (reserved CPUs skipped in the
+  same walk). Forces g51 on.
+- Built behind `--toggle g59`; attach-clean; INERT on this host (`cpuidle
+  current_driver none`), degrade logged. Unmeasurable here by construction.
+- Endpoint: on a cpuidle host, wake-to-run mean and p99 for the cadence
+  thread vs g59 off; census of picks that changed. Ships to the 9950X3D
+  field test on the fix branch.
+- Aborts: any placement change on this host (would prove the gate leaks).
+
 #### §G53 — EEVDF-shape optimistic placement (registered 2026-08-23, maintainer-directed)
 
 - Hypothesis: EEVDF's 66 ns comes from NOT verifying its pick — no gates, no
@@ -1964,6 +2055,32 @@ Source-only policy; the cache serves stale cflag builds.
 
 #### §S.7 — ids and geometry
 `MAX_CPUS = 1024` is a verifier sizing bound, not the DSQ count. `MAX_CPUS + 1` was `OVF_DSQ` (§R.15).
+
+#### §S.8 — per-LLC wake pools (fix branch `fix/cake-1.2.1-llc-overflow`, `f27950e9d`, 2026-09-01)
+Field report: 9950X3D, DOOM TDA, game lassoed to the V-cache CCD — shipped
+1.2.1 last (152.6 avg / 90.0 1% low) vs crate 1.1.3 first (172.3 / 115.9),
+EEVDF 167.5 / 109.0. Nine schedulers sit within 3% avg / 6% low, 1.1.3 a
+single run: "1.1.3 first" is not established, "1.2.1 last by 9% / 17%" is.
+The 97th-percentile bars are equal (205 vs 207-210): the loss is all slow
+tail = intermittent holds, which favours the strand over CCD-blindness.
+Root cause: the saturated-mask wake strand (a wake into one busy CPU's
+private DSQ, no other server, every rescue gated). Fix, cut from the
+shipped tag: one wake pool DSQ per LLC (`LLC_WAKE_DSQ_BASE + idx`, loader
+maps cpu→LLC from RUNTIME topology, 1 pool on failure), continuation-arm
+wakes behind ANY live occupant pool, plain vtime own-vs-pool arbitration,
+per-LLC starve stamps, 24 ms cross-LLC wall kept. Synthetic strand rig only;
+no game, no dual-CCD host has run it. Review 2026-09-01 (this file's
+author): stage wakes still strand when the pool is backlogged (the herd
+depth gate demotes them to the private queue — and the fix makes the pool
+non-empty more often); service bound is next dispatch, not a preempt; the
+removed `!starved(hc)` guard pools futex handoffs. Isolation, 3 reps each,
+interleaved: loosening the herd gate (yield test, or depth ≥ span) costs
+messaging t16 0.65-0.69 s → 0.88-0.96 s in every run; the continuation-arm
+yield test is a no-op on pipe and messaging. NEITHER PUSHED. The right
+discriminator is remaining burst as time, not yield-within-1.5 us — built
+on nightly as §G57. Strand rig noise that evening: same binary, same mode,
+over-1ms 15/99/216/466 (spinner) and 249/382/522/1604 (peer): no
+between-arm verdict survives it. Lestat's verdict pending.
 
 ---
 
