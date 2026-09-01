@@ -274,8 +274,8 @@ struct cake_state {
 	 * line rather than two (§R.10).
 	 */
 	struct cake_run_slot run[MAX_CPUS];
-	/* ktime the global wake queue was last consumed by ANY CPU (§R.16). */
-	struct cake_slot wake_served;
+	/* ktime each LLC's wake pool was last consumed by ANY CPU (§R.16, §S.8). */
+	struct cake_slot wake_served[MAX_LLCS];
 	/*
 	 * "DSQ[i] may hold work" hint gating the steal ring, one bit per CPU, so
 	 * a going-idle dispatch reads QMASK_WORDS words instead of probing one
@@ -338,6 +338,20 @@ static __noinline void cake_qmark_publish(u32 cpu, bool queued)
 
 /* Loader-filled SMT map; -1 means the CPU has no online sibling. */
 const volatile s32 cpu_sibling[MAX_CPUS];
+
+/*
+ * Loader-filled LLC map: cpu -> compact LLC index, and the pool count (§S.8).
+ * All zeros / count 1 when discovery fails: one machine-wide pool, the old
+ * behaviour, never a refusal.
+ */
+const volatile u8 cpu_llc_id[MAX_CPUS];
+const volatile u32 nr_llc_ids = 1;
+
+/* The wake pool serving @cpu: every same-LLC CPU consumes from it. */
+static __always_inline u64 cake_wake_dsq_of(s32 cpu)
+{
+	return (u64)LLC_WAKE_DSQ_BASE + cpu_llc_id[(u32)cpu & (MAX_CPUS - 1)];
+}
 
 /* Loader-maintained, LIVE (§G21, §G30): sink-ness follows device load, so
  * the loader re-probes on its run loop and bumps cake_sink_gen on change. */
@@ -1096,12 +1110,13 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 		route = ROUTE_HOME_CLAIM;
 
 	/*
-	 * An already-backlogged global queue is the oversubscription
-	 * signature: scattering one more wake buys nothing, it lands cold and
-	 * splits its pair (the t32/t64 herd collapse). Probed lazily, so an
-	 * empty home never pays for the signal.
+	 * An already-backlogged pool is the oversubscription signature:
+	 * scattering one more wake buys nothing, it lands cold and splits its
+	 * pair (the t32/t64 herd collapse). Probed lazily, so an empty home
+	 * never pays for the signal.
 	 */
-	if (route == ROUTE_GLOBAL && scx_bpf_dsq_nr_queued((u64)WAKE_DSQ))
+	if (route == ROUTE_GLOBAL &&
+	    scx_bpf_dsq_nr_queued(cake_wake_dsq_of(tcpu)))
 		route = ROUTE_HOME_QUEUE;
 
 	if (route)
@@ -1111,7 +1126,7 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 	 * into a custom DSQ reads none of the caller's positional bits (§R.5).
 	 */
 	cake_dsq_insert_vtime(p,
-			      route ? (u64)(u32)tcpu : (u64)WAKE_DSQ,
+			      route ? (u64)(u32)tcpu : cake_wake_dsq_of(tcpu),
 			      cake_task_slice(p), cake_wake_vtime(p),
 			      CAKE_ENQ_WAKEUP);
 
@@ -1217,16 +1232,20 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		struct task_struct *hc = cake_cpu_curr(tcpu);
 
 		/*
-		 * Anti-collision: home held by an equally well-served PEER. The
-		 * depth-blind home rule above is right for a worker occupant,
-		 * whose slice is short, and wrong for a peer, whose whole slice
-		 * must be waited out while other CPUs sit idle. Reaching this
-		 * arm already proves p is not starved, so only the occupant
-		 * needs testing (§G17).
+		 * Anti-strand: home held by ANY live occupant. A wake queued
+		 * into one busy CPU's private DSQ can be served by no other
+		 * CPU, so under a saturated affinity mask it waits out the
+		 * occupant's whole remaining slice — up to half a frame — with
+		 * every rescue path gated off (§S.8). The LLC pool bounds the
+		 * wait by the FIRST same-LLC dispatch instead: the 1.1.3
+		 * shared-queue service property, scoped to the cache domain.
+		 * The old peer-only test kept worker-occupied homes private
+		 * for warmth; in game saturation a "worker" runs multi-ms
+		 * bursts and the warmth bet becomes the strand.
 		 */
 		if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1 &&
-		    hc && !(hc->flags & PF_IDLE) && !cake_starved(hc)) {
-			cake_dsq_insert_vtime(p, (u64)WAKE_DSQ,
+		    hc && !(hc->flags & PF_IDLE)) {
+			cake_dsq_insert_vtime(p, cake_wake_dsq_of(tcpu),
 					      cake_task_slice(p),
 					      cake_wake_vtime(p), enq_flags);
 			goto kick_idle;
@@ -1304,37 +1323,65 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 	return false;
 }
 
-/* Has the global wake queue gone unserved for a full WALL-clock window? */
-static __noinline bool cake_wake_starved(void)
+/* Has this LLC's wake pool gone unserved for a full WALL-clock window? */
+static __noinline bool cake_wake_starved(u32 llc)
 {
-	return time_before(cake.wake_served.word + WAKE_STARVE_WALL_NS,
+	llc &= MAX_LLCS - 1;
+	return time_before(cake.wake_served[llc].word + WAKE_STARVE_WALL_NS,
 			   bpf_ktime_get_ns());
 }
 
-/* Record that someone served the global wake queue. */
-static __noinline void cake_wake_serve_stamp(void)
+/* Record that someone served this LLC's wake pool. */
+static __noinline void cake_wake_serve_stamp(u32 llc)
 {
-	cake.wake_served.word = bpf_ktime_get_ns();
+	llc &= MAX_LLCS - 1;
+	cake.wake_served[llc].word = bpf_ktime_get_ns();
 }
 
 /*
- * An EMPTY wake queue is a SERVED wake queue — without this the escalation is
+ * An EMPTY wake pool is a SERVED wake pool — without this the escalation is
  * permanently armed in any regime where wakes mostly route home. Refreshed
- * only once the stamp is already half a window old, because every CPU's
+ * only once the stamp is already half a window old, because every same-LLC
  * dispatch polls this line and an unconditional store would cost an RFO at
  * context-switch rate (§R.16).
  */
-static __noinline void cake_wake_idle_stamp(void)
+static __noinline void cake_wake_idle_stamp(u32 llc)
 {
 	u64 now = bpf_ktime_get_ns();
 
-	if (time_before(cake.wake_served.word + WAKE_STARVE_REFRESH_NS, now))
-		cake.wake_served.word = now;
+	llc &= MAX_LLCS - 1;
+	if (time_before(cake.wake_served[llc].word + WAKE_STARVE_REFRESH_NS,
+			now))
+		cake.wake_served[llc].word = now;
 }
 
 /*
- * The dispatch search: earliest eligible vtime of {own queue, wake queue},
- * then the staggered ring steal. Returns true when it moved work local.
+ * Last resort in the dispatch search: serve another LLC's wake pool. Keeps
+ * the machine work-conserving when one LLC's pool holds work no same-LLC CPU
+ * is coming back for — the cross-LLC move pays the fabric once instead of
+ * stranding the task (§S.8; the 1.1.3 cross-LLC steal, re-landed).
+ */
+static __noinline bool cake_llc_wake_steal(u32 own)
+{
+	u32 i;
+
+	bpf_for(i, 0, nr_llc_ids) {
+		if (i >= MAX_LLCS)
+			break;
+		if (i == own)
+			continue;
+		if (cake_move_to_local((u64)LLC_WAKE_DSQ_BASE + i)) {
+			cake_wake_serve_stamp(i);
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * The dispatch search: earliest eligible vtime of {own queue, own LLC's wake
+ * pool}, then the staggered ring steal, then the other LLCs' pools. Returns
+ * true when it moved work local.
  *
  * Two lockless head peeks pick the earlier vtime and the other is the
  * immediate fallback. The vtime comparison is what makes this starvation-free
@@ -1344,47 +1391,79 @@ static __noinline void cake_wake_idle_stamp(void)
 static __noinline bool cake_dispatch_search(s32 cpu)
 {
 	u32 ucpu = (u32)cpu;
-	u64 first = (u64)ucpu, second = (u64)WAKE_DSQ;
+	u32 llc = cpu_llc_id[ucpu & (MAX_CPUS - 1)];
+	u64 wdsq = (u64)LLC_WAKE_DSQ_BASE + llc;
+	u64 first = (u64)ucpu, second = wdsq;
 	struct task_struct *own, *wake;
 
 	/*
-	 * Own queue first, global wake queue second, with a one-slice margin.
-	 * The margin is HYSTERESIS, not fairness slack: without it every CPU
-	 * takes the global lock first and the wake-storm serialisation returns.
+	 * Own queue and the LLC wake pool arbitrate on PLAIN vtime order: the
+	 * pool head wins whenever it is older. A slice-wide margin here is the
+	 * strand in service clothing — a pooled wakee behind it waits multiple
+	 * occupant slices while every same-LLC CPU prefers its own queue
+	 * (measured: p50 1.9 ms, half throughput, strandrig 2026-09-01). The
+	 * pool peek is lockless; the DSQ lock is only taken by the winner, so
+	 * a storm race costs a losing CPU one fallback to its own queue (§S.8).
 	 * The head peek republishes the mark with one conditional store (§R.3).
 	 */
 	own = cake_dsq_peek((u64)ucpu);
 	cake_qmark_publish(ucpu, own);
-	wake = cake_dsq_peek((u64)WAKE_DSQ);
+	wake = cake_dsq_peek(wdsq);
 	if (wake) {
 		u64 wv = wake->scx.dsq_vtime;
 
 		/*
-		 * Either the vtime margin favours the wake head, or nobody
-		 * served that queue in a wall-clock window (§R.16, §G11.2).
+		 * Older pool head wins, or nobody served the pool for a
+		 * wall-clock window (§R.16, §G11.2).
 		 */
 		if (!own ||
-		    time_before(wv + cake_frame_slice_ns,
-				own->scx.dsq_vtime) ||
-		    cake_wake_starved()) {
-			first  = (u64)WAKE_DSQ;
+		    time_before(wv, own->scx.dsq_vtime) ||
+		    cake_wake_starved(llc)) {
+			first  = wdsq;
 			second = (u64)ucpu;
 		}
 	} else {
-		cake_wake_idle_stamp();
+		cake_wake_idle_stamp(llc);
 	}
 	if (cake_move_to_local(first)) {
-		if (first == (u64)WAKE_DSQ)
-			cake_wake_serve_stamp();
+		if (first == wdsq)
+			cake_wake_serve_stamp(llc);
 		return true;
 	}
 	if (cake_move_to_local(second)) {
-		if (second == (u64)WAKE_DSQ)
-			cake_wake_serve_stamp();
+		if (second == wdsq)
+			cake_wake_serve_stamp(llc);
 		return true;
 	}
 
-	return cake_ring_steal(ucpu);
+	/*
+	 * Machine-wide 24 ms bound: a foreign pool nobody in its own LLC is
+	 * serving outranks the ring — the stock any-CPU rescue, kept. Lockless
+	 * stamp read, then a lockless peek; both fire only past the wall, and
+	 * an idle-stamped empty pool stops the repeat checks (§S.8).
+	 */
+	{
+		u32 i;
+
+		bpf_for(i, 0, nr_llc_ids) {
+			if (i >= MAX_LLCS || i == llc ||
+			    !cake_wake_starved(i))
+				continue;
+			if (!cake_dsq_peek((u64)LLC_WAKE_DSQ_BASE + i)) {
+				cake_wake_idle_stamp(i);
+				continue;
+			}
+			if (cake_move_to_local((u64)LLC_WAKE_DSQ_BASE + i)) {
+				cake_wake_serve_stamp(i);
+				return true;
+			}
+		}
+	}
+
+	if (cake_ring_steal(ucpu))
+		return true;
+
+	return cake_llc_wake_steal(llc);
 }
 
 /*
@@ -1503,14 +1582,32 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 		return -EINVAL;
 	}
 
+	if (!nr_llc_ids || nr_llc_ids > MAX_LLCS) {
+		scx_bpf_error("loader LLC count %u outside 1..%u", nr_llc_ids,
+			      MAX_LLCS);
+		return -EINVAL;
+	}
+
 	bpf_for(i, 0, nr) {
 		ret = scx_bpf_create_dsq((u64)(u32)i, -1);
 		if (ret)
 			return ret;
 	}
-	ret = scx_bpf_create_dsq(WAKE_DSQ, -1);
-	if (ret)
-		return ret;
+	bpf_for(i, 0, nr_llc_ids) {
+		ret = scx_bpf_create_dsq((u64)LLC_WAKE_DSQ_BASE + (u32)i, -1);
+		if (ret)
+			return ret;
+	}
+	/* Every CPU must map to a pool that exists — loader-consistency
+	 * check, same class as the span check above. */
+	bpf_for(i, 0, nr) {
+		if (cpu_llc_id[(u32)i & (MAX_CPUS - 1)] >= nr_llc_ids) {
+			scx_bpf_error("cpu %d LLC id %u outside %u pools", i,
+				      cpu_llc_id[(u32)i & (MAX_CPUS - 1)],
+				      nr_llc_ids);
+			return -EINVAL;
+		}
+	}
 
 	return cake_nonsink_rebuild(cake_sink_gen);
 }

@@ -43,8 +43,8 @@ const SCHEDULER_NAME: &str = "scx_cake";
 /// scx_cake: a gaming-first sched_ext scheduler — one master algorithm on
 /// kernel primitives, no feature flags, no knobs, no runtime telemetry.
 /// Placement is the kernel's idle-CPU pick with direct dispatch on a hit.
-/// Under saturation, wakeups queue on one global vtime queue while
-/// slice-expired tasks requeue on their own CPU's queue ("wakeups global,
+/// Under saturation, wakeups queue on a shared per-LLC wake pool while
+/// slice-expired tasks requeue on their own CPU's queue ("wakeups pool,
 /// continuations local"), and each CPU dispatches the earliest eligible of
 /// the two. The time slice is a compile-time constant.
 #[derive(Debug, Parser)]
@@ -108,7 +108,7 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         info!("   cores   {physical} physical + {smt} SMT = {total} CPUs");
-        info!("   slice   {slice_us}µs · queues {total} per-CPU vtime + 1 global wake");
+        info!("   slice   {slice_us}µs · queues {total} per-CPU vtime + per-LLC wake pools");
         info!(
             "   kernel  queued_wakeup {} · dsq_peek {}",
             if queued_wakeup { "on" } else { "UNSUPPORTED" },
@@ -220,6 +220,29 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // cpu -> compact LLC index for the per-LLC wake pools (§S.8), from
+        // RUNTIME topology — never the build host. A host with more LLCs than
+        // the compiled table degrades to one machine-wide pool, no refusal.
+        let nr_llcs = topo.all_llcs.len();
+        if nr_llcs > 1 && nr_llcs <= bpf_intf::consts_MAX_LLCS as usize {
+            for (idx, llc) in topo.all_llcs.values().enumerate() {
+                for cpu in llc.all_cpus.keys().copied() {
+                    anyhow::ensure!(
+                        cpu < rodata.cpu_llc_id.len(),
+                        "CPU topology id exceeds Cake's compiled LLC map"
+                    );
+                    rodata.cpu_llc_id[cpu] = idx as u8;
+                }
+            }
+            rodata.nr_llc_ids = nr_llcs as u32;
+            info!("   llc     {nr_llcs} last-level caches — one wake pool each");
+        } else if nr_llcs > bpf_intf::consts_MAX_LLCS as usize {
+            log::warn!(
+                "   llc     {nr_llcs} LLCs exceed compiled {} — single wake pool",
+                bpf_intf::consts_MAX_LLCS
+            );
+        }
+
         // Bootstrap each frame word in its SAFE direction. The clock starts
         // slow so occupant protection is never divided into a zero; the FLOOR
         // starts at the display-class fast end (2 ms, NOT the engine-band min:
@@ -309,7 +332,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        info!("🍰 attached — wakeups queue globally, continuations locally");
+        info!("🍰 attached — wakeups queue per-LLC, continuations locally");
 
         // The file capabilities (cap_bpf,cap_perfmon,cap_sys_nice) are only
         // needed to load and attach; detach and map access use already-open

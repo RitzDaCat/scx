@@ -97,12 +97,21 @@ enum consts {
 
 	/*
 	 * Verifier sizing bound for per-CPU state and the steal loops, a power
-	 * of 2 so hot-path indexes reduce to a mask. NOT the DSQ count. WAKE_DSQ
-	 * sits one id above that range and holds wakeups, so the FIRST CPU to
-	 * block anywhere finds them; MAX_CPUS + 1 is retired, not recycled (§S.7).
+	 * of 2 so hot-path indexes reduce to a mask. NOT the DSQ count.
+	 * MAX_CPUS + 0 (the retired machine-global wake queue) and
+	 * MAX_CPUS + 1 are never recycled (§S.7).
 	 */
 	MAX_CPUS	= 1024,
-	WAKE_DSQ	= MAX_CPUS,
+
+	/*
+	 * Per-LLC wake pools (§S.8): one shared overflow DSQ per last-level
+	 * cache, so a wake behind a busy home CPU is served by the FIRST
+	 * same-LLC CPU to dispatch instead of waiting out that one occupant.
+	 * The loader maps cpu -> compact LLC index at attach; discovery
+	 * failure leaves one machine-wide pool, never a refusal.
+	 */
+	MAX_LLCS		= 64,
+	LLC_WAKE_DSQ_BASE	= MAX_CPUS + 2,
 
 	/* The steal-ring queue hint, one bit per CPU (§G25). */
 	QMASK_WORDS	= MAX_CPUS / 64,
