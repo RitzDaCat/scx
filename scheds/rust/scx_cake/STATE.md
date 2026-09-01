@@ -43,8 +43,12 @@ within-arm spread, so every number below is a liveness proof, not a result.**
 | `g58` | frame pre-wake (§G28 built + a reservation): `stopping` arms a per-CPU BPF timer at the predicted wake minus lead; the fire reserves + idle-kicks the CPU; `select_cpu` takes the reservation first | idle rig: 14,173 fires, 6,997 takes (precise 1 kHz cadence, ungated); with the argmax-cadence gate the rig thread no longer arms and the box's 252 Hz cadence fires 6-7k/10 s, 0 takes at a 100 us window — window widened to cycle/16, retest owed |
 | `g59` | idle-depth pick over the §G51 mirror (forces g51); §G58 reservations skipped by other tasks | attach-clean; INERT here (no cpuidle driver), first-fit by construction |
 
-Owed, in order: (1) quiet-box strand rig ABBA off/g57 both modes + messaging t16
-(the §S.8 herd guard is now time-based, `FREE_MOVE_MARGIN_SHIFT`); (2) g58 retest
+Wallclock fast ABBA ran the same evening (`runs/toggle_wallclock_20260901/`,
+ledger rows G57/G58/G59/stack wc): g57 non-regressing with messaging −8.7%,
+g58 inconclusive (one unrepeated 4.10 s pipe slot), g59 null, stack
+non-regressing.
+Owed, in order: (1) quiet-box strand rig ABBA off/g57 both modes (the latency
+endpoint; messaging already passed); (2) g58 retest
 with the widened window, then the tail question — two of four idle-rig on-arm
 runs read p999 39 us vs off 13-15, always the first arm after a switch; (3) g59
 ships to Lestat on the fix branch once (1) settles; (4) hardware audit (§G58/§G59
@@ -125,9 +129,9 @@ Board (live, movable): claude.ai/code/artifact/98701cdf-e541-48c5-8dfc-07109a311
 | 27 | **M2** frame-clock trio is dead plumbing (maintainer audit) | VERIFIED 2026-08-23: cake_frame_ns/floor/slice have zero BPF readers (decl-only; §G11 comment admits it); votes still paid on display threads | decision: demote voting to loader-side telemetry or land a consumer; separate commit + wallclock screen |
 | 28 | **M6** occupant mirror — subscribe, don't query (maintainer audit) | **BUILT `9f344d8da`** behind `--toggle m6`; first mirrored ABBA: NULL on the one clean pair (select_cpu 187=187 ns, no coherence tax; slot 3 noise-contaminated) — the deref chains were warm-line cheap in the appsim regime | park pending a quiet-machine screen; handoff_yields stays on deref (needs live sum_exec) |
 | 25 | **G49** core-contended via idle-smtmask (component audit) | registered 2026-08-23; same audit | build behind toggle: smtmask bit replaces the sibling cpu_curr deref; A/A + wallclock |
-| 33 | **G57** earliest-free pick (published `free_at`) | **BUILT 2026-09-01** behind `--toggle g57`; live: 9.2% of selects placed on the saturated rig; `enqueue` 2→4 static spills (both arms in object) | quiet-box strand rig ABBA both modes + messaging t16; the time-based herd guard replaces the §S.8 depth gate that cost messaging −40% |
-| 34 | **G58** frame pre-wake = §G28 BUILT + reservation | **BUILT 2026-09-01** behind `--toggle g58`; BPF timer per CPU, argmax-cadence gate, reservation window cycle/16 floored 2x lead; live: 6,997 takes on a 1 kHz cadence (ungated) | retest gated + widened window; p999 tail question on the idle rig; game screen needs a cpuidle host for the C-state half |
-| 35 | **G59** idle-depth pick (§G51 consumer) | **BUILT 2026-09-01** behind `--toggle g59` (forces g51); attach-clean, inert on this host | ships to Lestat's 9950X3D with the fix branch; unmeasurable here |
+| 33 | **G57** earliest-free pick (published `free_at`) | **BUILT 2026-09-01** behind `--toggle g57`; live: 9.2% of selects placed on the saturated rig; `enqueue` 2→4 static spills (both arms in object). **Wallclock fast ABBA PASSED same day: pipe flat, messaging −8.7% (4/4 on runs faster)** — the time-based herd guard holds where the §S.8 depth gate cost −40% | quiet-box strand rig ABBA both modes (the latency endpoint), then game screen before hardwire |
+| 34 | **G58** frame pre-wake = §G28 BUILT + reservation | **BUILT 2026-09-01** behind `--toggle g58`; BPF timer per CPU, argmax-cadence gate, reservation window cycle/16 floored 2x lead; live: 6,997 takes on a 1 kHz cadence (ungated). Wallclock fast ABBA x3: messaging flat, pipe 0 to +8%, one unrepeated 4.10 s slot | retest gated + widened window on the rig; game screen needs a cpuidle host for the C-state half |
+| 35 | **G59** idle-depth pick (§G51 consumer) | **BUILT 2026-09-01** behind `--toggle g59` (forces g51); attach-clean, inert on this host; wallclock fast ABBA null (g51 tracepoint cost invisible) | ships to Lestat's 9950X3D with the fix branch; unmeasurable here |
 
 **TOGGLE CAMPAIGN (2026-08-22, maintainer-directed):** §G43–§G46 each sit behind a
 `const volatile` rodata toggle (`--toggle gNN=0|1`) so ONE binary serves both arms of
@@ -594,6 +598,11 @@ real session), live replica (loader logic run standalone on the live host), audi
 | **G38** | fully idle core outranks a cache-warm thread (§G38) | **WAKE chain + perf-stat IPC, interleaved ABCCBA** (native/base/G38, 25 s live KovaaKs, 2026-08-21) | ⚖️ **partial win, KEPT** | chain p50 base 18.72/19.77 → G38 18.55/18.29 µs vs native 15.51/14.19; doubled cores 0.27/0.24 → **0.20/0.20** (native 0.05/0.03); game IPC 1.104/1.112 → **1.156/1.143** (native 1.238/1.287). All three endpoints move the right way; ~¼ of the gap closed. `kwin_wayland` sib-busy ~32% untouched. Arms: base receipt `head-51ee88b21`, G38 receipt `g38_5be54ef0` (source diffed identical to `dac0be8d8`). `runs/g38_idlecore_20260821/` |
 
 | — | **toggle campaign** — §G43 off / §G44 / §G45 / §G46 on-off ABBA + stack, one binary, arms = rodata toggles | **wallclock, interleaved, diagnostic** | ⚖️ **G46 the one separated result; G45 lean+; G44 null; G43 lean−** | per-arm medians (on vs off): G43 pipe +2.6 msg +10.6 mem +4.8 (all overlap, against); G44 +2.2/+5.6/−1.5 (overlap); G45 −3.8/−1.7/−0.2 (overlap, 3/3 for); G46 −0.7/−2.9/**−7.8 SEPARATED**; stack (g43=0 g45=1 g46=1) −1.3/−3.2/**−5.4 SEPARATED**. `runs/toggle_wallclock_20260822/` |
+
+| G57 wc | earliest-free pick on/off (`--toggle g57`) | WALLCLOCK fast ABBA (on/off/off/on, pipe 3M + messaging g20 x2) | ✅ **non-regressing, messaging faster** | pipe 2.27/2.15 vs 2.24/2.20 s; messaging 0.37-0.38 vs 0.39-0.44 s (every on run beat every off run, −8.7%). `runs/toggle_wallclock_20260901/` |
+| G58 wc | frame pre-wake on/off (`--toggle g58`) | WALLCLOCK fast ABBA x3 cycles | ⚠️ **inconclusive** | cycle 1 pipe slot 1 = 4.10 s (unrepeated: re-runs 2.51/2.49 vs off 2.47/2.52 and 2.49/2.36 vs 2.29/2.21); messaging flat all three; fires ~150/s under toggle, takes 0-3 (the elected cadence is not the bench). `runs/toggle_wallclock_20260901/` |
+| G59 wc | idle-depth pick on/off (`--toggle g59`, forces g51) | WALLCLOCK fast ABBA | ✅ **null, as designed** | pipe 2.16/2.27 vs 2.21/2.23; messaging 0.40-0.44 vs 0.39-0.41 — the g51 tracepoint cost is invisible; no cpuidle table here |
+| stack wc | g57+g58+g59 on/off | WALLCLOCK fast ABBA | ✅ **non-regressing** | pipe 2.41/2.27 vs 2.28/2.30; messaging 0.38-0.41 vs 0.41-0.42 (−4.8%) |
 
 ### The frame result (2026-08-01, the campaign's first)
 
