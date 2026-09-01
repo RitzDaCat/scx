@@ -1699,6 +1699,32 @@ as the prev-CPU arm). Full audit and the candidate ranking:
   remote-read (stamp in handoff_yields/occupant_live), so M6's net
   lines-touched delta is plausibly negative; hard abort kept regardless.
 
+#### §G56 — FOLD: banded steal (registered 2026-09-01, maintainer-directed "geometry" program) `<- §G25, §G52, longest-paths audit`
+
+- Hypothesis: the steal walk's worst case (31 iterations, up to 31 failed
+  move kfuncs on all-stale qmask after a load spike; longest live loop per
+  the 2026-09-01 path audit) collapses to one AND + find-first-set per LLC
+  band: `qmask & llc_membership_word` jumps straight to the victim. Band
+  order = locality order (own LLC first, then foreign LLCs by descending
+  CPPC rank under g52 — the first live §G52 consumer — else id order).
+- Implementation: behind `--toggle g56`; narrow hosts only (span <= 64, one
+  qmask word) — wide hosts keep the §G25 walk; loader fills cpu->LLC map,
+  per-LLC qmask words, and band order from RUNTIME topology (portability
+  invariant). Stagger = mask-split at own id + two ctz, NOT the
+  §G25-REJECTED rotate. Stale bits cost one word-op, not a kfunc.
+- Built + attach-smoked 2026-09-01 (g56=1 g52=1, "1 LLC band, order rank",
+  10 s clean). fnspills: cake_band_steal 107 insns, 11 spills (vs walk's 5 —
+  double table index; optimization owed if the screen keeps it).
+- Endpoint: going-idle dispatch ns/call + steal hit rate on the appsim
+  regime; wallclock quick ABBA (pipe + messaging + memcpy); frame screen
+  before hardwire. Aborts: stall/watchdog; dispatch ns regression; steal
+  hit-rate drop vs the walk.
+- Sibling program notes: TELEPORT = §M6/§M7 mirrors (parked, compose at the
+  screen under load); TIME = per-LLC wake-pool port from the
+  `fix/cake-1.2.1-llc-overflow` branch (§S.8, pending the 9950X3D field
+  verdict); wide-host hierarchical summary word (O(log) search) recorded,
+  not built.
+
 #### §G53 — EEVDF-shape optimistic placement (registered 2026-08-23, maintainer-directed)
 
 - Hypothesis: EEVDF's 66 ns comes from NOT verifying its pick — no gates, no

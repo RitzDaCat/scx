@@ -213,6 +213,19 @@ const volatile u32 cake_cstate_exit_us[CAKE_CSTATE_TABLE];
 /* §G52: CPPC highest_perf per CPU, loader-read; zero = unknown. */
 const volatile u8 cpu_perf_rank[MAX_CPUS];
 
+/*
+ * §G56 FOLD: the steal walk as per-LLC qmask bands. One AND plus a
+ * find-first-set answers a whole band; the locality (and, under g52, the
+ * preferred-core) order lives in the BAND order, not a per-CPU element
+ * walk. Narrow hosts only (span <= 64, one qmask word); wide hosts keep
+ * the §G25 walk. All loader-filled from runtime topology.
+ */
+const volatile u8 cake_tog_g56;			/* banded steal fold (§G56) */
+const volatile u8 cake_cpu_llc[MAX_CPUS];	/* cpu -> compact LLC index */
+const volatile u64 cake_llc_qword[MAX_LLCS];	/* LLC membership, word 0 */
+const volatile u8 cake_llc_order[MAX_LLCS][MAX_LLCS]; /* band steal order */
+const volatile u32 cake_nr_llcs = 1;
+
 
 /*
  * Observed frame period: measured, never inherited from a timeslice. Published
@@ -1851,12 +1864,54 @@ kick_idle:
  * rescheduled by core's activate->wakeup_preempt regardless (see ops.enqueue).
  * One subtraction wraps the index — no modulo.
  */
+/*
+ * §G56 FOLD. Each band is qmask AND LLC-membership: every queued CPU in the
+ * band answers from two words, and find-first-set jumps straight to the
+ * victim — no element walk. Bands run own-LLC first, then foreign LLCs in
+ * loader order (§G52 rank-descending when live). The stagger splits the word
+ * at the caller's own id — bits >= self first, then wrap — with a mask and
+ * two ctz, NOT the §G25-rejected rotate.
+ */
+static __noinline bool cake_band_steal(u32 ucpu)
+{
+	u32 home = cake_cpu_llc[ucpu & (MAX_CPUS - 1)] & (MAX_LLCS - 1);
+	u32 r = ucpu & 63;
+	u32 b, k;
+
+	for (b = 0; b < MAX_LLCS; b++) {
+		u64 m;
+
+		if (b >= cake_nr_llcs)
+			break;
+		m = cake.qmask[0] &
+		    cake_llc_qword[cake_llc_order[home][b] & (MAX_LLCS - 1)];
+		m &= ~(1ULL << r);	/* never probe ourselves */
+
+		for (k = 0; k < 64; k++) {
+			u64 hi = m & (~0ULL << r);
+			u64 pick = hi ? hi : m;
+			u32 idx;
+
+			if (!pick)
+				break;
+			idx = (u32)__builtin_ctzll(pick);
+			if (cake_move_to_local((u64)idx))
+				return true;
+			m &= ~(1ULL << (idx & 63));
+		}
+	}
+	return false;
+}
+
 static __noinline bool cake_ring_steal(u32 ucpu)
 {
 	u32 nr = nr_cpu_span;
 	u32 cw = (u32)-1;	/* which qmask word `m` holds; none yet */
 	u64 m = 0;
 	u32 i;
+
+	if (cake_tog_g56 && nr_cpu_span <= 64)
+		return cake_band_steal(ucpu);
 
 	if (CCD_STEAL_POLICY > 0 && steal_order_live && ucpu < STEAL_SPAN) {
 		/* One precomputed locality order avoids verifier-multiplying

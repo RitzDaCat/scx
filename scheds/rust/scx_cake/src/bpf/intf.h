@@ -108,6 +108,9 @@ enum consts {
 
 	/* The steal-ring queue hint, one bit per CPU (§G25). */
 	QMASK_WORDS	= MAX_CPUS / 64,
+
+	/* §G56 FOLD: LLC band count bound for the banded steal tables. */
+	MAX_LLCS	= 64,
 };
 
 #endif /* __CAKE_INTF_H */

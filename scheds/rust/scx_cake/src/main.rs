@@ -172,16 +172,18 @@ impl<'a> Scheduler<'a> {
                 "m6" => rodata.cake_tog_m6 = on,
                 "g51" => rodata.cake_tog_g51 = on,
                 "g52" => rodata.cake_tog_g52 = on,
+                "g56" => rodata.cake_tog_g56 = on,
                 "m7" => rodata.cake_tog_m7 = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
         info!(
-            "   toggle  g39b={} g46={} g51={} g52={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} g56={} m6={} m7={}",
             rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
             rodata.cake_tog_g52,
+            rodata.cake_tog_g56,
             rodata.cake_tog_m6,
             rodata.cake_tog_m7
         );
@@ -211,6 +213,51 @@ impl<'a> Scheduler<'a> {
         }
         if rodata.cake_tog_g52 == 1 && !perf_seen {
             info!("   g52     no CPPC highest_perf: rank tiebreak inert");
+        }
+
+        // §G56 FOLD tables, from RUNTIME topology — never the build host.
+        // cpu -> compact LLC index, per-LLC qmask word (narrow hosts), and
+        // the per-home band order: own LLC first, then foreign LLCs by
+        // descending CPPC rank when g52 is live, id order otherwise. More
+        // LLCs than the table degrades the fold off (bands stay id-order,
+        // the toggle gate's span check keeps the walk), never a refusal.
+        let nr_llcs = topo.all_llcs.len().min(bpf_intf::consts_MAX_LLCS as usize);
+        let mut llc_rank = [0u8; bpf_intf::consts_MAX_LLCS as usize];
+        for (idx, llc) in topo.all_llcs.values().take(nr_llcs).enumerate() {
+            let mut word = 0u64;
+            for cpu in llc.all_cpus.keys().copied() {
+                if cpu < rodata.cake_cpu_llc.len() {
+                    rodata.cake_cpu_llc[cpu] = idx as u8;
+                }
+                if cpu < 64 {
+                    word |= 1u64 << cpu;
+                }
+                if cpu < *NR_CPU_IDS {
+                    llc_rank[idx] = llc_rank[idx].max(rodata.cpu_perf_rank[cpu]);
+                }
+            }
+            rodata.cake_llc_qword[idx] = word;
+        }
+        rodata.cake_nr_llcs = nr_llcs.max(1) as u32;
+        for home in 0..nr_llcs {
+            let mut foreign: Vec<usize> = (0..nr_llcs).filter(|&l| l != home).collect();
+            if rodata.cake_tog_g52 == 1 {
+                foreign.sort_by_key(|&l| std::cmp::Reverse(llc_rank[l]));
+            }
+            rodata.cake_llc_order[home][0] = home as u8;
+            for (b, l) in foreign.iter().enumerate() {
+                rodata.cake_llc_order[home][b + 1] = *l as u8;
+            }
+        }
+        if rodata.cake_tog_g56 == 1 {
+            info!(
+                "   g56     banded steal: {nr_llcs} LLC band(s), order {}",
+                if rodata.cake_tog_g52 == 1 {
+                    "rank"
+                } else {
+                    "id"
+                }
+            );
         }
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
