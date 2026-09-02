@@ -81,6 +81,16 @@ under the best arm), not yield (1.1.3's handler is telemetry). OPEN.
 | g72 | L2 handoff: same-mm microsecond wakee onto the waker's idle sibling | null on top of g69 | park |
 | g73 | distributed claim search from the task's core | 543 / 1.95: negative | drop |
 
+**FIELD RESULT 2026-09-02 evening — Lestat, 9950X3D, DOOM: The Dark Ages
+(Uprising), single run each, game lassoed as before. Nightly default build
+(g65/g69/g71/g75/g77/g79/g81 on; build identity + kernel still to be confirmed
+from his log): 97th 205.55 / avg 170.64 / 1% low 112.03, vs stock 1.2.1
+208.44 / 155.45 / 96.79 and crate 1.1.3 208.52 / 170.45 / 113.48. The
+regression is repaired in full (+9.8% avg, +15.7% 1% low); level with 1.1.3
+inside single-run noise, not ahead. Owed: his identity lines, a second run each,
+then the per-LLC pool port onto nightly (§S.8 shape over the g65 pool) — the
+piece 1.1.3 still has on two CCDs — and §G52 V-cache preference for unpinned.**
+
 **12:30 UPDATE — g74-g79. The g79 stack (g65+g69+g71d+g75+g76+g77+g79) BEATS
 crate 1.1.3 on every column when it does not hitch, 20 s slots ABBA x3
 (6 slots/arm): 1% low 578 vs 562, 0.1% low 530 vs 484, p99 1.686 vs 1.708,
