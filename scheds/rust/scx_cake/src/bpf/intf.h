@@ -129,6 +129,11 @@ enum consts {
 
 	/* §G59: affine idle candidates the depth pick compares. */
 	DEPTH_SCAN_MAX			= 4,
+	L2_HANDOFF_BURST_NS		= 16 * NSEC_PER_USEC,	/* §G72: wakee burst bound for a sibling handoff */
+	STACK_TOLERANCE_NS		= 40 * NSEC_PER_USEC,	/* §G74: queue behind prev only if it frees within this */
+	GROOVE_HOME_MISS		= 8,		/* §G75: home misses before the task stops asking */
+	GROOVE_PROBE_MASK		= 63,		/* §G75: re-probe the home every 64 wakes */
+	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
 };
 
 #endif /* __CAKE_INTF_H */

@@ -32,6 +32,162 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-09-02 11:30 — VELOCITY SESSION: 14 constructs g60-g73 built and
+snippet-scored against crate 1.1.3 at the KovaaKs menu. Best arm ties 1.1.3 on
+1% low / p99 / p99.9 and trails 2% on average fps. Machine on EEVDF, KovaaKs
+left open at the menu. Every diagnostic probe (placement census, hold attribution by queue
+kind, home-decline reasons, the hitch black box) is gated behind `--toggle
+probe=1` and costs nothing off; the winning stack (g65, g69, g71, g75, g77, g79, g81; g76 and g80 are
+unconditional) is the DEFAULT, each switchable off with `--toggle gNN=0`; the
+experiments (g60-g64, g66-g68, g70, g72-g74, g78, g82) default OFF.**
+
+Rig: `runs/overnight_game_20260901/snip.py <arm> <arm> [<arm>]` — mirrored
+slots of `LOG_S` s MangoHud logging driven over the control socket, arms attached
+directly from their receipts; `LOG_S=8` for a 50 s screen (1% low, p99 only),
+`LOG_S=20` for a 95 s read that can see p99.9. Wake-side tools:
+`sib_overlap.py`, `hold_timing.py`, `bench/wake_maxdecomp.py`, the probe census
+(`--toggle` on the probe receipts). Diagrams: `runs/overnight_game_20260901/
+diagrams/` (nightly pipeline with measured shares, 1.1.3 pipeline, hold timeline,
+ledger).
+
+**Mechanism, in the order it was proven.** (1) Nightly runs game threads with a
+busy SMT sibling 6.2-6.6% of their run time (1.1.3 1.2%, EEVDF 0.8%); the census
+placements (§G53 first-fit, §G54 park) bypass the §G38 whole-core rule. (2) Wake
+latency p99 is NOT the gap (nightly equal or better than 1.1.3 per role); the gap
+is HOLDS: every render-path delay >300 us is one occupant keeping the CPU for the
+whole wait (RenderThread 1 ms, kwin 1.6 ms), 1.1.3 has zero on RenderThread /
+dxvk-submit / dxvk-cs. (3) 100% of nightly's wake placements are LOCAL_ON direct
+dispatches (home claim 74%, census prev 20%, first-fit 5%); holds sit there, and a
+local DSQ is FIFO and owner-only — nothing can steal it. (4) Holder timing: in 80%
+of long holds the holder was already running when the wake landed; the wakee was
+placed onto its busy peer. Only CLAIMED placement removes it. (5) IPC: 1.1.3 1.55
+vs every 1.2.x arm 1.48, +3% cycles for -2% instructions; not SMT (0.4% overlap
+under the best arm), not yield (1.1.3's handler is telemetry). OPEN.
+
+| toggle | construct | snippet vs crate 1.1.3 (1% low / p99.9 / avg) | verdict |
+|---|---|---|---|
+| g60 | whole-core census placement | sibling-busy 6% -> 0.3%; 60 s cycle +30 on 1% low, 15 s cycles mixed | keep as a piece |
+| g61 | occupant preempt after insert | null (CPU idle at insert) | drop |
+| g62 | census placements claim (atomic) | holds -40%, avg -3%, p99 worst | drop |
+| g63 | pool only, no direct dispatch | tail fixed (max 2.1), avg -6% | floor, not a ship |
+| g64 | dfl claimed direct + (g65) pool | tail fixed, avg -5%; g64 alone shows the loss is the kernel pick | drop |
+| g65 | every enqueued wake global, herd gate off | null alone (enqueue reached by 2%) | needed under g69 |
+| g66 | serial handoff arm off | null | drop |
+| g67 | census direct paths off, home claim or pool | avg -4%, tail unchanged | drop |
+| g68 | EXPERIMENT: KovaaKs tgid VIP (ENQ_PREEMPT, pool head, kick) | 1% low 489 vs 504 off, p99.9 2.34 vs 2.17: self-preemption | negative, learned |
+| g69 | **claimed warm placement**: prev claim, whole idle core claim, idle thread claim, else pool | 555 / 1.90 / 684 vs 563 / 1.87 / 699 | **best** with g65 |
+| g70 | EXPERIMENT: KovaaKs immune to preempt kicks | null: nothing preempts the game at the menu | learned |
+| g71 | idle-side published core/thread words; (d) words choose, kernel bit claims | (a)-(c) leaked tail; **(d) 560 / 1.88 / 685 vs 562 / 1.87 / 700** | **best**: g65+g69+g71d |
+| g72 | L2 handoff: same-mm microsecond wakee onto the waker's idle sibling | null on top of g69 | park |
+| g73 | distributed claim search from the task's core | 543 / 1.95: negative | drop |
+
+**12:30 UPDATE — g74-g79. The g79 stack (g65+g69+g71d+g75+g76+g77+g79) BEATS
+crate 1.1.3 on every column when it does not hitch, 20 s slots ABBA x3
+(6 slots/arm): 1% low 578 vs 562, 0.1% low 530 vs 484, p99 1.686 vs 1.708,
+p99.9 1.783 vs 1.856, max 2.2 vs 3.3, avg 702 vs 698.** Two of five g79 slots
+took ONE 45 ms frame: the FIRST frame of the MangoHud log (elapsed 0.34/0.49 s),
+i.e. the CSV-create on the render thread — the wake after that IO is what g79
+mishandles; ~2x WAKE_STARVE_WALL_NS. Not reproduced in 9 hunts with perf
+recording (`hitch_hunt.py`, `hitch_scope.py` ready). Cake was attached for the
+whole of every slot (attach logs end in the clean detach line, nr_rejected 0;
+`snip.py` now prints SCHED GONE if not). OPEN, must be closed before g79 ships.
+
+| toggle | construct | read | verdict |
+|---|---|---|---|
+| g74 | published-burst stacking (queue behind prev when §G57 free_at within 40 us) | avg 680, tail no gain: slice/2 is not a burst | drop |
+| g75 | **grooves**: per-task home-miss count skips a failing home claim; last-won CPU tried first | no avg change alone; **with it off the stack collapses (1% low 477, p99.9 2.36)** — the history IS the tail | keep |
+| g76 | lean dispatch (counts before iterators/moves), one groove lookup, cpu_idle tracepoint only for g51 | dispatch 120 -> 87 ns; the mark-only fast path stalled the game 20 ms (mark has holes) — pool by COUNT | keep |
+| g77 | steal ring skipped on an empty qmask (census-bit contended test tried: stale in the wake-list window, dropped) | equal | keep |
+| g78 | rotor on the first whole-core claim + last_win as cpu+1 | 1% low 492: spreading is wrong here | drop; the cpu+1 encoding stays |
+| g79 | **seat hold**: a blocking stage-class thread keeps its core; other wakes skip held cores while any other is free | the win above; GameThread migrations were 12,629/28 s vs 1.1.3's 650 | keep, hitch OPEN |
+
+Why the average was behind (thread_cores.py, 1.1.3 vs stack): 1.1.3 GameThread
+650 migrations, stack 12,629 — a dxvk/render wake took GameThread's core in its
+microsecond gaps and it came back cold 450 times a second: branch misses +34%,
+IPC 1.456 vs 1.553. Cache hit rates identical (L1d miss 2.8%, LLC 0.0%), IRQ
+identical (nvidia 7.8k/s CPU 13), GPU identical (77%, 2745 MHz).
+
+BPF self-cost (cake-bpfstats, 12 s menu): 1.1.3 96 ms (0.8% CPU: select 58 ns,
+dispatch 20, running 26); nightly-off 260 ms; g77b stack 274 ms (select 116,
+dispatch 79, update_idle 33, running 58). The remaining average lever is here:
+select_cpu's groove storage lookup + rq deref + claims, update_idle's three
+atomics, running's frame observe. A symbolized cycles profile needs
+`kernel.kptr_restrict=0` (currently 2; module space hides nvidia.ko with the JIT).
+
+Tools added this session (all in `runs/overnight_game_20260901/`): `snip.py`
+(one-minute mirrored MangoHud snippets from receipts), `sib_overlap.py`,
+`hold_timing.py`, `thread_cores.py`, `sys_ab.sh` (cache/balance/IRQ/GPU),
+`hitch_hunt.py` + `hitch_scope.py`, `diagrams/`. Inventory: `docs/TOOLING.md`
+(docs/ is gitignored; on disk).
+
+Next: (1) close the g79 hitch (catch it without perf: bpftrace on the render
+thread's wake at log start, or make snip.py record the seat word at attach);
+(2) BPF self-cost: symbolized profile, then cut select_cpu to one storage
+lookup + one claim, update_idle to one atomic; (3) fold the stack into defaults
+once (1) closes, then the wallclock guard (`fast_ab.sh`) and a 60 s cycle.
+Probe branches: `probe/overnight-20260901-g63` (arms), `probe/g70-arm`.
+
+**PICKUP 2026-09-02 02:30 — OVERNIGHT GAME ROTATION SCORED (maintainer-authorized
+unattended run), machine left on EEVDF (detached), Palworld left at its menu.
+Seven arms, every one a v5 receipt under `target/baseline_receipts/`: native,
+`crate-1.1.3s` (b68cb3c82 = crate scx_cake 1.1.3 + the two 2026-07-28 dumpable
+backports, scheduling identical), `stock-1.2.1` (c8728c6b6 = scx tag v1.1.3 =
+Lestat's stock), `fix-s8` (f27950e9d), `n0901-off` (HEAD + census no-op),
+`n0901-g57`, `n0901-g58` (defaults flipped). 14-slot mirrored cycles
+(native A B C D E F F E D C B A native), order rotated between cycles.**
+
+KovaaKs menu, 4 cycles, n=8/arm, 60 s slots, ~45k frames each, all 56 accepted
+(`runs/game/kovaaks/2026-09-01-overnight/`, harness matrix):
+
+| arm | avg fps | 1% low | 0.1% low | p99 ms | p99.9 ms |
+|---|---|---|---|---|---|
+| native | 745.8 | 658.8 | 400.4 | 1.523 | 2.498 |
+| crate-1.1.3s | 746.8 | 650.0 | 399.1 | 1.542 | 2.507 |
+| stock-1.2.1 | 708.3 | 561.5 | 386.5 | 1.802 | 2.588 |
+| fix-s8 | 716.7 | 574.8 | 388.4 | 1.740 | 2.575 |
+| n0901-off | 758.4 | 595.0 | 403.7 | 1.683 | 2.477 |
+| n0901-g57 | 757.5 | 582.5 | 403.1 | 1.719 | 2.481 |
+| n0901-g58 | 755.8 | 566.9 | 402.7 | 1.770 | 2.483 |
+
+Cycle 1 slots 0-3 were a warm-up (690 vs 755 fps); dropping them: native 753.7 /
+p99 1.488, crate-1.1.3 754.6 / 1.513, stock-1.2.1 713.4 / 1.722, fix-s8 717.1 /
+1.742, off 758.4 / 1.685, g57 757.5 / 1.721, g58 755.8 / 1.772. Slot ranges do not
+overlap between the 1.2.1 pair (702-726) and the 1.1.3/native/nightly group
+(752-761), at every slot position, both orders.
+
+**Reads.** (1) Lestat's chart reproduces on ONE CCD: 1.2.1 is −5.5% avg fps and
++0.2 ms p99 vs crate 1.1.3 at a 750 fps wake-bound menu, so the loss is not (only)
+CCD-blindness. (2) fix-s8 == stock-1.2.1 here (one LLC = one pool), as designed;
+the pool fix answers only the two-CCD strand. (3) Nightly recovers the average
+(above native) but keeps a p99 0.17 ms wider than 1.1.3 and native — the
+remaining 1.2.x gap is a tail, not throughput. (4) g57/g58 do not move the menu;
+g58 is the widest p99 of the nightly arms (1.772, one 2.02 slot). (5) One 145 ms
+frame on stock-1.2.1 (cycle 1 slot 2) and one 43 ms on native (cycle 3 slot 0):
+single spikes on both sides, not a cake signature at n=8.
+
+Palworld menu, 3 cycles, n=6/arm, 120 fps cap, GPU ~39%, ~7.2k frames/slot, all
+42 accepted (`runs/game/palworld/2026-09-01-overnight/`): p99 flat 8.73-8.80 ms
+on every arm; p99.9 native 9.80, crate-1.1.3 10.25, stock-1.2.1 10.08, fix-s8
+10.91, off 9.80, g57 9.63, g58 9.67. Same ordering as KovaaKs at the tail (1.2.1
+pair worst, nightly tightest) but 7 frames per 0.1% — direction only.
+
+Noise covariate: FFXI server (`xi_map`) ~16% of one CPU + Discord ~6% for the whole
+run, identical across arms. Display idle-dimmed from 23:40; captures unaffected.
+Helldivers 2 was attempted and dropped: no `mangohud` launch option and Steam
+ignored `-shutdown`, so no layer; Palworld took the second regime.
+
+Rig: `scx_cake_bench/runs/overnight_game_20260901/` — `build_arms.sh`, `arms/*.json`
+(receipt paths + hashes), `run_cycles*.sh`, `cycle_<game>_N.log` (per-slot JSON),
+`analyze.py`, `stage_import.py` + `staging_map_<game>.tsv` (slot → capture file).
+Probe branches local only: `probe/overnight-20260901{,-g57,-g58}`,
+`probe/crate-1.1.3-scoreable`; worktrees under the session scratchpad and
+`scx-baselines/v1.2.1`, `scx-baselines/v1.1.3-scoreable`.
+
+Owed now: (1) the 1.1.3-vs-1.2.x p99 gap at the menu is the lever for Lestat's
+single-CCD loss — bisect it (§G39-B' preempt, GAME class, tick wait bound are the
+three things 1.1.3 has, §S.8 comparison); (2) a play-regime rotation (input-live)
+before any of g57/g58 ships; (3) the 2026-09-01 owed list below still stands.
+
 **PICKUP 2026-09-01 EOD — three published-state constructs BUILT on nightly
 behind toggles, machine left on EEVDF (detached). Nothing scored: the box
 carried the FFXI server + browser all evening and the strand rig read 30x
@@ -603,6 +759,8 @@ real session), live replica (loader logic run standalone on the live host), audi
 | G58 wc | frame pre-wake on/off (`--toggle g58`) | WALLCLOCK fast ABBA x3 cycles | ⚠️ **inconclusive** | cycle 1 pipe slot 1 = 4.10 s (unrepeated: re-runs 2.51/2.49 vs off 2.47/2.52 and 2.49/2.36 vs 2.29/2.21); messaging flat all three; fires ~150/s under toggle, takes 0-3 (the elected cadence is not the bench). `runs/toggle_wallclock_20260901/` |
 | G59 wc | idle-depth pick on/off (`--toggle g59`, forces g51) | WALLCLOCK fast ABBA | ✅ **null, as designed** | pipe 2.16/2.27 vs 2.21/2.23; messaging 0.40-0.44 vs 0.39-0.41 — the g51 tracepoint cost is invisible; no cpuidle table here |
 | stack wc | g57+g58+g59 on/off | WALLCLOCK fast ABBA | ✅ **non-regressing** | pipe 2.41/2.27 vs 2.28/2.30; messaging 0.38-0.41 vs 0.41-0.42 (−4.8%) |
+| overnight 0901 | native / crate-1.1.3 / stock-1.2.1 / fix-s8 / nightly off / g57 / g58 — seven receipted arms | **FRAMES, unattended KovaaKs menu, 4 mirrored 14-slot cycles, n=8/arm, 60 s** | ✅ **Lestat's loss reproduced on one CCD** | avg fps 746 / 747 / **708** / 717 / 758 / 758 / 756; p99 1.52 / 1.54 / **1.80** / 1.74 / 1.68 / 1.72 / 1.77 ms; 0.1% low 400 / 399 / 386 / 388 / 404 / 403 / 403. 1.2.1 −5.5% and +0.2 ms p99 vs crate 1.1.3, no slot overlap; fix == stock on one LLC; nightly recovers avg, not the 1.1.3 p99; g57/g58 null-to-worse at the menu. `runs/game/kovaaks/2026-09-01-overnight/` |
+| overnight 0901 | same seven arms | **FRAMES, unattended Palworld menu, 3 cycles, n=6/arm, 120 fps cap** | ⚖️ **direction only** | p99 flat 8.73-8.80 ms all arms; p99.9 native 9.80 / 1.1.3 10.25 / 1.2.1 10.08 / fix 10.91 / off 9.80 / g57 9.63 / g58 9.67 (7 frames per 0.1%). `runs/game/palworld/2026-09-01-overnight/` |
 
 ### The frame result (2026-08-01, the campaign's first)
 

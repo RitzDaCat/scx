@@ -70,6 +70,8 @@ struct Scheduler<'a> {
     struct_ops: Option<libbpf_rs::Link>,
     /// Handler-edge tracepoint links (§G35); dropped on exit with the rest.
     _irq_links: Vec<libbpf_rs::Link>,
+    /// Diagnostics on (--toggle probe=1): census, hold attribution, black box.
+    probe_on: bool,
     /// Frame-clock incumbent bucket, held against near-ties (§R.22).
     frame_bucket: Option<u32>,
     /// Last published period; the reference for slow-direction hysteresis.
@@ -176,16 +178,55 @@ impl<'a> Scheduler<'a> {
                 "g57" => rodata.cake_tog_g57 = on,
                 "g58" => rodata.cake_tog_g58 = on,
                 "g59" => rodata.cake_tog_g59 = on,
+                "g60" => rodata.cake_tog_g60 = on,
+                "g61" => rodata.cake_tog_g61 = on,
+                "g62" => rodata.cake_tog_g62 = on,
+                "g63" => rodata.cake_tog_g63 = on,
+                "g64" => rodata.cake_tog_g64 = on,
+                "g65" => rodata.cake_tog_g65 = on,
+                "g66" => rodata.cake_tog_g66 = on,
+                "g67" => rodata.cake_tog_g67 = on,
+                "g68" => rodata.cake_tog_g68 = on,
+                "g69" => rodata.cake_tog_g69 = on,
+                "g70" => rodata.cake_tog_g70 = on,
+                "g72" => rodata.cake_tog_g72 = on,
+                "g71" => rodata.cake_tog_g71 = on,
+                "g73" => rodata.cake_tog_g73 = on,
+                "g74" => rodata.cake_tog_g74 = on,
+                "g75" => rodata.cake_tog_g75 = on,
+                "g77" => rodata.cake_tog_g77 = on,
+                "g78" => rodata.cake_tog_g78 = on,
+                "g79" => rodata.cake_tog_g79 = on,
+                "g81" => rodata.cake_tog_g81 = on,
                 "m7" => rodata.cake_tog_m7 = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
         // §G59 reads the §G51 mirror, so it forces the producer on.
+        if rodata.cake_tog_g68 == 1 || rodata.cake_tog_g70 == 1 {
+            // EXPERIMENT §G68: the VIP process is found by comm prefix at attach.
+            let mut vip = 0u32;
+            if let Ok(rd) = std::fs::read_dir("/proc") {
+                for e in rd.flatten() {
+                    if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
+                        if comm.starts_with("FPSAimTrainer") {
+                            if let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
+                                vip = pid;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            rodata.cake_vip_tgid = vip;
+            info!("   g68     VIP process tgid {vip} (0 = not found, VIP inert)");
+        }
         if rodata.cake_tog_g59 == 1 {
             rodata.cake_tog_g51 = 1;
         }
+        let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} m6={} m7={}",
             rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
@@ -194,6 +235,26 @@ impl<'a> Scheduler<'a> {
             rodata.cake_tog_g57,
             rodata.cake_tog_g58,
             rodata.cake_tog_g59,
+            rodata.cake_tog_g60,
+            rodata.cake_tog_g61,
+            rodata.cake_tog_g62,
+            rodata.cake_tog_g63,
+            rodata.cake_tog_g64,
+            rodata.cake_tog_g65,
+            rodata.cake_tog_g66,
+            rodata.cake_tog_g67,
+            rodata.cake_tog_g68,
+            rodata.cake_tog_g69,
+            rodata.cake_tog_g70,
+            rodata.cake_tog_g72,
+            rodata.cake_tog_g71,
+            rodata.cake_tog_g73,
+            rodata.cake_tog_g74,
+            rodata.cake_tog_g75,
+            rodata.cake_tog_g77,
+            rodata.cake_tog_g78,
+            rodata.cake_tog_g79,
+            rodata.cake_tog_g81,
             rodata.cake_tog_m6,
             rodata.cake_tog_m7
         );
@@ -442,6 +503,15 @@ impl<'a> Scheduler<'a> {
         }
 
         // Load and attach.
+        // §G76: the cpuidle mirror tracepoint fires on every idle transition
+        // (2.7M/12 s on a polling-idle host); it is loaded only for its consumers.
+        let want_cpu_idle = skel
+            .maps
+            .rodata_data
+            .as_ref()
+            .map(|r| r.cake_tog_g51 == 1)
+            .unwrap_or(false);
+        skel.progs.cake_cpu_idle.set_autoload(want_cpu_idle);
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
@@ -460,6 +530,12 @@ impl<'a> Scheduler<'a> {
                 Err(e) => warn!("   irq     {name} hook failed ({e}); chronic steering only"),
             }
         }
+        if want_cpu_idle {
+            match skel.progs.cake_cpu_idle.attach() {
+                Ok(link) => irq_links.push(link),
+                Err(e) => warn!("   g51     cpu_idle hook failed ({e}); depth mirror off"),
+            }
+        }
 
         info!("🍰 attached — wakeups queue globally, continuations locally");
 
@@ -476,6 +552,7 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             _irq_links: irq_links,
+            probe_on,
             frame_bucket: None,
             frame_period: 0,
             slow_polls: 0,
@@ -512,9 +589,27 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // DIAGNOSTIC PROBE — per-arm placement census (revert before scoring).
-        {
-            const NAMES: [&str; 19] = [
+        // Diagnostics (--toggle probe=1): black box of placements that waited > 10 ms, then the census.
+        if let (true, Some(bss)) = (self.probe_on, self.skel.maps.bss_data.as_ref()) {
+            let n = bss.cake_blackbox_n;
+            for i in 0..n.min(4) {
+                let b = &bss.cake_blackbox[i as usize];
+                let comm = String::from_utf8_lossy(
+                    &b.comm
+                        .iter()
+                        .map(|c| *c as u8)
+                        .take_while(|c| *c != 0)
+                        .collect::<Vec<u8>>(),
+                )
+                .to_string();
+                info!(
+                    "   BLACKBOX wait {:.2} ms  {} pid {} kind {} target cpu{} caller cpu{} waker {} ran_on cpu{}  seats {:#018x} core_free {:#018x} thread_free {:#018x} idle {:#018x}",
+                    b.wait_ns as f64 / 1e6, comm, b.pid, b.kind, b.target, b.caller, b.waker_pid, b.ran_on, b.seats, b.core_free, b.thread_free, b.idle_word
+                );
+            }
+        }
+        if self.probe_on {
+            const NAMES: [&str; 47] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -534,6 +629,34 @@ impl<'a> Scheduler<'a> {
                 "free_pick",
                 "prewake_fire",
                 "reserved_take",
+                "pl_local",
+                "pl_local_on",
+                "pl_cpuq_wake",
+                "pl_cpuq_cont",
+                "pl_global",
+                "h300_local",
+                "h300_local_on",
+                "h300_cpuq_wake",
+                "h300_cpuq_cont",
+                "h300_global",
+                "h1ms_local",
+                "h1ms_local_on",
+                "h1ms_cpuq_wake",
+                "h1ms_cpuq_cont",
+                "h1ms_global",
+                "pl_self",
+                "h300_self",
+                "h1ms_self",
+                "hd_skip",
+                "hd_sync",
+                "hd_starved",
+                "hd_irq",
+                "hd_aff",
+                "hd_contended",
+                "hd_notidle",
+                "home_busy",
+                "home_localq",
+                "h300_home_busy",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {
