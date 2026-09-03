@@ -168,12 +168,16 @@ impl<'a> Scheduler<'a> {
                 _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
             };
             match name {
+                "g85" => rodata.cake_tog_g85 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
         let probe_on = rodata.cake_tog_probe == 1;
-        info!("   toggle  probe={}", rodata.cake_tog_probe);
+        info!(
+            "   toggle  g85={} probe={}",
+            rodata.cake_tog_g85, rodata.cake_tog_probe
+        );
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
         // Clamped so a probe perturbed by host load cannot mis-tune the
@@ -417,7 +421,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 104] = [
+            const NAMES: [&str; 107] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -522,6 +526,9 @@ impl<'a> Scheduler<'a> {
                 "t_hint_cas",
                 "t_qmark",
                 "t_cal",
+                "leak_home",
+                "leak_kick",
+                "leak_dispatch",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {
