@@ -55,6 +55,214 @@ UEI_DEFINE(uei);
 #define CAKE_PICK_IDLE_CORE \
 	bpf_core_enum_value(enum scx_pick_idle_cpu_flags, SCX_PICK_IDLE_CORE)
 
+/* Declared ahead of the toggle block: the probe census below reads it. */
+const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
+
+/*
+ * DIAGNOSTIC PROBE — not for scoring. Per-arm placement census for
+ * ops.select_cpu, so the mailbox hit rate is a measurement instead of an
+ * assumption (STATE.md pillar 3 lists it unmeasured). Per-CPU map, plain
+ * increment on this CPU's own copy: no atomic, no shared line, same shape
+ * as cake_frame_hist. REVERT before any scoring run.
+ */
+enum cake_stat {
+	CAKE_STAT_SELECT = 0,		/* ops.select_cpu entries */
+	CAKE_STAT_SERIAL,		/* serial-handoff arm placed */
+	CAKE_STAT_HOME,			/* prev-cpu warm home claim placed */
+	CAKE_STAT_PARK_REACHED,		/* cake_park_take called */
+	CAKE_STAT_PARK_PREV,		/* park_take won on prev warmth */
+	CAKE_STAT_PARK_MBOX,		/* park_take won on the mailbox */
+	CAKE_STAT_OPT_REACHED,		/* cake_optimistic_place called */
+	CAKE_STAT_OPT_HIT,		/* cake_optimistic_place placed */
+	CAKE_STAT_RANKED,		/* fell through to the ranked pick */
+	CAKE_STAT_WP_ATTEMPT,		/* wake_preempt reached with a live occupant */
+	CAKE_STAT_WP_TINY,		/* wakee burst <= 4us (microsecond-class shape) */
+	CAKE_STAT_WP_SMALL,		/* wakee burst <= 64us */
+	CAKE_STAT_WP_PROTECT,		/* rejected: protect window not met */
+	CAKE_STAT_WP_VTIME,		/* rejected: vtime bar */
+	CAKE_STAT_WP_STARVED,		/* rejected: pipeline-stage veto */
+	CAKE_STAT_WP_FIRED,		/* kick issued */
+	CAKE_STAT_FREE_PICK,		/* §G57 placed behind an earlier-free CPU */
+	CAKE_STAT_PREWAKE_FIRE,		/* §G58 timer fired on an idle CPU */
+	CAKE_STAT_RESERVED_TAKE,	/* §G58 wake took its reservation */
+	/* PROBE hold attribution: 5 queue kinds x {placed, wait>300us, wait>1ms} */
+	CAKE_STAT_PL_LOCAL,		/* select_cpu direct, own CPU (LOCAL) */
+	CAKE_STAT_PL_LOCAL_ON,		/* select_cpu direct, LOCAL_ON|cpu */
+	CAKE_STAT_PL_CPUQ_WAKE,		/* enqueue wake into a per-CPU DSQ */
+	CAKE_STAT_PL_CPUQ_CONT,		/* enqueue continuation into a per-CPU DSQ */
+	CAKE_STAT_PL_GLOBAL,		/* WAKE_DSQ */
+	CAKE_STAT_H3_LOCAL, CAKE_STAT_H3_LOCAL_ON, CAKE_STAT_H3_CPUQ_WAKE,
+	CAKE_STAT_H3_CPUQ_CONT, CAKE_STAT_H3_GLOBAL,
+	CAKE_STAT_H10_LOCAL, CAKE_STAT_H10_LOCAL_ON, CAKE_STAT_H10_CPUQ_WAKE,
+	CAKE_STAT_H10_CPUQ_CONT, CAKE_STAT_H10_GLOBAL,
+	CAKE_STAT_PL_SELF, CAKE_STAT_H3_SELF, CAKE_STAT_H10_SELF, /* LOCAL_ON to the calling CPU */
+	CAKE_STAT_HD_SKIP, CAKE_STAT_HD_SYNC, CAKE_STAT_HD_STARVED, CAKE_STAT_HD_IRQ,
+	CAKE_STAT_HD_AFF, CAKE_STAT_HD_CONTENDED, CAKE_STAT_HD_NOTIDLE, /* PROBE: home declines */
+	CAKE_STAT_HOME_BUSY,		/* home claim succeeded on a CPU with a running task */
+	CAKE_STAT_HOME_LOCALQ,		/* home claim succeeded on a CPU whose local DSQ is non-empty */
+	CAKE_STAT_H3_HOME_BUSY,		/* ... and the wakee then waited >300us */
+	/* PROBE site census: how often each shared-line write, clock read
+	 * and claiming kfunc fires (atomics audit 2026-09-03). */
+	CAKE_SITE_UI_ENTER,
+	CAKE_SITE_UI_ENTER_IDLEW,
+	CAKE_SITE_UI_ENTER_COREF,
+	CAKE_SITE_UI_EXIT,
+	CAKE_SITE_UI_EXIT_IDLEW,
+	CAKE_SITE_UI_EXIT_COREF,
+	CAKE_SITE_QMARK_SET,
+	CAKE_SITE_QMARK_SET_SKIP,
+	CAKE_SITE_QMARK_CLR,
+	CAKE_SITE_QMARK_CLR_SKIP,
+	CAKE_SITE_SEAT_CLR,
+	CAKE_SITE_SEAT_SET,
+	CAKE_SITE_HINT_CAS,
+	CAKE_SITE_RUNNING,
+	CAKE_SITE_FRONTIER_ST,
+	CAKE_SITE_WAKE_SERVED_ST,
+	CAKE_SITE_WAKE_MARK_ST,
+	CAKE_SITE_IDLE_HINT_ST,
+	CAKE_SITE_TACI,
+	CAKE_SITE_TACI_WIN,
+	CAKE_SITE_TACI_STAGE,
+	CAKE_SITE_TACI_HOME,
+	CAKE_SITE_TACI_GROOVE,
+	CAKE_SITE_TACI_WARM_CORE,
+	CAKE_SITE_TACI_WARM_THREAD,
+	CAKE_SITE_TACI_WARM,
+	CAKE_SITE_TACI_HINT,
+	CAKE_SITE_TACI_NOTIFY,
+	CAKE_SITE_TACI_OTHER,
+	CAKE_SITE_PICK_IDLE,
+	CAKE_SITE_KICK,
+	CAKE_SITE_NRQ,
+	CAKE_SITE_DSQ_INSERT,
+	CAKE_SITE_MOVE_LOCAL,
+	CAKE_SITE_KT,
+	CAKE_SITE_KT_PERIOD,
+	CAKE_SITE_KT_TICKSOON,
+	CAKE_SITE_KT_OCCUPANT,
+	CAKE_SITE_KT_HANDOFF,
+	CAKE_SITE_KT_PICKS,
+	CAKE_SITE_KT_WAKECLOCK,
+	CAKE_SITE_KT_PREWAKE,
+	CAKE_SITE_KT_RUNNING,
+	CAKE_SITE_KT_PROBE,
+	CAKE_SITE_TASK_STORAGE,
+	CAKE_SITE_CPU_CURR,
+	CAKE_SITE_CORE_CONTENDED,
+	CAKE_SITE_STAGE_PROBE,
+	CAKE_SITE_TACIW_STAGE,
+	CAKE_SITE_TACIW_HOME,
+	CAKE_SITE_TACIW_GROOVE,
+	CAKE_SITE_TACIW_WARM_CORE,
+	CAKE_SITE_TACIW_WARM_THREAD,
+	CAKE_SITE_TACIW_WARM,
+	CAKE_SITE_TACIW_HINT,
+	CAKE_SITE_TACIW_NOTIFY,
+	CAKE_SITE_TACIW_OTHER,
+	/* clock-pair sums (ns) around one call each; T_CAL is the empty pair. */
+	CAKE_SITE_T_NRQ,
+	CAKE_SITE_T_TACI,
+	CAKE_SITE_T_PICK,
+	CAKE_SITE_T_KICK,
+	CAKE_SITE_T_CPU_CURR,
+	CAKE_SITE_T_TASK_STORAGE,
+	CAKE_SITE_T_MOVE,
+	CAKE_SITE_T_INSERT,
+	CAKE_SITE_T_UI_IDLEW,
+	CAKE_SITE_T_UI_COREF,
+	CAKE_SITE_T_HINT_CAS,
+	CAKE_SITE_T_QMARK,
+	CAKE_SITE_T_CAL,
+	CAKE_STAT_NR,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CAKE_STAT_NR);
+	__type(key, u32);
+	__type(value, u64);
+} cake_stats SEC(".maps");
+
+static __always_inline void cake_stat_inc(u32 idx)
+{
+	u64 *v;
+
+	if (!cake_tog_probe)
+		return;
+	v = bpf_map_lookup_elem(&cake_stats, &idx);
+
+	if (v)
+		(*v)++;
+}
+
+static __always_inline void cake_stat_add(u32 idx, u64 add)
+{
+	u64 *v;
+
+	if (!cake_tog_probe)
+		return;
+	v = bpf_map_lookup_elem(&cake_stats, &idx);
+
+	if (v)
+		*v += add;
+}
+
+/* PROBE site timing: a clock pair around one call, summed per CPU; the
+ * running callback records an empty pair (T_CAL) to subtract. */
+#define CAKE_TIMED(site, expr) ({						\
+	u64 __t0 = cake_tog_probe ? bpf_ktime_get_ns() : 0;			\
+	typeof(expr) __r = (expr);						\
+	if (cake_tog_probe)							\
+		cake_stat_add((site), bpf_ktime_get_ns() - __t0);		\
+	__r; })
+#define CAKE_TIMED_VOID(site, stmt) do {					\
+	u64 __t0 = cake_tog_probe ? bpf_ktime_get_ns() : 0;			\
+	stmt;									\
+	if (cake_tog_probe)							\
+		cake_stat_add((site), bpf_ktime_get_ns() - __t0);		\
+} while (0)
+
+/* PROBE site census wrappers: the kfunc, the clock read, plus one per-CPU
+ * count each when --toggle probe=1; the count is dead code when off. */
+static __always_inline bool cake_taci(s32 cpu, u32 site)
+{
+	bool won = CAKE_TIMED(CAKE_SITE_T_TACI, scx_bpf_test_and_clear_cpu_idle(cpu));
+
+	cake_stat_inc(CAKE_SITE_TACI);
+	cake_stat_inc(site);
+	if (won) {
+		cake_stat_inc(CAKE_SITE_TACI_WIN);
+		cake_stat_inc(site + (CAKE_SITE_TACIW_STAGE - CAKE_SITE_TACI_STAGE));
+	}
+	return won;
+}
+
+static __always_inline u64 cake_now(u32 site)
+{
+	cake_stat_inc(CAKE_SITE_KT);
+	cake_stat_inc(site);
+	return bpf_ktime_get_ns();
+}
+
+static __always_inline s32 cake_pick_idle(const struct cpumask *m, u64 flags)
+{
+	cake_stat_inc(CAKE_SITE_PICK_IDLE);
+	return CAKE_TIMED(CAKE_SITE_T_PICK, scx_bpf_pick_idle_cpu(m, flags));
+}
+
+static __always_inline void cake_kick(s32 cpu, u64 flags)
+{
+	cake_stat_inc(CAKE_SITE_KICK);
+	CAKE_TIMED_VOID(CAKE_SITE_T_KICK, scx_bpf_kick_cpu(cpu, flags));
+}
+
+static __always_inline s32 cake_nrq(u64 dsq_id)
+{
+	cake_stat_inc(CAKE_SITE_NRQ);
+	return CAKE_TIMED(CAKE_SITE_T_NRQ, scx_bpf_dsq_nr_queued(dsq_id));
+}
+
 /*
  * Cake-local kfunc bindings through compat.bpf.h's ladders, shaped so the
  * modern kernel pays nothing (§R.8): a ladder whose arms are alternative
@@ -80,26 +288,30 @@ static __noinline void cake_kick_preempt(s32 cpu);
 static __noinline bool cake_dsq_insert_vtime(struct task_struct *p, u64 dsq_id,
 					     u64 slice, u64 vtime, u64 enq_flags)
 {
+	cake_stat_inc(CAKE_SITE_DSQ_INSERT);
 	cake_probe_place(p, dsq_id, enq_flags);
 	if (cake_vip(p)) {
 		enq_flags |= CAKE_ENQ_PREEMPT;
 		vtime = cake_vip_head_vtime();	/* pool head */
 	}
-	return scx_bpf_dsq_insert_vtime(p, dsq_id, slice, vtime, enq_flags);
+	return CAKE_TIMED(CAKE_SITE_T_INSERT,
+			  scx_bpf_dsq_insert_vtime(p, dsq_id, slice, vtime, enq_flags));
 }
 
 static __always_inline bool cake_dsq_insert(struct task_struct *p, u64 dsq_id,
 					    u64 slice, u64 enq_flags)
 {
+	cake_stat_inc(CAKE_SITE_DSQ_INSERT);
 	cake_probe_place(p, dsq_id, enq_flags);
 	if (cake_vip(p))
 		enq_flags |= CAKE_ENQ_PREEMPT;
-	return scx_bpf_dsq_insert(p, dsq_id, slice, enq_flags);
+	return CAKE_TIMED(CAKE_SITE_T_INSERT, scx_bpf_dsq_insert(p, dsq_id, slice, enq_flags));
 }
 
 static __always_inline bool cake_move_to_local(u64 dsq_id)
 {
-	return scx_bpf_dsq_move_to_local(dsq_id, 0);
+	cake_stat_inc(CAKE_SITE_MOVE_LOCAL);
+	return CAKE_TIMED(CAKE_SITE_T_MOVE, scx_bpf_dsq_move_to_local(dsq_id, 0));
 }
 
 /* Campaign toggle, declared here because the readers below precede the
@@ -116,12 +328,13 @@ extern struct rq runqueues __ksym __weak;
  */
 static __noinline struct task_struct *cake_cpu_curr(s32 cpu)
 {
+	cake_stat_inc(CAKE_SITE_CPU_CURR);
 	if (cake_tog_m7 && bpf_ksym_exists(&runqueues)) {
 		struct rq *rq = bpf_per_cpu_ptr(&runqueues, cpu);
 
 		return rq ? rq->curr : NULL;
 	}
-	return __COMPAT_scx_bpf_cpu_curr(cpu);
+	return CAKE_TIMED(CAKE_SITE_T_CPU_CURR, __COMPAT_scx_bpf_cpu_curr(cpu));
 }
 
 /* Local-DSQ depth without the kfunc (§M7): same field the kfunc returns,
@@ -134,7 +347,7 @@ static __always_inline u64 cake_local_nr(s32 cpu)
 		if (rq)
 			return rq->scx.local_dsq.nr;
 	}
-	return scx_bpf_dsq_nr_queued(CAKE_DSQ_LOCAL_ON | (u32)cpu);
+	return cake_nrq(CAKE_DSQ_LOCAL_ON | (u32)cpu);
 }
 
 static __noinline struct task_struct *cake_dsq_peek(u64 dsq_id)
@@ -255,7 +468,6 @@ const volatile u8 cpu_perf_rank[MAX_CPUS];
  * walk. Narrow hosts only (span <= 64, one qmask word); wide hosts keep
  * the §G25 walk. All loader-filled from runtime topology.
  */
-const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 const volatile u8 cake_tog_g56;			/* banded steal fold (§G56) */
 const volatile u8 cake_tog_g57;			/* earliest-free pick (§G57) */
 const volatile u8 cake_tog_g58;			/* frame pre-wake (§G58) */
@@ -281,6 +493,8 @@ const volatile u8 cake_tog_g77			= 1;	/* lean 2: steal ring skipped on an empty 
 const volatile u8 cake_tog_g78;			/* spread once, then stick: a task's first whole-core claim rotates, its groove keeps it (§G78) */
 const volatile u8 cake_tog_g79			= 1;	/* seat hold: a blocked stage keeps its core for its gap; other wakes skip it (§G79) */
 const volatile u8 cake_tog_g81			= 1;	/* stage-class tasks keep the warm home on SYNC wakes (§G81) */
+const volatile u8 cake_tog_g83;			/* whole-core word derived from the thread census, no core_free atomics (§G83) */
+const volatile u8 cake_tog_g84;			/* going-idle hint stored only over an empty or stale word (§G84) */
 
 /* §G58: how far ahead of a predicted wake the reservation fires. Loader:
  * twice the deepest cpuidle exit latency, or the default without a table. */
@@ -345,7 +559,7 @@ static __always_inline u64 cake_burst_ns(const struct task_struct *p)
  */
 static __always_inline u64 cake_period_ns(const struct task_struct *p)
 {
-	u64 per = (bpf_ktime_get_ns() - p->start_time) / (p->nvcsw | 1);
+	u64 per = (cake_now(CAKE_SITE_KT_PERIOD) - p->start_time) / (p->nvcsw | 1);
 
 	return per > SLICE_NS ? SLICE_NS : per;
 }
@@ -486,8 +700,13 @@ static __always_inline void cake_qmark_set(u32 cpu)
 
 	cpu &= MAX_CPUS - 1;
 	bit = 1ULL << (cpu & 63);
-	if (!(cake.qmask[cpu >> 6] & bit))
-		__atomic_fetch_or(&cake.qmask[cpu >> 6], bit, __ATOMIC_RELAXED);
+	if (!(cake.qmask[cpu >> 6] & bit)) {
+		cake_stat_inc(CAKE_SITE_QMARK_SET);
+		CAKE_TIMED_VOID(CAKE_SITE_T_QMARK,
+				__atomic_fetch_or(&cake.qmask[cpu >> 6], bit, __ATOMIC_RELAXED));
+	} else {
+		cake_stat_inc(CAKE_SITE_QMARK_SET_SKIP);
+	}
 }
 
 static __always_inline void cake_qmark_clear(u32 cpu)
@@ -496,8 +715,13 @@ static __always_inline void cake_qmark_clear(u32 cpu)
 
 	cpu &= MAX_CPUS - 1;
 	bit = 1ULL << (cpu & 63);
-	if (cake.qmask[cpu >> 6] & bit)
-		__atomic_fetch_and(&cake.qmask[cpu >> 6], ~bit, __ATOMIC_RELAXED);
+	if (cake.qmask[cpu >> 6] & bit) {
+		cake_stat_inc(CAKE_SITE_QMARK_CLR);
+		CAKE_TIMED_VOID(CAKE_SITE_T_QMARK,
+				__atomic_fetch_and(&cake.qmask[cpu >> 6], ~bit, __ATOMIC_RELAXED));
+	} else {
+		cake_stat_inc(CAKE_SITE_QMARK_CLR_SKIP);
+	}
 }
 
 static __always_inline bool cake_qmark_test(u32 cpu)
@@ -514,7 +738,7 @@ static __always_inline bool cake_qmark_test(u32 cpu)
  */
 static __noinline bool cake_cpu_dsq_idle(u32 cpu)
 {
-	return !scx_bpf_dsq_nr_queued((u64)cpu);
+	return !cake_nrq((u64)cpu);
 }
 
 /*
@@ -538,8 +762,10 @@ static __noinline void cake_qmark_publish(u32 cpu, bool queued)
  */
 static __always_inline void cake_wake_mark_set(void)
 {
-	if (!cake.wake_mark.word)
+	if (!cake.wake_mark.word) {
+		cake_stat_inc(CAKE_SITE_WAKE_MARK_ST);
 		cake.wake_mark.word = 1;
+	}
 }
 
 /* Loader-filled SMT map; -1 means the CPU has no online sibling. */
@@ -609,6 +835,7 @@ static __always_inline bool cake_core_contended(s32 cpu)
 	s32 sib = cpu_sibling[(u32)cpu & (MAX_CPUS - 1)];
 	struct task_struct *curr;
 
+	cake_stat_inc(CAKE_SITE_CORE_CONTENDED);
 	if (sib < 0)
 		return false;
 
@@ -650,7 +877,7 @@ static __noinline bool cake_cpu_tick_soon(s32 cpu)
 	/* An overdue next_event means the tick is firing right now; a
 	 * stopped nohz tick reads as far-future and never trips. */
 	next = (u64)ed->next_event;
-	return next <= bpf_ktime_get_ns() + cake_wake_hop_ns;
+	return next <= cake_now(CAKE_SITE_KT_TICKSOON) + cake_wake_hop_ns;
 }
 
 /* The two-truth cleanliness test, spelled once: chronically loud or
@@ -668,10 +895,10 @@ static __always_inline bool cake_cpu_clean(s32 cpu)
  * select_cpu it costs a spill there (§G38.1, §R.11). */
 static __noinline s32 cake_pick_idle_escape(struct task_struct *p __arg_trusted)
 {
-	s32 alt = scx_bpf_pick_idle_cpu(p->cpus_ptr, CAKE_PICK_IDLE_CORE);
+	s32 alt = cake_pick_idle(p->cpus_ptr, CAKE_PICK_IDLE_CORE);
 
 	if (alt < 0 || !cake_cpu_clean(alt))
-		alt = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		alt = cake_pick_idle(p->cpus_ptr, 0);
 
 	return alt;
 }
@@ -873,77 +1100,21 @@ static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
 	}
 
 	stamp = rs->stamp;
-	ran = bpf_ktime_get_ns() - stamp;
+	ran = cake_now(CAKE_SITE_KT_OCCUPANT) - stamp;
 	*ran_out = ran;
 	return cake_scale_vtime_add(cv, ran, cidx);
 }
 
-/*
- * DIAGNOSTIC PROBE — not for scoring. Per-arm placement census for
- * ops.select_cpu, so the mailbox hit rate is a measurement instead of an
- * assumption (STATE.md pillar 3 lists it unmeasured). Per-CPU map, plain
- * increment on this CPU's own copy: no atomic, no shared line, same shape
- * as cake_frame_hist. REVERT before any scoring run.
- */
-enum cake_stat {
-	CAKE_STAT_SELECT = 0,		/* ops.select_cpu entries */
-	CAKE_STAT_SERIAL,		/* serial-handoff arm placed */
-	CAKE_STAT_HOME,			/* prev-cpu warm home claim placed */
-	CAKE_STAT_PARK_REACHED,		/* cake_park_take called */
-	CAKE_STAT_PARK_PREV,		/* park_take won on prev warmth */
-	CAKE_STAT_PARK_MBOX,		/* park_take won on the mailbox */
-	CAKE_STAT_OPT_REACHED,		/* cake_optimistic_place called */
-	CAKE_STAT_OPT_HIT,		/* cake_optimistic_place placed */
-	CAKE_STAT_RANKED,		/* fell through to the ranked pick */
-	CAKE_STAT_WP_ATTEMPT,		/* wake_preempt reached with a live occupant */
-	CAKE_STAT_WP_TINY,		/* wakee burst <= 4us (microsecond-class shape) */
-	CAKE_STAT_WP_SMALL,		/* wakee burst <= 64us */
-	CAKE_STAT_WP_PROTECT,		/* rejected: protect window not met */
-	CAKE_STAT_WP_VTIME,		/* rejected: vtime bar */
-	CAKE_STAT_WP_STARVED,		/* rejected: pipeline-stage veto */
-	CAKE_STAT_WP_FIRED,		/* kick issued */
-	CAKE_STAT_FREE_PICK,		/* §G57 placed behind an earlier-free CPU */
-	CAKE_STAT_PREWAKE_FIRE,		/* §G58 timer fired on an idle CPU */
-	CAKE_STAT_RESERVED_TAKE,	/* §G58 wake took its reservation */
-	/* PROBE hold attribution: 5 queue kinds x {placed, wait>300us, wait>1ms} */
-	CAKE_STAT_PL_LOCAL,		/* select_cpu direct, own CPU (LOCAL) */
-	CAKE_STAT_PL_LOCAL_ON,		/* select_cpu direct, LOCAL_ON|cpu */
-	CAKE_STAT_PL_CPUQ_WAKE,		/* enqueue wake into a per-CPU DSQ */
-	CAKE_STAT_PL_CPUQ_CONT,		/* enqueue continuation into a per-CPU DSQ */
-	CAKE_STAT_PL_GLOBAL,		/* WAKE_DSQ */
-	CAKE_STAT_H3_LOCAL, CAKE_STAT_H3_LOCAL_ON, CAKE_STAT_H3_CPUQ_WAKE,
-	CAKE_STAT_H3_CPUQ_CONT, CAKE_STAT_H3_GLOBAL,
-	CAKE_STAT_H10_LOCAL, CAKE_STAT_H10_LOCAL_ON, CAKE_STAT_H10_CPUQ_WAKE,
-	CAKE_STAT_H10_CPUQ_CONT, CAKE_STAT_H10_GLOBAL,
-	CAKE_STAT_PL_SELF, CAKE_STAT_H3_SELF, CAKE_STAT_H10_SELF, /* LOCAL_ON to the calling CPU */
-	CAKE_STAT_HD_SKIP, CAKE_STAT_HD_SYNC, CAKE_STAT_HD_STARVED, CAKE_STAT_HD_IRQ,
-	CAKE_STAT_HD_AFF, CAKE_STAT_HD_CONTENDED, CAKE_STAT_HD_NOTIDLE, /* PROBE: home declines */
-	CAKE_STAT_HOME_BUSY,		/* home claim succeeded on a CPU with a running task */
-	CAKE_STAT_HOME_LOCALQ,		/* home claim succeeded on a CPU whose local DSQ is non-empty */
-	CAKE_STAT_H3_HOME_BUSY,		/* ... and the wakee then waited >300us */
-	CAKE_STAT_NR,
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, CAKE_STAT_NR);
-	__type(key, u32);
-	__type(value, u64);
-} cake_stats SEC(".maps");
-
-static __always_inline void cake_stat_inc(u32 idx)
-{
-	u64 *v;
-
-	if (!cake_tog_probe)
-		return;
-	v = bpf_map_lookup_elem(&cake_stats, &idx);
-
-	if (v)
-		(*v)++;
-}
-
 static u64 cake_core_free __attribute__((aligned(STATE_SLOT_BYTES)));
+
+/* §G83 host shape, loader-verified: every SMT pair is (c, c ^ cake_sib_xor)
+ * with both ids under 64, cake_sib_low_mask names the lower id of each
+ * pair, cake_solo_mask the CPUs with no sibling. Zero xor: shape not
+ * uniform (or no SMT), the construct stays on the published word. */
+const volatile u64 cake_sib_xor;
+const volatile u64 cake_sib_low_mask;
+const volatile u64 cake_solo_mask;
+static __always_inline u64 cake_core_word(void);
 static u64 cake_seat_word __attribute__((aligned(STATE_SLOT_BYTES)));
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 
@@ -999,7 +1170,7 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		return;
-	t->place_ns = bpf_ktime_get_ns();
+	t->place_ns = cake_now(CAKE_SITE_KT_PROBE);
 	t->target = (u32)dsq_id & (MAX_CPUS - 1);
 	t->caller = me;
 	{
@@ -1007,7 +1178,7 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 
 		t->waker_pid = w ? (u32)w->pid : 0;
 	}
-	t->seats = cake_seat_word; t->core_free = cake_core_free;
+	t->seats = cake_seat_word; t->core_free = cake_core_word();
 	t->thread_free = cake_idle_words[0]; t->idle_word = cake_idle_words[0];
 	if (cake_probe_busy_flag[me]) {
 		kind = 6;
@@ -1132,6 +1303,21 @@ static __always_inline u32 cake_idle_count(void)
 	return (u32)cake_idle_nr;
 }
 
+/* §G83: the whole-core word is a function of the thread census -- a core is
+ * whole when both sibling bits are up -- so update_idle keeps one word and
+ * the reader pays two shifts instead of every idle transition paying a
+ * second global atomic (172k/s on appsim, atomics census 2026-09-03). */
+static __always_inline u64 cake_core_word(void)
+{
+	if (cake_tog_g83 && cake_sib_xor) {
+		u64 idle = cake_idle_words[0];
+		u64 both = idle & (idle >> cake_sib_xor) & cake_sib_low_mask;
+
+		return both | (both << cake_sib_xor) | (idle & cake_solo_mask);
+	}
+	return cake_core_free;
+}
+
 /* §G71: the idle side publishes, the waker claims with ONE atomic. A CPU
  * entering idle sets its bit in the §G45 census word (the thread word,
  * §G82), and in core_free when its sibling is idle too; leaving idle clears
@@ -1176,6 +1362,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 {
 	u64 aff = p->cpus_ptr->bits[0];
 	u64 idle = cake_idle_words[0] & aff;
+	u64 core = cake_core_word();
 	u64 half = 0;
 	u32 k;
 
@@ -1188,7 +1375,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 	 * 1.1.3's even 10%; branch misses +34%). From then on the groove
 	 * (last_win) is its home; §G73 rotated on every wake and paid cold. */
 	if (cake_tog_g78 && groove < 0) {
-		u64 w = cake_core_free & aff;
+		u64 w = core & aff;
 
 		if (w) {
 			u32 r = (u32)__atomic_fetch_add(&cake_park_rotor, 1,
@@ -1196,15 +1383,15 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 			u64 hi = w & (~0ULL << r);
 			s32 c = (s32)__builtin_ctzll(hi ? hi : w);
 
-			if (scx_bpf_test_and_clear_cpu_idle(c))
+			if (cake_taci(c, CAKE_SITE_TACI_WARM))
 				return c;
 		}
 	}
 
 	/* §G75: the CPU this task last won, if it is a free whole core now. */
 	if (groove >= 0 && groove < 64 &&
-	    ((cake_core_free >> groove) & 1) && ((aff >> groove) & 1) &&
-	    scx_bpf_test_and_clear_cpu_idle(groove))
+	    ((core >> groove) & 1) && ((aff >> groove) & 1) &&
+	    cake_taci(groove, CAKE_SITE_TACI_GROOVE))
 		return groove;
 
 	/* §G71: one atomic on a published word replaces the scan. */
@@ -1212,7 +1399,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 		/* The published words CHOOSE (one read each); the kernel idle bit
 		 * CLAIMS (one kfunc). Two kfuncs at most per wake, no scan. */
 		u64 seats = cake_tog_g79 ? cake_seat_word : 0;
-		u64 w = cake_core_free & aff & ~seats;
+		u64 w = core & aff & ~seats;
 		/* §G73: the search starts at the task's own core and wraps,
 		 * so idle cores are used in turn instead of the lowest one
 		 * absorbing every placement (L2 thrash, cold every time). */
@@ -1220,12 +1407,12 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 		s32 c;
 
 		if (!w)
-			w = cake_core_free & aff;	/* only held cores left: take one */
+			w = core & aff;	/* only held cores left: take one */
 		if (w) {
 			u64 hi = w & (~0ULL << r);
 
 			c = (s32)__builtin_ctzll(hi ? hi : w);
-			if (scx_bpf_test_and_clear_cpu_idle(c))
+			if (cake_taci(c, CAKE_SITE_TACI_WARM_CORE))
 				return c;
 		}
 		w = cake_idle_words[0] & aff & ~seats;
@@ -1235,8 +1422,8 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 			u64 hi = w & (~0ULL << r);
 
 			c = (s32)__builtin_ctzll(hi ? hi : w);
-			if (c < 64 && !((cake_core_free >> c) & 1) &&
-			    scx_bpf_test_and_clear_cpu_idle(c))
+			if (c < 64 && !((core >> c) & 1) &&
+			    cake_taci(c, CAKE_SITE_TACI_WARM_THREAD))
 				return c;
 		}
 		return -1;
@@ -1253,7 +1440,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 
 		if (w && w->mm && w->mm == p->mm && sib >= 0 &&
 		    ((idle >> ((u32)sib & 63)) & 1) &&
-		    scx_bpf_test_and_clear_cpu_idle(sib))
+		    cake_taci(sib, CAKE_SITE_TACI_WARM))
 			return sib;
 	}
 	for (k = 0; k < DEPTH_SCAN_MAX && idle; k++) {
@@ -1264,14 +1451,14 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 			half |= 1ULL << (c & 63);
 			continue;
 		}
-		if (scx_bpf_test_and_clear_cpu_idle(c))
+		if (cake_taci(c, CAKE_SITE_TACI_WARM))
 			return c;
 	}
 	for (k = 0; k < 2 && half; k++) {
 		s32 c = (s32)__builtin_ctzll(half);
 
 		half &= half - 1;
-		if (scx_bpf_test_and_clear_cpu_idle(c))
+		if (cake_taci(c, CAKE_SITE_TACI_WARM))
 			return c;
 	}
 	return -1;
@@ -1292,7 +1479,7 @@ static __noinline void cake_kick_preempt(s32 cpu)
 		if (oc && oc->pid && (u32)oc->tgid == cake_vip_tgid)
 			return;
 	}
-	scx_bpf_kick_cpu(cpu, CAKE_KICK_PREEMPT);
+	cake_kick(cpu, CAKE_KICK_PREEMPT);
 }
 
 /* §G75 GROOVES: a task's own placement history. The home claim is the
@@ -1319,8 +1506,10 @@ static __always_inline struct cake_groove *cake_groove_of(struct task_struct *p)
 {
 	if (!cake_tog_g75)
 		return NULL;
-	return bpf_task_storage_get(&cake_grooves, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	cake_stat_inc(CAKE_SITE_TASK_STORAGE);
+	return CAKE_TIMED(CAKE_SITE_T_TASK_STORAGE,
+			  bpf_task_storage_get(&cake_grooves, p, 0,
+					       BPF_LOCAL_STORAGE_GET_F_CREATE));
 }
 
 /* §G61: a census placement is unverified -- the wakee goes into the local
@@ -1353,7 +1542,7 @@ static __noinline bool cake_system_serial(void)
 }
 
 /*
- * The liveness term: scx_bpf_dsq_nr_queued() counts tasks WAITING, never the
+ * The liveness term: cake_nrq() counts tasks WAITING, never the
  * one EXECUTING, so a CPU busy mid-slice reads as empty and the co-location
  * gate would admit onto it. Admit when there is no SCX occupant, or when the
  * occupant is within one handoff of the end of its OWN typical burst and so
@@ -1379,7 +1568,7 @@ static __noinline bool cake_handoff_yields(s32 tcpu)
 	if (!curr || !curr->scx.dsq_vtime)
 		return true;
 
-	ran = bpf_ktime_get_ns() -
+	ran = cake_now(CAKE_SITE_KT_HANDOFF) -
 	      cake.run[(u32)tcpu & (MAX_CPUS - 1)].stamp;
 	n = curr->nvcsw | 1;
 	lim = ran + cake_handoff_max_ns;
@@ -1505,7 +1694,7 @@ static __noinline bool cake_home_notify(struct task_struct *p, s32 tcpu)
 		 * only finds it through the steal ring. Measured on live
 		 * KovaaKs: every slow GameThread wake (>20 µs, p99 128 vs
 		 * native 6) had idle capacity and 75% an idle home (§G40). */
-		scx_bpf_kick_cpu(tcpu, CAKE_KICK_IDLE);
+		cake_kick(tcpu, CAKE_KICK_IDLE);
 		return true;
 	}
 
@@ -1585,7 +1774,7 @@ static __noinline s32 cake_shallowest_idle(struct task_struct *p __arg_trusted)
 	u32 k;
 
 	if (cake_tog_g58)
-		now = bpf_ktime_get_ns();
+		now = cake_now(CAKE_SITE_KT_PICKS);
 	for (k = 0; k < DEPTH_SCAN_MAX && idle; k++) {
 		u32 c = (u32)__builtin_ctzll(idle);
 		u64 e;
@@ -1632,7 +1821,7 @@ static __noinline s32 cake_free_pick(struct task_struct *p __arg_trusted,
 	if (!w)
 		return -1;
 
-	now = bpf_ktime_get_ns();
+	now = cake_now(CAKE_SITE_KT_PICKS);
 	home_at = cake.run[t].free_at;
 	if (time_before(home_at + SLICE_NS, now))
 		return -1;
@@ -1670,12 +1859,12 @@ static __noinline s32 cake_reserved_take(struct task_struct *p __arg_trusted,
 
 	if (rs->reserved_pid != (u64)(u32)p->pid)
 		return -1;
-	if (!time_before(bpf_ktime_get_ns(), rs->reserved_until)) {
+	if (!time_before(cake_now(CAKE_SITE_KT_PICKS), rs->reserved_until)) {
 		rs->reserved_pid = 0;
 		return -1;
 	}
 	if (!cake_affine(p, prev_cpu) ||
-	    !scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+	    !cake_taci(prev_cpu, CAKE_SITE_TACI_OTHER))
 		return -1;
 	rs->reserved_pid = 0;
 	cake_stat_inc(CAKE_STAT_RESERVED_TAKE);
@@ -1702,7 +1891,7 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 		    !cpu_irq_hot[pc] && cake_affine(p, prev_cpu) &&
 		    !(cake_tog_g60 && !cake_core_idle_census(pc)) &&
 		    !(cake_tog_g58 &&
-		      cake_reserved_for_other(p, pc, bpf_ktime_get_ns()))) {
+		      cake_reserved_for_other(p, pc, cake_now(CAKE_SITE_KT_PICKS)))) {
 			ocpu = prev_cpu;
 			cake_stat_inc(CAKE_STAT_PARK_PREV);
 		}
@@ -1719,7 +1908,7 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 			      !cake_core_idle_census((u32)mcpu)) &&
 			    !(cake_tog_g58 &&
 			      cake_reserved_for_other(p, (u32)mcpu,
-						      bpf_ktime_get_ns()))) {
+						      cake_now(CAKE_SITE_KT_PICKS)))) {
 				cake_mailbox[slot].word = 0;
 				ocpu = mcpu;
 				cake_stat_inc(CAKE_STAT_PARK_MBOX);
@@ -1746,7 +1935,7 @@ static __noinline s32 cake_park_take(struct task_struct *p __arg_trusted,
 	 * (hold attribution probe 2026-09-02: every >300 us hold sat in a
 	 * LOCAL_ON placement). Losing the claim falls through to the ranked
 	 * pick, which claims what it returns. */
-	if (cake_tog_g62 && !scx_bpf_test_and_clear_cpu_idle(ocpu))
+	if (cake_tog_g62 && !cake_taci(ocpu, CAKE_SITE_TACI_OTHER))
 		return -1;
 	cake_direct_clamp(p);
 	cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)ocpu,
@@ -1831,7 +2020,7 @@ static __noinline s32 cake_optimistic_place(struct task_struct *p __arg_trusted)
 
 	if (ocpu < 0)
 		return -1;
-	if (cake_tog_g62 && !scx_bpf_test_and_clear_cpu_idle(ocpu))
+	if (cake_tog_g62 && !cake_taci(ocpu, CAKE_SITE_TACI_OTHER))
 		return -1;	/* §G62: lost the race, see cake_park_take */
 	cake_direct_clamp(p);
 	cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)ocpu,
@@ -1960,12 +2149,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * (stage class, burst >= 64 us), so GameThread's 9,300 migrations get a
 	 * reason. Each gate is re-asked in order; the first refusal counts. */
 	if (cake_burst_ns(p) >= SEAT_BURST_MIN_NS && prev_cpu >= 0) {
+		cake_stat_inc(CAKE_SITE_STAGE_PROBE);
 		if (wake_flags & CAKE_WAKE_SYNC) cake_stat_inc(CAKE_STAT_HD_SYNC);
 		else if (cake_starved_turn(p)) cake_stat_inc(CAKE_STAT_HD_STARVED);
 		else if (cake_cpu_irq_bad(prev_cpu)) cake_stat_inc(CAKE_STAT_HD_IRQ);
 		else if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) cake_stat_inc(CAKE_STAT_HD_AFF);
 		else if (cake_core_contended(prev_cpu)) cake_stat_inc(CAKE_STAT_HD_CONTENDED);
-		else if (!scx_bpf_test_and_clear_cpu_idle(prev_cpu)) cake_stat_inc(CAKE_STAT_HD_NOTIDLE);
+		else if (!cake_taci(prev_cpu, CAKE_SITE_TACI_STAGE)) cake_stat_inc(CAKE_STAT_HD_NOTIDLE);
 		else {
 			/* the claim just succeeded: place, exactly as below */
 			if (gr)
@@ -1991,7 +2181,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		       !cake_starved_turn(p) && !cake_cpu_irq_bad(prev_cpu) &&
 		       bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
 	if (home_askable && !cake_core_contended(prev_cpu) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	    cake_taci(prev_cpu, CAKE_SITE_TACI_HOME)) {
 		if (gr)
 			gr->home_miss = 0;
 		{	/* PROBE: is the claimed CPU actually running someone? */
@@ -2002,7 +2192,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 				cake_stat_inc(CAKE_STAT_HOME_BUSY);
 				cake_probe_busy_flag[me] = 1;
 			}
-			if (scx_bpf_dsq_nr_queued(CAKE_DSQ_LOCAL_ON | (u32)prev_cpu) > 0)
+			if (cake_nrq(CAKE_DSQ_LOCAL_ON | (u32)prev_cpu) > 0)
 				cake_stat_inc(CAKE_STAT_HOME_LOCALQ);
 		}
 		cake_direct_clamp(p);
@@ -2031,7 +2221,7 @@ skip_home:
 		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 		    !cake_cpu_irq_bad(prev_cpu) &&
 		    cake_cpu_dsq_idle((u32)prev_cpu)) {
-			u64 now = bpf_ktime_get_ns();
+			u64 now = cake_now(CAKE_SITE_KT_PICKS);
 			u64 at = cake.run[(u32)prev_cpu & (MAX_CPUS - 1)].free_at;
 
 			if (time_after(at, now) &&
@@ -2232,8 +2422,10 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 	if (!cake_cpu_clean(cpu) || cake_core_contended(cpu))
 		return -1;
 
-	claimed = scx_bpf_test_and_clear_cpu_idle(cpu);
-	(void)__sync_val_compare_and_swap(&cake.idle_hint.word, h, 0);
+	claimed = cake_taci(cpu, CAKE_SITE_TACI_HINT);
+	cake_stat_inc(CAKE_SITE_HINT_CAS);
+	CAKE_TIMED_VOID(CAKE_SITE_T_HINT_CAS,
+			(void)__sync_val_compare_and_swap(&cake.idle_hint.word, h, 0));
 	return claimed ? cpu : -1;
 }
 
@@ -2250,10 +2442,10 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 
 	/* A whole idle core beats an idle thread beside a running one, and the
 	 * flag costs nothing when no core is free (§G38). */
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, CAKE_PICK_IDLE_CORE);
+	cpu = cake_pick_idle(p->cpus_ptr, CAKE_PICK_IDLE_CORE);
 
 	if (cpu < 0)
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		cpu = cake_pick_idle(p->cpus_ptr, 0);
 
 	if (cpu >= 0 && !cake_cpu_clean(cpu)) {
 		s32 alt = cake_pick_idle_escape(p);
@@ -2292,7 +2484,7 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 
 	idle = cake_pick_idle_clean(p);
 	if (idle >= 0) {
-		scx_bpf_kick_cpu(idle, CAKE_KICK_IDLE);
+		cake_kick(idle, CAKE_KICK_IDLE);
 		return 0;
 	}
 
@@ -2304,8 +2496,8 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 
 		if (sib >= 0 && cake_cpu_clean(sib) &&
 		    bpf_cpumask_test_cpu(sib, p->cpus_ptr) &&
-		    scx_bpf_test_and_clear_cpu_idle(sib)) {
-			scx_bpf_kick_cpu(sib, CAKE_KICK_IDLE);
+		    cake_taci(sib, CAKE_SITE_TACI_NOTIFY)) {
+			cake_kick(sib, CAKE_KICK_IDLE);
 			return 0;
 		}
 	}
@@ -2427,7 +2619,7 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 	 * splits its pair (the t32/t64 herd collapse). Probed lazily, so an
 	 * empty home never pays for the signal.
 	 */
-	if (route == ROUTE_GLOBAL && scx_bpf_dsq_nr_queued((u64)WAKE_DSQ))
+	if (route == ROUTE_GLOBAL && cake_nrq((u64)WAKE_DSQ))
 		route = ROUTE_HOME_QUEUE;
 	if (cake_tog_g63 || cake_tog_g65)
 		route = ROUTE_GLOBAL;	/* §G63/§G65: the pool, always */
@@ -2616,7 +2808,7 @@ kick_idle:
 
 	idle = cake_pick_idle_clean(p);
 	if (idle >= 0)
-		scx_bpf_kick_cpu(idle, CAKE_KICK_IDLE);
+		cake_kick(idle, CAKE_KICK_IDLE);
 }
 
 /*
@@ -2725,13 +2917,14 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 static __noinline bool cake_wake_starved(void)
 {
 	return time_before(cake.wake_served.word + WAKE_STARVE_WALL_NS,
-			   bpf_ktime_get_ns());
+			   cake_now(CAKE_SITE_KT_WAKECLOCK));
 }
 
 /* Record that someone served the global wake queue. */
 static __noinline void cake_wake_serve_stamp(void)
 {
-	cake.wake_served.word = bpf_ktime_get_ns();
+	cake_stat_inc(CAKE_SITE_WAKE_SERVED_ST);
+	cake.wake_served.word = cake_now(CAKE_SITE_KT_WAKECLOCK);
 }
 
 /*
@@ -2743,10 +2936,12 @@ static __noinline void cake_wake_serve_stamp(void)
  */
 static __noinline void cake_wake_idle_stamp(void)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = cake_now(CAKE_SITE_KT_WAKECLOCK);
 
-	if (time_before(cake.wake_served.word + WAKE_STARVE_REFRESH_NS, now))
+	if (time_before(cake.wake_served.word + WAKE_STARVE_REFRESH_NS, now)) {
+		cake_stat_inc(CAKE_SITE_WAKE_SERVED_ST);
 		cake.wake_served.word = now;
+	}
 }
 
 /*
@@ -2775,7 +2970,7 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	 * 78k runs/s on the game's own cores (bpfstats 2026-09-02) against
 	 * 1.1.3's 20 ns -- dispatch is where an idle-bound CPU spends its BPF. */
 	{
-		u32 own_n = (u32)scx_bpf_dsq_nr_queued((u64)ucpu);
+		u32 own_n = (u32)cake_nrq((u64)ucpu);
 		u32 wake_n;
 
 		own = own_n ? cake_dsq_peek((u64)ucpu) : NULL;
@@ -2786,9 +2981,11 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		 * unconditional second move used to heal (§G41), and trusting it
 		 * here stalled the game 20 ms. Two counts replace two iterators and
 		 * two blind moves on the empty path. */
-		wake_n = (u32)scx_bpf_dsq_nr_queued((u64)WAKE_DSQ);
-		if (wake_n)
+		wake_n = (u32)cake_nrq((u64)WAKE_DSQ);
+		if (wake_n) {
+			cake_stat_inc(CAKE_SITE_WAKE_MARK_ST);
 			cake.wake_mark.word = 1;
+		}
 		wake = wake_n ? cake_dsq_peek((u64)WAKE_DSQ) : NULL;
 		if (!wake_n) {
 			if (!own_n)
@@ -2849,9 +3046,24 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	{
 		u64 hint = (u64)(u32)cpu + 1;
+		u64 h = cake.idle_hint.word;
+		bool publish;
 
-		if (cake.idle_hint.word != hint)
+		/* §G84: a live hint stays; the store happens over an empty word
+		 * or one naming a CPU whose census bit is down (stale). The
+		 * store fired on 67% of dispatches for one claim per five
+		 * stores (census 2026-09-03). */
+		if (cake_tog_g84)
+			publish = !h ||
+				  (h != hint &&
+				   !((cake_idle_words[((u32)(h - 1) & (MAX_CPUS - 1)) >> 6]
+				      >> ((h - 1) & 63)) & 1));
+		else
+			publish = h != hint;
+		if (publish) {
+			cake_stat_inc(CAKE_SITE_IDLE_HINT_ST);
 			cake.idle_hint.word = hint;
+		}
 	}
 }
 
@@ -2888,8 +3100,8 @@ static int cake_prewake_fire(void *map, void *key, void *value)
 		return 0;
 	cake_stat_inc(CAKE_STAT_PREWAKE_FIRE);
 	rs->reserved_pid = pw->pid;
-	rs->reserved_until = bpf_ktime_get_ns() + pw->window;
-	scx_bpf_kick_cpu((s32)c, CAKE_KICK_IDLE);
+	rs->reserved_until = cake_now(CAKE_SITE_KT_PREWAKE) + pw->window;
+	cake_kick((s32)c, CAKE_KICK_IDLE);
 	return 0;
 }
 
@@ -2902,7 +3114,7 @@ static int cake_prewake_fire(void *map, void *key, void *value)
 static __noinline void cake_prewake_arm(struct task_struct *p __arg_trusted,
 					u64 used)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = cake_now(CAKE_SITE_KT_PREWAKE);
 	u64 n = p->nvcsw | 1;
 	u64 delta = now - p->start_time;
 	struct cake_prewake *pw;
@@ -2959,14 +3171,18 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * caller's CPU, whose smp id charged a foreign slot (§G42). */
 	u32 cpu = p->thread_info.cpu;
 	struct cake_run_slot *run = &cake.run[cpu & (MAX_CPUS - 1)];
-	u64 now = bpf_ktime_get_ns();
+	u64 now = cake_now(CAKE_SITE_KT_RUNNING);
 
 	run->stamp = now;
 	run->sum = p->se.sum_exec_runtime;
+	cake_stat_inc(CAKE_SITE_RUNNING);
+	CAKE_TIMED_VOID(CAKE_SITE_T_CAL, (void)0);
 	if (cake_tog_g79 && (cpu & (MAX_CPUS - 1)) < 64 &&
-	    (cake_seat_word >> (cpu & 63)) & 1)
+	    (cake_seat_word >> (cpu & 63)) & 1) {
+		cake_stat_inc(CAKE_SITE_SEAT_CLR);
 		__atomic_fetch_and(&cake_seat_word, ~(1ULL << (cpu & 63)),
 				   __ATOMIC_RELAXED);
+	}
 	cake_probe_run(p, now);
 
 	/*
@@ -2986,8 +3202,10 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
 	cake_frame_observe(p, now);
 
-	if (time_before(cake.frontier.word, task_vtime))
+	if (time_before(cake.frontier.word, task_vtime)) {
+		cake_stat_inc(CAKE_SITE_FRONTIER_ST);
 		cake.frontier.word = task_vtime;
+	}
 }
 
 /*
@@ -3010,9 +3228,11 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 	/* §G79: a blocking stage keeps its seat. */
 	if (cake_tog_g79 && !runnable && (cpu & (MAX_CPUS - 1)) < 64 &&
-	    cake_burst_ns(p) >= SEAT_BURST_MIN_NS)
+	    cake_burst_ns(p) >= SEAT_BURST_MIN_NS) {
+		cake_stat_inc(CAKE_SITE_SEAT_SET);
 		__atomic_fetch_or(&cake_seat_word, 1ULL << (cpu & 63),
 				  __ATOMIC_RELAXED);
+	}
 
 	/*
 	 * Count consecutive wake-then-block-quickly quanta. `used` is already
@@ -3063,6 +3283,7 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 	u64 bit = 1ULL << (c & 63);
 
 	if (idle) {
+		cake_stat_inc(CAKE_SITE_UI_ENTER);
 		/* §G82: one census word (the counter is wide hosts only), one
 		 * core word set only when the sibling's bit is already up. Two
 		 * siblings idling in the same instant can each miss the other
@@ -3070,24 +3291,30 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 		 * the kernel accepts the same race on its own smt mask, and the
 		 * idle claim still gates every placement. */
 		if (!(cake_idle_words[c >> 6] & bit)) {
-			__atomic_fetch_or(&cake_idle_words[c >> 6], bit,
-					  __ATOMIC_RELAXED);
+			cake_stat_inc(CAKE_SITE_UI_ENTER_IDLEW);
+			CAKE_TIMED_VOID(CAKE_SITE_T_UI_IDLEW,
+					__atomic_fetch_or(&cake_idle_words[c >> 6], bit,
+							  __ATOMIC_RELAXED));
 			if (nr_cpu_span > 64)
 				__atomic_fetch_add(&cake_idle_nr, 1,
 						   __ATOMIC_RELAXED);
 		}
-		if (cake_tog_g71 && c < 64) {
+		if (cake_tog_g71 && !cake_tog_g83 && c < 64) {
 			s32 sib = cpu_sibling[c];
 
 			if (sib < 0) {
-				__atomic_fetch_or(&cake_core_free, bit, __ATOMIC_RELEASE);
+				cake_stat_inc(CAKE_SITE_UI_ENTER_COREF);
+				CAKE_TIMED_VOID(CAKE_SITE_T_UI_COREF,
+						__atomic_fetch_or(&cake_core_free, bit, __ATOMIC_RELEASE));
 			} else if ((u32)sib < 64 &&
 				   (cake_idle_words[0] >> ((u32)sib & 63)) & 1) {
 				/* the sibling is idle AND still unclaimed: both
 				 * halves become whole cores */
-				__atomic_fetch_or(&cake_core_free,
-						  bit | (1ULL << ((u32)sib & 63)),
-						  __ATOMIC_RELEASE);
+				cake_stat_inc(CAKE_SITE_UI_ENTER_COREF);
+				CAKE_TIMED_VOID(CAKE_SITE_T_UI_COREF,
+						__atomic_fetch_or(&cake_core_free,
+								  bit | (1ULL << ((u32)sib & 63)),
+								  __ATOMIC_RELEASE));
 			}
 		}
 		/*
@@ -3129,25 +3356,31 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 			}
 		}
 	} else {
+		cake_stat_inc(CAKE_SITE_UI_EXIT);
 		/* §G82: the thread bit goes first, so a sibling idling behind
 		 * this exit reads a busy core; the core word pays an atomic only
 		 * when it holds a bit. */
 		if (cake_idle_words[c >> 6] & bit) {
-			__atomic_fetch_and(&cake_idle_words[c >> 6], ~bit,
-					   __ATOMIC_RELAXED);
+			cake_stat_inc(CAKE_SITE_UI_EXIT_IDLEW);
+			CAKE_TIMED_VOID(CAKE_SITE_T_UI_IDLEW,
+					__atomic_fetch_and(&cake_idle_words[c >> 6], ~bit,
+							   __ATOMIC_RELAXED));
 			if (nr_cpu_span > 64)
 				__atomic_fetch_sub(&cake_idle_nr, 1,
 						   __ATOMIC_RELAXED);
 		}
-		if (cake_tog_g71 && c < 64) {
+		if (cake_tog_g71 && !cake_tog_g83 && c < 64) {
 			s32 sib = cpu_sibling[c];
 			u64 clear = bit;
 
 			if (sib >= 0 && (u32)sib < 64)
 				clear |= 1ULL << ((u32)sib & 63);
-			if (cake_core_free & clear)
-				__atomic_fetch_and(&cake_core_free, ~clear,
-						   __ATOMIC_RELEASE);
+			if (cake_core_free & clear) {
+				cake_stat_inc(CAKE_SITE_UI_EXIT_COREF);
+				CAKE_TIMED_VOID(CAKE_SITE_T_UI_COREF,
+						__atomic_fetch_and(&cake_core_free, ~clear,
+								   __ATOMIC_RELEASE));
+			}
 		}
 		/* Retract (§G54): only our own entry; a raced consumer has
 		 * already taken it, and losing that race is benign. Off §G69
