@@ -198,8 +198,6 @@ impl<'a> Scheduler<'a> {
                 "g78" => rodata.cake_tog_g78 = on,
                 "g79" => rodata.cake_tog_g79 = on,
                 "g81" => rodata.cake_tog_g81 = on,
-                "g83" => rodata.cake_tog_g83 = on,
-                "g84" => rodata.cake_tog_g84 = on,
                 "m7" => rodata.cake_tog_m7 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
@@ -229,7 +227,7 @@ impl<'a> Scheduler<'a> {
         }
         let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} g83={} g84={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} m6={} m7={}",
             rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
@@ -258,8 +256,6 @@ impl<'a> Scheduler<'a> {
             rodata.cake_tog_g78,
             rodata.cake_tog_g79,
             rodata.cake_tog_g81,
-            rodata.cake_tog_g83,
-            rodata.cake_tog_g84,
             rodata.cake_tog_m6,
             rodata.cake_tog_m7
         );
@@ -428,46 +424,6 @@ impl<'a> Scheduler<'a> {
                 );
                 siblings[cpu] = sibling as i32;
             }
-        }
-
-        // §G83 host shape: one XOR distance for every SMT pair, both ids
-        // under 64, no core wider than two threads. Anything else leaves
-        // the xor at zero and the derived core word falls back to the
-        // published one -- no host loses the construct's correctness.
-        {
-            let mut xor: Option<u64> = Some(0);
-            let mut low_mask = 0u64;
-            let mut solo_mask = 0u64;
-            for core in topo.all_cores.values() {
-                let ids: Vec<usize> = core.cpus.keys().copied().collect();
-                match ids.as_slice() {
-                    [one] if *one < 64 => solo_mask |= 1u64 << one,
-                    [a, b] if *a < 64 && *b < 64 => {
-                        let k = (*a ^ *b) as u64;
-                        low_mask |= 1u64 << (*a).min(*b);
-                        xor = match xor {
-                            Some(0) if k.is_power_of_two() => Some(k),
-                            Some(x) if x == k => Some(x),
-                            _ => None,
-                        };
-                    }
-                    _ => xor = None,
-                }
-            }
-            let xor = xor.unwrap_or(0);
-            if xor != 0 {
-                rodata.cake_sib_xor = xor;
-                rodata.cake_sib_low_mask = low_mask;
-                rodata.cake_solo_mask = solo_mask;
-            }
-            info!(
-                "   g83     sibling xor {xor} low {low_mask:#x} solo {solo_mask:#x}{}",
-                if xor == 0 {
-                    " (shape not uniform: derived core word off)"
-                } else {
-                    ""
-                }
-            );
         }
 
         // Bootstrap each frame word in its SAFE direction. The clock starts

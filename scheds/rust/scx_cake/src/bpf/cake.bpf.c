@@ -493,8 +493,6 @@ const volatile u8 cake_tog_g77			= 1;	/* lean 2: steal ring skipped on an empty 
 const volatile u8 cake_tog_g78;			/* spread once, then stick: a task's first whole-core claim rotates, its groove keeps it (§G78) */
 const volatile u8 cake_tog_g79			= 1;	/* seat hold: a blocked stage keeps its core for its gap; other wakes skip it (§G79) */
 const volatile u8 cake_tog_g81			= 1;	/* stage-class tasks keep the warm home on SYNC wakes (§G81) */
-const volatile u8 cake_tog_g83;			/* whole-core word derived from the thread census, no core_free atomics (§G83) */
-const volatile u8 cake_tog_g84;			/* going-idle hint stored only over an empty or stale word (§G84) */
 
 /* §G58: how far ahead of a predicted wake the reservation fires. Loader:
  * twice the deepest cpuidle exit latency, or the default without a table. */
@@ -1106,15 +1104,6 @@ static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
 }
 
 static u64 cake_core_free __attribute__((aligned(STATE_SLOT_BYTES)));
-
-/* §G83 host shape, loader-verified: every SMT pair is (c, c ^ cake_sib_xor)
- * with both ids under 64, cake_sib_low_mask names the lower id of each
- * pair, cake_solo_mask the CPUs with no sibling. Zero xor: shape not
- * uniform (or no SMT), the construct stays on the published word. */
-const volatile u64 cake_sib_xor;
-const volatile u64 cake_sib_low_mask;
-const volatile u64 cake_solo_mask;
-static __always_inline u64 cake_core_word(void);
 static u64 cake_seat_word __attribute__((aligned(STATE_SLOT_BYTES)));
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 
@@ -1178,7 +1167,7 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 
 		t->waker_pid = w ? (u32)w->pid : 0;
 	}
-	t->seats = cake_seat_word; t->core_free = cake_core_word();
+	t->seats = cake_seat_word; t->core_free = cake_core_free;
 	t->thread_free = cake_idle_words[0]; t->idle_word = cake_idle_words[0];
 	if (cake_probe_busy_flag[me]) {
 		kind = 6;
@@ -1303,21 +1292,6 @@ static __always_inline u32 cake_idle_count(void)
 	return (u32)cake_idle_nr;
 }
 
-/* §G83: the whole-core word is a function of the thread census -- a core is
- * whole when both sibling bits are up -- so update_idle keeps one word and
- * the reader pays two shifts instead of every idle transition paying a
- * second global atomic (172k/s on appsim, atomics census 2026-09-03). */
-static __always_inline u64 cake_core_word(void)
-{
-	if (cake_tog_g83 && cake_sib_xor) {
-		u64 idle = cake_idle_words[0];
-		u64 both = idle & (idle >> cake_sib_xor) & cake_sib_low_mask;
-
-		return both | (both << cake_sib_xor) | (idle & cake_solo_mask);
-	}
-	return cake_core_free;
-}
-
 /* §G71: the idle side publishes, the waker claims with ONE atomic. A CPU
  * entering idle sets its bit in the §G45 census word (the thread word,
  * §G82), and in core_free when its sibling is idle too; leaving idle clears
@@ -1362,7 +1336,6 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 {
 	u64 aff = p->cpus_ptr->bits[0];
 	u64 idle = cake_idle_words[0] & aff;
-	u64 core = cake_core_word();
 	u64 half = 0;
 	u32 k;
 
@@ -1375,7 +1348,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 	 * 1.1.3's even 10%; branch misses +34%). From then on the groove
 	 * (last_win) is its home; §G73 rotated on every wake and paid cold. */
 	if (cake_tog_g78 && groove < 0) {
-		u64 w = core & aff;
+		u64 w = cake_core_free & aff;
 
 		if (w) {
 			u32 r = (u32)__atomic_fetch_add(&cake_park_rotor, 1,
@@ -1390,7 +1363,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 
 	/* §G75: the CPU this task last won, if it is a free whole core now. */
 	if (groove >= 0 && groove < 64 &&
-	    ((core >> groove) & 1) && ((aff >> groove) & 1) &&
+	    ((cake_core_free >> groove) & 1) && ((aff >> groove) & 1) &&
 	    cake_taci(groove, CAKE_SITE_TACI_GROOVE))
 		return groove;
 
@@ -1399,7 +1372,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 		/* The published words CHOOSE (one read each); the kernel idle bit
 		 * CLAIMS (one kfunc). Two kfuncs at most per wake, no scan. */
 		u64 seats = cake_tog_g79 ? cake_seat_word : 0;
-		u64 w = core & aff & ~seats;
+		u64 w = cake_core_free & aff & ~seats;
 		/* §G73: the search starts at the task's own core and wraps,
 		 * so idle cores are used in turn instead of the lowest one
 		 * absorbing every placement (L2 thrash, cold every time). */
@@ -1407,7 +1380,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 		s32 c;
 
 		if (!w)
-			w = core & aff;	/* only held cores left: take one */
+			w = cake_core_free & aff;	/* only held cores left: take one */
 		if (w) {
 			u64 hi = w & (~0ULL << r);
 
@@ -1422,7 +1395,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 			u64 hi = w & (~0ULL << r);
 
 			c = (s32)__builtin_ctzll(hi ? hi : w);
-			if (c < 64 && !((core >> c) & 1) &&
+			if (c < 64 && !((cake_core_free >> c) & 1) &&
 			    cake_taci(c, CAKE_SITE_TACI_WARM_THREAD))
 				return c;
 		}
@@ -3046,21 +3019,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	{
 		u64 hint = (u64)(u32)cpu + 1;
-		u64 h = cake.idle_hint.word;
-		bool publish;
 
-		/* §G84: a live hint stays; the store happens over an empty word
-		 * or one naming a CPU whose census bit is down (stale). The
-		 * store fired on 67% of dispatches for one claim per five
-		 * stores (census 2026-09-03). */
-		if (cake_tog_g84)
-			publish = !h ||
-				  (h != hint &&
-				   !((cake_idle_words[((u32)(h - 1) & (MAX_CPUS - 1)) >> 6]
-				      >> ((h - 1) & 63)) & 1));
-		else
-			publish = h != hint;
-		if (publish) {
+		if (cake.idle_hint.word != hint) {
 			cake_stat_inc(CAKE_SITE_IDLE_HINT_ST);
 			cake.idle_hint.word = hint;
 		}
@@ -3299,7 +3259,7 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 				__atomic_fetch_add(&cake_idle_nr, 1,
 						   __ATOMIC_RELAXED);
 		}
-		if (cake_tog_g71 && !cake_tog_g83 && c < 64) {
+		if (cake_tog_g71 && c < 64) {
 			s32 sib = cpu_sibling[c];
 
 			if (sib < 0) {
@@ -3369,7 +3329,7 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 				__atomic_fetch_sub(&cake_idle_nr, 1,
 						   __ATOMIC_RELAXED);
 		}
-		if (cake_tog_g71 && !cake_tog_g83 && c < 64) {
+		if (cake_tog_g71 && c < 64) {
 			s32 sib = cpu_sibling[c];
 			u64 clear = bit;
 
