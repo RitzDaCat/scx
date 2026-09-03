@@ -198,6 +198,8 @@ impl<'a> Scheduler<'a> {
                 "g78" => rodata.cake_tog_g78 = on,
                 "g79" => rodata.cake_tog_g79 = on,
                 "g81" => rodata.cake_tog_g81 = on,
+                "g83" => rodata.cake_tog_g83 = on,
+                "g84" => rodata.cake_tog_g84 = on,
                 "m7" => rodata.cake_tog_m7 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
@@ -227,7 +229,7 @@ impl<'a> Scheduler<'a> {
         }
         let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} g83={} g84={} m6={} m7={}",
             rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
@@ -256,6 +258,8 @@ impl<'a> Scheduler<'a> {
             rodata.cake_tog_g78,
             rodata.cake_tog_g79,
             rodata.cake_tog_g81,
+            rodata.cake_tog_g83,
+            rodata.cake_tog_g84,
             rodata.cake_tog_m6,
             rodata.cake_tog_m7
         );
@@ -424,6 +428,46 @@ impl<'a> Scheduler<'a> {
                 );
                 siblings[cpu] = sibling as i32;
             }
+        }
+
+        // §G83 host shape: one XOR distance for every SMT pair, both ids
+        // under 64, no core wider than two threads. Anything else leaves
+        // the xor at zero and the derived core word falls back to the
+        // published one -- no host loses the construct's correctness.
+        {
+            let mut xor: Option<u64> = Some(0);
+            let mut low_mask = 0u64;
+            let mut solo_mask = 0u64;
+            for core in topo.all_cores.values() {
+                let ids: Vec<usize> = core.cpus.keys().copied().collect();
+                match ids.as_slice() {
+                    [one] if *one < 64 => solo_mask |= 1u64 << one,
+                    [a, b] if *a < 64 && *b < 64 => {
+                        let k = (*a ^ *b) as u64;
+                        low_mask |= 1u64 << (*a).min(*b);
+                        xor = match xor {
+                            Some(0) if k.is_power_of_two() => Some(k),
+                            Some(x) if x == k => Some(x),
+                            _ => None,
+                        };
+                    }
+                    _ => xor = None,
+                }
+            }
+            let xor = xor.unwrap_or(0);
+            if xor != 0 {
+                rodata.cake_sib_xor = xor;
+                rodata.cake_sib_low_mask = low_mask;
+                rodata.cake_solo_mask = solo_mask;
+            }
+            info!(
+                "   g83     sibling xor {xor} low {low_mask:#x} solo {solo_mask:#x}{}",
+                if xor == 0 {
+                    " (shape not uniform: derived core word off)"
+                } else {
+                    ""
+                }
+            );
         }
 
         // Bootstrap each frame word in its SAFE direction. The clock starts
@@ -610,7 +654,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 47] = [
+            const NAMES: [&str; 117] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -658,6 +702,76 @@ impl<'a> Scheduler<'a> {
                 "home_busy",
                 "home_localq",
                 "h300_home_busy",
+                "ui_enter",
+                "ui_enter_idlew",
+                "ui_enter_coref",
+                "ui_exit",
+                "ui_exit_idlew",
+                "ui_exit_coref",
+                "qmark_set",
+                "qmark_set_skip",
+                "qmark_clr",
+                "qmark_clr_skip",
+                "seat_clr",
+                "seat_set",
+                "hint_cas",
+                "running",
+                "frontier_st",
+                "wake_served_st",
+                "wake_mark_st",
+                "idle_hint_st",
+                "taci",
+                "taci_win",
+                "taci_stage",
+                "taci_home",
+                "taci_groove",
+                "taci_warm_core",
+                "taci_warm_thread",
+                "taci_warm",
+                "taci_hint",
+                "taci_notify",
+                "taci_other",
+                "pick_idle",
+                "kick",
+                "nrq",
+                "dsq_insert",
+                "move_local",
+                "kt",
+                "kt_period",
+                "kt_ticksoon",
+                "kt_occupant",
+                "kt_handoff",
+                "kt_picks",
+                "kt_wakeclock",
+                "kt_prewake",
+                "kt_running",
+                "kt_probe",
+                "task_storage",
+                "cpu_curr",
+                "core_contended",
+                "stage_probe",
+                "taciw_stage",
+                "taciw_home",
+                "taciw_groove",
+                "taciw_warm_core",
+                "taciw_warm_thread",
+                "taciw_warm",
+                "taciw_hint",
+                "taciw_notify",
+                "taciw_other",
+                "t_nrq",
+                "t_taci",
+                "t_pick",
+                "t_kick",
+                "t_cpu_curr",
+                "t_task_storage",
+                "t_move",
+                "t_insert",
+                "t_ui_idlew",
+                "t_ui_coref",
+                "t_hint_cas",
+                "t_qmark",
+                "t_cal",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {
