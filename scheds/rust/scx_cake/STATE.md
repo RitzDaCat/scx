@@ -36,10 +36,17 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 snippet-scored against crate 1.1.3 at the KovaaKs menu. Best arm ties 1.1.3 on
 1% low / p99 / p99.9 and trails 2% on average fps. Machine on EEVDF, KovaaKs
 left open at the menu. Every diagnostic probe (placement census, hold attribution by queue
-kind, home-decline reasons, the hitch black box) is gated behind `--toggle
-probe=1` and costs nothing off; the winning stack (g65, g69, g71, g75, g77, g79, g81; g76 and g80 are
-unconditional) is the DEFAULT, each switchable off with `--toggle gNN=0`; the
-experiments (g60-g64, g66-g68, g70, g72-g74, g78, g82, g83, g84) default OFF.**
+kind, home-decline reasons, site counters, the hitch black box) is gated behind
+`--toggle probe=1` and costs nothing off. The shipped stack (§G65, §G69, §G71,
+§G75, §G77, §G79, §G81, §G76, §G80, §G82) is UNCONDITIONAL code since 2026-09-03;
+every default-off construct (g39b, g46, g51, g52, g56-g64, g66-g68, g70, g72-g74,
+g78, m6, m7, g83, g84) was removed from the tree under the rule below. Their
+rows stay in the ledger; their code is in git history at 0450303ae.**
+
+**Rule (maintainer, 2026-09-03): rejected constructs leave the code. STATE.md
+keeps the § number, the design and the numbers; the tree keeps only what ships
+or is under test. A toggle that is off by default is a construct under test,
+not a home. Regression arms come from receipts of earlier commits.**
 
 Rig: `runs/overnight_game_20260901/snip.py <arm> <arm> [<arm>]` — mirrored
 slots of `LOG_S` s MangoHud logging driven over the control socket, arms attached

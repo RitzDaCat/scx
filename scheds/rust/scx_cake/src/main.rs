@@ -57,10 +57,9 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
-    /// Campaign toggle `NAME=0|1` (g43, g44, g45, g46), repeatable. One
-    /// binary serves both arms of an on/off pair: the verifier deletes the
-    /// off arm at attach. Scaffolding for the 2026-08-22 toggle campaign
-    /// (STATE.md); defaults are tip behavior. Unknown names refuse to start.
+    /// Diagnostics toggle, `probe=1`: placement census, hold attribution,
+    /// site counters and the hitch black box. Rodata, so the verifier
+    /// deletes it all when off. Unknown names refuse to start.
     #[clap(long = "toggle", value_name = "NAME=0|1")]
     toggle: Vec<String>,
 }
@@ -169,189 +168,12 @@ impl<'a> Scheduler<'a> {
                 _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
             };
             match name {
-                "g39b" => rodata.cake_tog_g39b = on,
-                "g46" => rodata.cake_tog_g46 = on,
-                "m6" => rodata.cake_tog_m6 = on,
-                "g51" => rodata.cake_tog_g51 = on,
-                "g52" => rodata.cake_tog_g52 = on,
-                "g56" => rodata.cake_tog_g56 = on,
-                "g57" => rodata.cake_tog_g57 = on,
-                "g58" => rodata.cake_tog_g58 = on,
-                "g59" => rodata.cake_tog_g59 = on,
-                "g60" => rodata.cake_tog_g60 = on,
-                "g61" => rodata.cake_tog_g61 = on,
-                "g62" => rodata.cake_tog_g62 = on,
-                "g63" => rodata.cake_tog_g63 = on,
-                "g64" => rodata.cake_tog_g64 = on,
-                "g65" => rodata.cake_tog_g65 = on,
-                "g66" => rodata.cake_tog_g66 = on,
-                "g67" => rodata.cake_tog_g67 = on,
-                "g68" => rodata.cake_tog_g68 = on,
-                "g69" => rodata.cake_tog_g69 = on,
-                "g70" => rodata.cake_tog_g70 = on,
-                "g72" => rodata.cake_tog_g72 = on,
-                "g71" => rodata.cake_tog_g71 = on,
-                "g73" => rodata.cake_tog_g73 = on,
-                "g74" => rodata.cake_tog_g74 = on,
-                "g75" => rodata.cake_tog_g75 = on,
-                "g77" => rodata.cake_tog_g77 = on,
-                "g78" => rodata.cake_tog_g78 = on,
-                "g79" => rodata.cake_tog_g79 = on,
-                "g81" => rodata.cake_tog_g81 = on,
-                "m7" => rodata.cake_tog_m7 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
-        // §G59 reads the §G51 mirror, so it forces the producer on.
-        if rodata.cake_tog_g68 == 1 || rodata.cake_tog_g70 == 1 {
-            // EXPERIMENT §G68: the VIP process is found by comm prefix at attach.
-            let mut vip = 0u32;
-            if let Ok(rd) = std::fs::read_dir("/proc") {
-                for e in rd.flatten() {
-                    if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
-                        if comm.starts_with("FPSAimTrainer") {
-                            if let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
-                                vip = pid;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            rodata.cake_vip_tgid = vip;
-            info!("   g68     VIP process tgid {vip} (0 = not found, VIP inert)");
-        }
-        if rodata.cake_tog_g59 == 1 {
-            rodata.cake_tog_g51 = 1;
-        }
         let probe_on = rodata.cake_tog_probe == 1;
-        info!(
-            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} m6={} m7={}",
-            rodata.cake_tog_g39b,
-            rodata.cake_tog_g46,
-            rodata.cake_tog_g51,
-            rodata.cake_tog_g52,
-            rodata.cake_tog_g56,
-            rodata.cake_tog_g57,
-            rodata.cake_tog_g58,
-            rodata.cake_tog_g59,
-            rodata.cake_tog_g60,
-            rodata.cake_tog_g61,
-            rodata.cake_tog_g62,
-            rodata.cake_tog_g63,
-            rodata.cake_tog_g64,
-            rodata.cake_tog_g65,
-            rodata.cake_tog_g66,
-            rodata.cake_tog_g67,
-            rodata.cake_tog_g68,
-            rodata.cake_tog_g69,
-            rodata.cake_tog_g70,
-            rodata.cake_tog_g72,
-            rodata.cake_tog_g71,
-            rodata.cake_tog_g73,
-            rodata.cake_tog_g74,
-            rodata.cake_tog_g75,
-            rodata.cake_tog_g77,
-            rodata.cake_tog_g78,
-            rodata.cake_tog_g79,
-            rodata.cake_tog_g81,
-            rodata.cake_tog_m6,
-            rodata.cake_tog_m7
-        );
-
-        // §G51: cpuidle exit-latency table from sysfs; absent driver leaves
-        // zeros and the depth model inert. §G52: CPPC highest_perf per CPU.
-        let mut deepest_us = 0u32;
-        for i in 0..bpf_intf::consts_CAKE_CSTATE_TABLE as usize {
-            let path = format!("/sys/devices/system/cpu/cpu0/cpuidle/state{i}/latency");
-            if let Ok(s) = std::fs::read_to_string(&path) {
-                let us: u32 = s.trim().parse().unwrap_or(0);
-                rodata.cake_cstate_exit_us[i] = us;
-                deepest_us = deepest_us.max(us);
-            }
-        }
-        if rodata.cake_tog_g51 == 1 && deepest_us == 0 {
-            info!("   g51     no cpuidle driver: depth model inert");
-        }
-        // §G58: the lead covers the deepest exit twice over; a host without
-        // a cpuidle table gets the fixed default. Never a refusal.
-        rodata.cake_prewake_lead_ns = if deepest_us > 0 {
-            u64::from(deepest_us) * 2 * 1000
-        } else {
-            bpf_intf::consts_PREWAKE_LEAD_DEFAULT_NS as u64
-        };
-        if rodata.cake_tog_g58 == 1 {
-            info!(
-                "   g58     pre-wake lead {} us ({})",
-                rodata.cake_prewake_lead_ns / 1000,
-                if deepest_us > 0 {
-                    "2x deepest exit"
-                } else {
-                    "default, no cpuidle"
-                }
-            );
-        }
-        if rodata.cake_tog_g59 == 1 && deepest_us == 0 {
-            info!("   g59     no cpuidle table: depth pick is first fit");
-        }
-        let mut perf_seen = false;
-        for c in 0..*NR_CPU_IDS {
-            let path = format!("/sys/devices/system/cpu/cpu{c}/acpi_cppc/highest_perf");
-            if let Ok(s) = std::fs::read_to_string(&path) {
-                let v: u64 = s.trim().parse().unwrap_or(0);
-                rodata.cpu_perf_rank[c] = v.min(255) as u8;
-                perf_seen = perf_seen || v != 0;
-            }
-        }
-        if rodata.cake_tog_g52 == 1 && !perf_seen {
-            info!("   g52     no CPPC highest_perf: rank tiebreak inert");
-        }
-
-        // §G56 FOLD tables, from RUNTIME topology — never the build host.
-        // cpu -> compact LLC index, per-LLC qmask word (narrow hosts), and
-        // the per-home band order: own LLC first, then foreign LLCs by
-        // descending CPPC rank when g52 is live, id order otherwise. More
-        // LLCs than the table degrades the fold off (bands stay id-order,
-        // the toggle gate's span check keeps the walk), never a refusal.
-        let nr_llcs = topo.all_llcs.len().min(bpf_intf::consts_MAX_LLCS as usize);
-        let mut llc_rank = [0u8; bpf_intf::consts_MAX_LLCS as usize];
-        for (idx, llc) in topo.all_llcs.values().take(nr_llcs).enumerate() {
-            let mut word = 0u64;
-            for cpu in llc.all_cpus.keys().copied() {
-                if cpu < rodata.cake_cpu_llc.len() {
-                    rodata.cake_cpu_llc[cpu] = idx as u8;
-                }
-                if cpu < 64 {
-                    word |= 1u64 << cpu;
-                }
-                if cpu < *NR_CPU_IDS {
-                    llc_rank[idx] = llc_rank[idx].max(rodata.cpu_perf_rank[cpu]);
-                }
-            }
-            rodata.cake_llc_qword[idx] = word;
-        }
-        rodata.cake_nr_llcs = nr_llcs.max(1) as u32;
-        for home in 0..nr_llcs {
-            let mut foreign: Vec<usize> = (0..nr_llcs).filter(|&l| l != home).collect();
-            if rodata.cake_tog_g52 == 1 {
-                foreign.sort_by_key(|&l| std::cmp::Reverse(llc_rank[l]));
-            }
-            rodata.cake_llc_order[home][0] = home as u8;
-            for (b, l) in foreign.iter().enumerate() {
-                rodata.cake_llc_order[home][b + 1] = *l as u8;
-            }
-        }
-        if rodata.cake_tog_g56 == 1 {
-            info!(
-                "   g56     banded steal: {nr_llcs} LLC band(s), order {}",
-                if rodata.cake_tog_g52 == 1 {
-                    "rank"
-                } else {
-                    "id"
-                }
-            );
-        }
+        info!("   toggle  probe={}", rodata.cake_tog_probe);
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
         // Clamped so a probe perturbed by host load cannot mis-tune the
@@ -504,15 +326,6 @@ impl<'a> Scheduler<'a> {
         }
 
         // Load and attach.
-        // §G76: the cpuidle mirror tracepoint fires on every idle transition
-        // (2.7M/12 s on a polling-idle host); it is loaded only for its consumers.
-        let want_cpu_idle = skel
-            .maps
-            .rodata_data
-            .as_ref()
-            .map(|r| r.cake_tog_g51 == 1)
-            .unwrap_or(false);
-        skel.progs.cake_cpu_idle.set_autoload(want_cpu_idle);
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
@@ -529,12 +342,6 @@ impl<'a> Scheduler<'a> {
             match res {
                 Ok(link) => irq_links.push(link),
                 Err(e) => warn!("   irq     {name} hook failed ({e}); chronic steering only"),
-            }
-        }
-        if want_cpu_idle {
-            match skel.progs.cake_cpu_idle.attach() {
-                Ok(link) => irq_links.push(link),
-                Err(e) => warn!("   g51     cpu_idle hook failed ({e}); depth mirror off"),
             }
         }
 
@@ -610,16 +417,10 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 117] = [
+            const NAMES: [&str; 104] = [
                 "select_calls",
                 "serial",
                 "home_warm",
-                "park_reached",
-                "park_prev",
-                "park_mbox",
-                "opt_reached",
-                "opt_hit",
-                "ranked",
                 "wp_attempt",
                 "wp_tiny",
                 "wp_small",
@@ -627,9 +428,6 @@ impl<'a> Scheduler<'a> {
                 "wp_vtime",
                 "wp_starved",
                 "wp_fired",
-                "free_pick",
-                "prewake_fire",
-                "reserved_take",
                 "pl_local",
                 "pl_local_on",
                 "pl_cpuq_wake",
@@ -686,7 +484,6 @@ impl<'a> Scheduler<'a> {
                 "taci_warm",
                 "taci_hint",
                 "taci_notify",
-                "taci_other",
                 "pick_idle",
                 "kick",
                 "nrq",
@@ -697,9 +494,7 @@ impl<'a> Scheduler<'a> {
                 "kt_ticksoon",
                 "kt_occupant",
                 "kt_handoff",
-                "kt_picks",
                 "kt_wakeclock",
-                "kt_prewake",
                 "kt_running",
                 "kt_probe",
                 "task_storage",
@@ -714,7 +509,6 @@ impl<'a> Scheduler<'a> {
                 "taciw_warm",
                 "taciw_hint",
                 "taciw_notify",
-                "taciw_other",
                 "t_nrq",
                 "t_taci",
                 "t_pick",
@@ -780,7 +574,6 @@ impl<'a> Scheduler<'a> {
                 bss.cpu_irq_hot[cpu] = u8::from(*hot);
             }
         }
-        bss.cake_sink_gen = bss.cake_sink_gen.wrapping_add(1);
 
         if self.verbose || !self.sinks_logged {
             self.sinks_logged = true;
