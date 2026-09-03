@@ -39,7 +39,7 @@ left open at the menu. Every diagnostic probe (placement census, hold attributio
 kind, home-decline reasons, the hitch black box) is gated behind `--toggle
 probe=1` and costs nothing off; the winning stack (g65, g69, g71, g75, g77, g79, g81; g76 and g80 are
 unconditional) is the DEFAULT, each switchable off with `--toggle gNN=0`; the
-experiments (g60-g64, g66-g68, g70, g72-g74, g78, g82) default OFF.**
+experiments (g60-g64, g66-g68, g70, g72-g74, g78, g82, g83, g84) default OFF.**
 
 Rig: `runs/overnight_game_20260901/snip.py <arm> <arm> [<arm>]` — mirrored
 slots of `LOG_S` s MangoHud logging driven over the control socket, arms attached
@@ -111,6 +111,8 @@ whole of every slot (attach logs end in the clean detach line, nr_rejected 0;
 | g78 | rotor on the first whole-core claim + last_win as cpu+1 | 1% low 492: spreading is wrong here | drop; the cpu+1 encoding stays |
 | g79 | **seat hold**: a blocking stage-class thread keeps its core; other wakes skip held cores while any other is free | the win above; GameThread migrations were 12,629/28 s vs 1.1.3's 650 | keep, hitch OPEN |
 | §G82 | **one idle census word** (unconditional, no toggle): `thread_free` folded into `idle_words[0]`, `idle_nr` kept for hosts >64 CPUs only (popcount inside one word), §G54 park producer/retract behind `!g69`; update_idle entry 5 atomics -> 1-2, exit 4 -> 1-2 | 2026-09-02 KovaaKs menu, 4 mirrored rounds ABBA/BAAB, 20 s slots, 8/arm: avg 705.0 vs 702.9, p99 1.747 vs 1.779, p99.9 flat, ahead on avg+p99 in 4/4 rounds, ranges overlap (maintainer: keep on the consistent lean); 0 stalls in 47 attaches; loader now accepts `--toggle probe=1` (match arm was missing); the g79 first-frame hitch hit 1/8 plain slots, 0/23 probe-armed cycles, black box empty -- OPEN | **shipped** |
+| §G83 | **derived whole-core word**: `cake_core_word()` = idle_words & (idle_words >> sib_xor), loader-verified pair shape (xor 8 here), update_idle drops the core_free atomic (172k/s -> 0 on appsim) | 2026-09-03 KovaaKs menu, 2 four-arm rotations ABCDDCBA/DCBAABCD, 8 s slots, 4/arm, screen on: avg 702.8 vs base 705.7, 1% low 402.1 vs 401.4, 0.1% low 370.7 vs 368.0, p99 1.793 vs 1.741 -- level; the atomic is real CPU, invisible at the menu; 0 stalls | **rejected** (maintainer) |
+| §G84 | **hint store gate**: dispatch publishes the going-idle hint only over an empty or stale word (stores 94.8k/s -> 18k/s, hint claims 18.9k/s -> 8k/s) | same rotations: avg 696.5 vs 705.7, 1% low 401.5 vs 401.4, 0.1% low 366.7 vs 368.0, p99 1.779 vs 1.741; -9 fps avg, also -10 in a screen-off rotation (discarded as record, kept as hint): 4/4 rotations against. Combined g83+g84: avg 699.7, tails ahead (0.1% low 378.8), mixed | **rejected** (maintainer) |
 
 Why the average was behind (thread_cores.py, 1.1.3 vs stack): 1.1.3 GameThread
 650 migrations, stack 12,629 — a dxvk/render wake took GameThread's core in its
@@ -133,8 +135,13 @@ Tools added this session (all in `runs/overnight_game_20260901/`): `snip.py`
 
 Next: (1) close the g79 hitch (catch it without perf: bpftrace on the render
 thread's wake at log start, or make snip.py record the seat word at attach);
-(2) BPF self-cost: symbolized profile, then cut select_cpu to one storage
-lookup + one claim, update_idle to one atomic; (3) fold the stack into defaults
+(2) BPF self-cost: the atomics census (`runs/atomics_census_20260903/`,
+`--toggle probe=1` site counters + clock-pair timers) prices every site on
+appsim: dispatch move_to_local 161 ns x 131k/s is half of all BPF time,
+51% of idle claims lose (home 61%, warm_thread 62%), select pays one
+task-storage lookup (29 ns) + one clock read + divide per wake; update_idle
+to one atomic (§G83) was null at the menu -- the next lever is the failed
+claims and the move hit/miss split, not nanoseconds; (3) fold the stack into defaults
 once (1) closes, then the wallclock guard (`fast_ab.sh`) and a 60 s cycle.
 Probe branches: `probe/overnight-20260901-g63` (arms), `probe/g70-arm`.
 
