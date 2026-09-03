@@ -56,6 +56,7 @@ UEI_DEFINE(uei);
 	bpf_core_enum_value(enum scx_pick_idle_cpu_flags, SCX_PICK_IDLE_CORE)
 
 /* Declared ahead of the toggle block: the probe census below reads it. */
+const volatile u8 cake_tog_g85;			/* exclusive seat: strangers, pool kicks and the seat's own dispatch keep off a held seat (§G85) */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 
 /*
@@ -161,6 +162,10 @@ enum cake_stat {
 	CAKE_SITE_T_HINT_CAS,
 	CAKE_SITE_T_QMARK,
 	CAKE_SITE_T_CAL,
+	/* §G85 seat leaks, counted whether or not the toggle blocks them. */
+	CAKE_SITE_LEAK_HOME,
+	CAKE_SITE_LEAK_KICK,
+	CAKE_SITE_LEAK_DISPATCH,
 	CAKE_STAT_NR,
 };
 
@@ -350,7 +355,9 @@ struct cake_run_slot {
 	 * atomics, and it rides a line running/stopping already own (§R.18).
 	 */
 	u64 hint;
-	u64 pad[STATE_SLOT_WORDS - 3];
+	/* §G85: pid that holds this CPU's seat; valid while the seat bit is up. */
+	u64 seat_pid;
+	u64 pad[STATE_SLOT_WORDS - 4];
 };
 
 enum {
@@ -900,6 +907,20 @@ static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
 
 static u64 cake_core_free __attribute__((aligned(STATE_SLOT_BYTES)));
 static u64 cake_seat_word __attribute__((aligned(STATE_SLOT_BYTES)));
+
+/* §G85: is @cpu a seat held by a task other than @p? Counts the leak at
+ * @site every time; blocks the caller only under the toggle. */
+static __always_inline bool cake_seat_blocks(s32 cpu, const struct task_struct *p,
+					     u32 site)
+{
+	u32 c = (u32)cpu & (MAX_CPUS - 1);
+
+	if (c >= 64 || !((cake_seat_word >> c) & 1) ||
+	    cake.run[c].seat_pid == (u64)(u32)p->pid)
+		return false;
+	cake_stat_inc(site);
+	return cake_tog_g85;
+}
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 
 /* PROBE hold attribution -- not for scoring. */
@@ -1313,7 +1334,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	struct cake_groove *gr = cake_groove_of(p);
-	bool home_askable;
+	bool home_askable, seat_blocked;
 	s32 c;
 
 	cake_stat_inc(CAKE_STAT_SELECT);
@@ -1386,7 +1407,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	/* PROBE: which gate declines the warm home, for the biggest burst tasks
 	 * (stage class, burst >= 64 us), so GameThread's 9,300 migrations get a
 	 * reason. Each gate is re-asked in order; the first refusal counts. */
-	if (cake_burst_ns(p) >= SEAT_BURST_MIN_NS && prev_cpu >= 0) {
+	/* §G85: another task's held seat is not this task's home. */
+	seat_blocked = prev_cpu >= 0 &&
+		       cake_seat_blocks(prev_cpu, p, CAKE_SITE_LEAK_HOME);
+	if (cake_burst_ns(p) >= SEAT_BURST_MIN_NS && prev_cpu >= 0 &&
+	    !seat_blocked) {
 		cake_stat_inc(CAKE_SITE_STAGE_PROBE);
 		if (wake_flags & CAKE_WAKE_SYNC) cake_stat_inc(CAKE_STAT_HD_SYNC);
 		else if (cake_starved_turn(p)) cake_stat_inc(CAKE_STAT_HD_STARVED);
@@ -1415,7 +1440,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * 8,835 migrations vs 1.1.3's 650). */
 	home_askable = (!(wake_flags & CAKE_WAKE_SYNC) ||
 			cake_burst_ns(p) >= SEAT_BURST_MIN_NS) &&
-		       prev_cpu >= 0 &&
+		       prev_cpu >= 0 && !seat_blocked &&
 		       !cake_starved_turn(p) && !cake_cpu_irq_bad(prev_cpu) &&
 		       bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
 	if (home_askable && !cake_core_contended(prev_cpu) &&
@@ -1490,11 +1515,26 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
  * is idle it still wins -- any CPU beats queueing. */
 static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 {
-	/* The hint short-circuits the scans; a miss costs one word read (§G43). */
-	s32 cpu = cake_idle_hint_claim(p);
+	s32 cpu;
 
+	/* §G85: an idle CPU that is nobody's seat, from the census, first;
+	 * held seats are taken only when nothing else is idle. */
+	if (cake_tog_g85 && nr_cpu_span <= 64) {
+		u64 w = cake_idle_words[0] & p->cpus_ptr->bits[0] &
+			~cake_seat_word;
+
+		if (w) {
+			cpu = (s32)__builtin_ctzll(w);
+			if (cake_cpu_clean(cpu) &&
+			    cake_taci(cpu, CAKE_SITE_TACI_NOTIFY))
+				return cpu;
+		}
+	}
+
+	/* The hint short-circuits the scans; a miss costs one word read (§G43). */
+	cpu = cake_idle_hint_claim(p);
 	if (cpu >= 0)
-		return cpu;
+		goto out;
 
 	/* A whole idle core beats an idle thread beside a running one, and the
 	 * flag costs nothing when no core is free (§G38). */
@@ -1509,6 +1549,10 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 		if (alt >= 0 && cake_cpu_clean(alt))
 			cpu = alt;
 	}
+out:
+	/* §G85 leak 2: the pool kick is about to land on a held seat. */
+	if (cpu >= 0 && (u32)cpu < 64 && ((cake_seat_word >> cpu) & 1))
+		cake_stat_inc(CAKE_SITE_LEAK_KICK);
 	return cpu;
 }
 
@@ -1885,6 +1929,18 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 			cake_stat_inc(CAKE_SITE_WAKE_MARK_ST);
 			cake.wake_mark.word = 1;
 		}
+		/* §G85 leak 3: a held seat with an empty own queue would take
+		 * pool work or steal, and its stage thread would return to a
+		 * busy CPU (the hold). While another idle CPU is nobody's seat,
+		 * the seat stays idle; that CPU was kicked for the pool wake. */
+		if (!own_n && nr_cpu_span <= 64 && ucpu < 64 &&
+		    ((cake_seat_word >> ucpu) & 1) &&
+		    (cake_idle_words[0] & ~cake_seat_word)) {
+			if (wake_n || (cake.qmask[0] & ~(1ULL << ucpu)))
+				cake_stat_inc(CAKE_SITE_LEAK_DISPATCH);
+			/* count only: blocking it stranded pool wakes on appsim
+			 * (p99 0.65 -> 0.80 ms, probe_g85 2026-09-03) */
+		}
 		wake = wake_n ? cake_dsq_peek((u64)WAKE_DSQ) : NULL;
 		if (!wake_n) {
 			if (!own_n)
@@ -2010,6 +2066,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	if (!runnable && (cpu & (MAX_CPUS - 1)) < 64 &&
 	    cake_burst_ns(p) >= SEAT_BURST_MIN_NS) {
 		cake_stat_inc(CAKE_SITE_SEAT_SET);
+		rs->seat_pid = (u64)(u32)p->pid;
 		__atomic_fetch_or(&cake_seat_word, 1ULL << (cpu & 63),
 				  __ATOMIC_RELAXED);
 	}
