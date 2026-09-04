@@ -32,6 +32,79 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-09-04 18:00 — CROSS-SCHEDULER SPOT CHECK (HD2, max preset,
+GPU-bound) + §G85 seat rules + §G86 claim retry. Machine on EEVDF, HD2 open.
+§G85 and §G86 SHIPPED (maintainer 2026-09-04, "pure wins"): both toggles
+removed, the code is unconditional; the regression arm is the 2026-09-03
+receipt `n0903-g85base` (seat rules and retry absent). Only `--toggle
+probe=1` remains.**
+
+Rig: `scx_cake_bench/runs/xsched_20260904/` — `xsched.py` (N-arm mirrored
+MangoHud snippets, ops-name identity + sha256 per slot, game/ext CPU % and
+GPU covariates; arms in `arms/*.json`, any scheduler binary), `cpuattr.py`
+(perf stat + per-thread CPU and preemptions per arm), `chaincap.py` +
+`gpuchain.py` / `kthreadhop.py` / `idleatwake.py` (nvidia-ISR wake chain,
+hop by hop, class IDLE/PREEMPT/WAITED, idle CPUs available at each queued
+wake), `framecap.py` + `frameautopsy.py` (MangoHud frames aligned to a sched
+trace; per-frame waits). Competitors in tree: lavd 1.1.3 `--performance`,
+cosmos 1.1.6 `-c 0 -p 0` (scx_loader gaming_mode flags), pandemonium 5.19.0
+defaults. lavd and cosmos need `SCX_STATS_BASE_PATH` set to a writable dir
+(sudoless): that env read lives in `rust/scx_stats/src/server.rs` as a LOCAL
+skip-worktree patch (2026-07-06), not in HEAD; cargo missed it until
+`touch rust/scx_stats/src/*.rs`.
+
+**HD2 max preset (GPU 99%, 2730 MHz, 109 fps): every scheduler ties on avg;
+tails at 20 s slots, 2/arm (first read, HEAD g85 off):** native 87.6 / 83.3
+/ 11.142 / 11.777 (1% low / 0.1% low / p99 / p99.9), cake 90.4 / 85.2 /
+10.700 / 11.433, lavd 83.7 / 61.9 / 10.762 / 11.717 (one 46 ms frame),
+cosmos 91.6 / 89.2 / 10.640 / 11.130, pandemonium 87.7 / 83.3 / 11.069 /
+11.864. Cosmos ahead of cake on 0.1% low 2/2 and p99.9 2/2.
+
+**Why cake's game CPU time is lower (perf stat, 10 s/arm):** instructions
+equal (53.3-54.1 G/s), cycles 25.75 vs 27.05-27.2 G/s, IPC 2.100 vs
+1.962-1.972 (pandemonium 1.747); the saving is the seven `ad pool !LP wor`
+threads (28 us bursts, below seat class) at 62% vs 90-101%: placement, not
+switches (cs 74.5k vs 75.8-77.4k/s). Same data: cake preempts the renderer
+threads 1491/s vs cosmos 464, lavd 359 -- the main render thread runs 62 ms
+bursts, slice cap 1.5 ms, cosmos's slice is 1 ms, so occupancy, not slice.
+
+| toggle | construct | read | verdict |
+|---|---|---|---|
+| §G85 | **exclusive seat**: seat_pid in the run slot; a stranger's home claim and the pool kick skip a held seat; (added 2026-09-04) a stage on its own seat is immune to the wake preempt (`seat_immune`); a returning holder that finds a non-stage, unpinned occupant takes the seat back with a preempt kick (`seat_retake`) and the occupant's re-enqueue goes to the pool (`seat_reroute`, `retake` flag in the slot, cleared by running); a held seat's dispatch declines pool work and kicks an idle non-seat CPU instead (`seat_decline`) | HD2: renderer preempts 1128 -> 860/s (main render thread 486 -> 333), total nvol 2416 -> 2103; census 12 s: immune 91/s, retake 325/s, reroute 295/s, decline 1810/s; frames 20 s x 4/arm: 0.1% low 85.7 vs 85.0, p99 10.700 vs 10.824, p99.9 11.460 vs 11.529 (lean, ranges overlap); pool kicks landing on idle seats 527 -> 1555/s (declined seats stay idle and the fallthrough pick takes them when the lowest free bit is a sink) -- OPEN | **shipped** (maintainer 2026-09-04) |
+| §G86 | **claim retry + kthread pool**: `claim_warm` and the seat-aware pick walk up to `CLAIM_TRIES`=4 bits of the idle word (the word lags the kernel bit by one claim window, every waker read the same lowest bit: one try won 53% core / 14% thread / 15% notify claims); an unbound kthread wake with no claimed CPU takes the pool + notify instead of the busy prev CPU's local queue | census: direct claimed placements 58 -> 85% of wakes, pool 31 -> 11%, holds >300 us 3341 -> 105 (global) and 676 -> 12 (local) per 12 s, thread-claim win 14 -> 44%, kt_pool 285/s; chain trace: nvidia-modeset hop p99 369 -> 125 us (max 2651 -> 511; cosmos 189, native 41), nvidia-drm p99 1263 -> 124, ISR -> last hop p99 482 -> 267 (cosmos 317, native 377), `!LP` worker pool waits 33.7 -> 18.1% (p99 169 -> 82 us), fence/swapchain max 743/2606 -> 302/455 us (cosmos 354/357); frames 20 s x 4/arm vs g85-only vs cosmos: 91.7 / 87.6 / 10.580 / 11.305 vs 91.9 / 86.7 / 10.550 / 11.259 vs 92.7 / 88.0 / 10.529 / 11.072 -- tie | **shipped** (maintainer 2026-09-04) |
+
+**The GPU wait chain, wallclock per hop (us p50 / p99), one 20 s trace per
+arm:** ISR duration 19-20 / 31-32 on every arm; ISR -> `vkd3d_fence` running
+native 1 / 230, cake 1 / 172 (g85), 1 / 147 (g86), cosmos 1 / 195; ISR ->
+next submit ioctl 521-584 / 4373-4565 everywhere; nvidia IRQ inter-arrival
+p99 3.07-3.11 ms, no gap over 12 ms on any arm. The only hop that differed
+was the display kthreads (`nvidia-modeset/kthread_q`, `nvidia-drm/timeline`)
+the ISR wakes: under cake they queued behind a game worker 6-9% of the
+time (native 0.6%) while another CPU was idle 95% of those times
+(`idleatwake.py`; native 19-44%, cosmos 2-20%) -- the kthread fallback to
+the busy prev CPU with no preempt, plus the one-try claim. §G86 answers
+both. **Slow-frame autopsy (frames >= 11 ms, MangoHud aligned to the
+trace):** cake-g86 1 slow frame in 2135, cosmos 6 in 2143; inside them the
+worst scheduling wait was 96 us (cake) / 165 us (cosmos), no IRQ gap, fewer
+waits than a normal frame: at this preset the tail is GPU/app, not the
+scheduler. Frame parity is the ceiling here; the scheduler separates in a
+CPU-bound regime (KovaaKs menu, or HD2 at a lower preset). Cake before ->
+after, 4/arm: 1% low 89.8 -> 91.7, 0.1% low 85.0 -> 87.6, p99 10.824 ->
+10.580, p99.9 11.529 -> 11.305; gap to cosmos on 0.1% low -3.4 -> -0.4 fps.
+
+Spills (`fnspills.py`, release object, spills/fills): select_cpu 61/59 vs
+57/40 on the 2026-09-03 receipt, enqueue 16/8 vs 14/10, dispatch_search
+unchanged; TOTAL 269/131 vs 246/106 -- the retry loops and the retake.
+
+Owed, in order: (1) KovaaKs menu mirrored screen, shipped vs the
+2026-09-03 receipt, 8/arm, then the wallclock fast ABBA (pipe + messaging)
+-- the claim retry touches every wake; a regression there reopens the
+decision; (2) HD2 at a
+CPU-bound preset, 4-arm rotation vs cosmos / lavd / pandemonium; (3) the
+seat pick fallthrough onto idle seats (skip sink bits inside the seat-aware
+pick); (4) `ext%` under cake (32-45% of a CPU vs 17-26 native/cosmos) is not
+a user process (per-process deltas identical) -- kernel-side, unowned.
+
 **PICKUP 2026-09-02 11:30 — VELOCITY SESSION: 14 constructs g60-g73 built and
 snippet-scored against crate 1.1.3 at the KovaaKs menu. Best arm ties 1.1.3 on
 1% low / p99 / p99.9 and trails 2% on average fps. Machine on EEVDF, KovaaKs
@@ -722,6 +795,9 @@ real session), live replica (loader logic run standalone on the live host), audi
 
 | # | change | evidence | verdict | key numbers |
 |---|---|---|---|---|
+| **G86** | **claim retry across the idle word + unbound kthread wake takes the pool** | **CENSUS + WAKE + FRAME (HD2 GPU-bound)** | ✅ **SHIPPED 2026-09-04** | holds >300 us **3341 -> 105** /12 s; display kthread hop p99 **369 -> 125 us**; ISR->last hop p99 482 -> 267 (cosmos 317, native 377); frames tie cosmos; under test |
+| **G85** | **exclusive seat: immune / retake / reroute / decline** | **ATTR + FRAME (HD2 GPU-bound)** | ✅ **SHIPPED 2026-09-04** | renderer preempts **1128 -> 860/s**; 0.1% low 85.7 vs 85.0, p99.9 11.460 vs 11.529 (overlap) |
+| — | **cross-scheduler HD2 max preset** (native / cake / lavd / cosmos / pandemonium) | **FRAME, 20 s x 2-4/arm** | ⚖️ **all 109 fps; cosmos tails ahead of HEAD by 0.3 ms p99.9, tie after G85+G86** | slow frames are GPU-side on every arm (autopsy); CPU-bound rotation owed |
 | G10.2/3 | route on burst CLASS, not the wakeup bit | STATIC | **unmeasured** | — |
 | G10.4/5 | per-task slice; stages preempt-immune | STATIC | **unmeasured** | +230 insns |
 | G10.6 | chain-gate the cadence dose | STATIC | **unmeasured** | 0 spills, 1450 insns |
