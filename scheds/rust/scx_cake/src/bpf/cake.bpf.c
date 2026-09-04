@@ -63,6 +63,11 @@ const volatile u8 cake_tog_g87 = 1;		/* §G87 wakee-bounded protect window and p
 const volatile u8 cake_tog_g90;			/* producer rank: a stage that wakes >= FANOUT_MIN tasks per burst inserts deeper and preempts through the protect window (§G90) */
 const volatile u8 cake_tog_g91;			/* stage slice: two bursts capped at one engine frame (<= STAGE_SLICE_MAX_NS) instead of half the clamped period (§G91) */
 const volatile u8 cake_tog_g92;			/* a stage at the pool head is served ahead of a non-stage own head without the one-slice margin (§G92) */
+const volatile u8 cake_tog_g93;			/* warm home with a busy sibling before a cold idle thread; the groove gate asks a home the census shows idle (§G93) */
+const volatile u8 cake_tog_g94;			/* census walks start at the task's previous CPU and wrap, not at bit 0 (§G94) */
+const volatile u8 cake_tog_g95;			/* a successful claim clears cake's idle and core bits at once, not at the next update_idle (§G95) */
+const volatile u8 cake_tog_g96;			/* HINT_SLOTS going-idle hints per LLC, publish by cpu, claim from the wakee's slot first (§G96) */
+const volatile u8 cake_tog_g97;			/* census walks skip interrupt sinks while a clean idle CPU exists (§G97) */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 
 /*
@@ -200,6 +205,12 @@ enum cake_stat {
 	CAKE_SITE_PRODUCER_PREEMPT,
 	CAKE_SITE_STAGE_SLICE,
 	CAKE_SITE_POOL_STAGE_FIRST,
+	/* §G93-§G97 fires */
+	CAKE_SITE_G93_HOME,
+	CAKE_SITE_G93_ASK,
+	CAKE_SITE_G95_CLEAR,
+	CAKE_SITE_G96_SLOT,
+	CAKE_SITE_G97_SKIP,
 	CAKE_STAT_NR,
 };
 
@@ -603,7 +614,7 @@ struct cake_state {
 	 * going-idle dispatch so the wake path can claim it with a single
 	 * test-and-clear instead of an idle-mask scan (§G43).
 	 */
-	struct cake_slot idle_hint[MAX_LLCS];
+	struct cake_slot idle_hint[MAX_LLCS * HINT_SLOTS];
 	/*
 	 * "DSQ[i] may hold work" hint gating the steal ring, one bit per CPU, so
 	 * a going-idle dispatch reads QMASK_WORDS words instead of probing one
@@ -704,6 +715,8 @@ const volatile s32 cpu_sibling[MAX_CPUS];
 /* Loader-maintained, LIVE (§G21, §G30): sink-ness follows device load, so
  * the loader re-probes on its run loop. */
 u8 cpu_irq_hot[MAX_CPUS];
+/* §G97: the same sink set as one word (CPUs < 64), loader-published. */
+u64 cake_sink_word __attribute__((aligned(STATE_SLOT_BYTES)));
 
 /* Kernel-pushed, live to the instruction (§G35): handler entry/exit
  * tracepoints keep a per-CPU in-handler depth. Only the owning CPU writes;
@@ -998,6 +1011,50 @@ static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)
 /* PROBE scratch: was the pool head this CPU is about to take from another die. */
 static u8 cake_probe_pool_x[MAX_CPUS];
 
+/* §G94: the first set bit of @w at or after @start, wrapping; bit 0 first
+ * when the toggle is off. Every waker starting at the same bit is the herd
+ * the audit measured as 30% contended claims. */
+static __always_inline s32 cake_pick_bit(u64 w, u32 start)
+{
+	u32 st = cake_tog_g94 ? (start & 63) : 0;
+	u64 r = st ? ((w >> st) | (w << (64 - st))) : w;
+
+	return (s32)(((u32)__builtin_ctzll(r) + st) & 63);
+}
+
+/* §G97: prefer the bits that are not interrupt sinks; a sink only when
+ * nothing else is idle. */
+static __always_inline u64 cake_prefer_clean(u64 w)
+{
+	if (cake_tog_g97) {
+		u64 c = w & ~cake_sink_word;
+
+		if (c != w)
+			cake_stat_inc(CAKE_SITE_G97_SKIP);
+		if (c)
+			return c;
+	}
+	return w;
+}
+
+/* §G95: a won claim retires the census bits at once, so the next waker
+ * does not read a CPU that is already spoken for. The idle edge clears
+ * them again later, idempotently. */
+static __always_inline void cake_claim_retire(s32 cpu)
+{
+	u32 c = (u32)cpu & 63;
+	s32 sib;
+
+	if (!cake_tog_g95 || (u32)cpu >= 64)
+		return;
+	cake_stat_inc(CAKE_SITE_G95_CLEAR);
+	__atomic_fetch_and(&cake_idle_words[0], ~(1ULL << c), __ATOMIC_RELAXED);
+	sib = cpu_sibling[(u32)cpu & (MAX_CPUS - 1)];
+	__atomic_fetch_and(&cake_core_free,
+			   ~((1ULL << c) | (sib >= 0 && sib < 64 ? 1ULL << sib : 0)),
+			   __ATOMIC_RELAXED);
+}
+
 /* PROBE hold attribution -- not for scoring. */
 struct cake_probe_tag {
 	u64 place_ns;
@@ -1281,9 +1338,10 @@ static __always_inline u32 cake_idle_count(void)
  * second waker can never stack behind it. Narrow hosts only; -1 sends the
  * wake to the pool. */
 static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
-				      s32 groove)
+				      s32 groove, bool warm_half)
 {
 	u64 aff = p->cpus_ptr->bits[0];
+	u32 prev = (u32)p->thread_info.cpu & (MAX_CPUS - 1);
 	u64 seats, w;
 	s32 c;
 	int i;
@@ -1292,13 +1350,15 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 		return -1;
 	/* §G88: a claim stays inside the task's own LLC; a die with nothing
 	 * idle sends the wake to the pool, never across the L3 boundary. */
-	aff &= cpu_llc_word[(u32)p->thread_info.cpu & (MAX_CPUS - 1)];
+	aff &= cpu_llc_word[prev];
 
 	/* §G75: the CPU this task last won, if it is a free whole core now. */
 	if (groove >= 0 && groove < 64 &&
 	    ((cake_core_free >> groove) & 1) && ((aff >> groove) & 1) &&
-	    cake_taci(groove, CAKE_SITE_TACI_GROOVE))
+	    cake_taci(groove, CAKE_SITE_TACI_GROOVE)) {
+		cake_claim_retire(groove);
 		return groove;
+	}
 
 	/* §G71: the published words CHOOSE (one read each); the kernel idle
 	 * bit CLAIMS (one kfunc). Two kfuncs at most per wake, no scan. §G79:
@@ -1311,29 +1371,46 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 	w = cake_core_free & aff & ~seats;
 	if (!w)
 		w = cake_core_free & aff;	/* only held cores left: take one */
+	w = cake_prefer_clean(w);
 	for (i = 0; i < CLAIM_TRIES && w; i++) {
-		c = (s32)__builtin_ctzll(w);
+		c = cake_pick_bit(w, prev);
 		if (i)
 			cake_stat_inc(CAKE_SITE_CLAIM_RETRY);
-		if (cake_taci(c, CAKE_SITE_TACI_WARM_CORE))
+		if (cake_taci(c, CAKE_SITE_TACI_WARM_CORE)) {
+			cake_claim_retire(c);
 			return c;
+		}
 		if (!cake_tog_g86)
 			break;
-		w &= w - 1;
+		w &= ~(1ULL << ((u32)c & 63));
+	}
+	/* §G93: no whole core is free. The warm home with a busy sibling is
+	 * the same offer as any idle thread beside a busy one, plus the cache
+	 * it left. The audit counted 72k wakes sent cold for nothing. */
+	if (cake_tog_g93 && warm_half && prev < 64 &&
+	    ((cake_idle_words[0] >> prev) & 1) && ((aff >> prev) & 1) &&
+	    !((seats >> prev) & 1) &&
+	    cake_taci((s32)prev, CAKE_SITE_TACI_HOME)) {
+		cake_stat_inc(CAKE_SITE_G93_HOME);
+		cake_claim_retire((s32)prev);
+		return (s32)prev;
 	}
 	w = cake_idle_words[0] & aff & ~seats;
 	if (!w)
 		w = cake_idle_words[0] & aff;
+	w = cake_prefer_clean(w);
 	for (i = 0; i < CLAIM_TRIES && w; i++) {
-		c = (s32)__builtin_ctzll(w);
+		c = cake_pick_bit(w, prev);
 		if (i)
 			cake_stat_inc(CAKE_SITE_CLAIM_RETRY);
 		if (c < 64 && !((cake_core_free >> c) & 1) &&
-		    cake_taci(c, CAKE_SITE_TACI_WARM_THREAD))
+		    cake_taci(c, CAKE_SITE_TACI_WARM_THREAD)) {
+			cake_claim_retire(c);
 			return c;
+		}
 		if (!cake_tog_g86)
 			break;
-		w &= w - 1;
+		w &= ~(1ULL << ((u32)c & 63));
 	}
 	return -1;
 }
@@ -1497,7 +1574,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct cake_groove *gr = cake_groove_of(p);
 	/* One divide for the class; three gates below ask it. */
 	bool stage = cake_burst_ns(p) >= SEAT_BURST_MIN_NS;
-	bool home_askable, seat_blocked;
+	/* false on the groove-skip path: a skipped home is not a warm half */
+	bool home_askable = false, seat_blocked;
 	s32 c;
 
 	cake_stat_inc(CAKE_STAT_SELECT);
@@ -1592,8 +1670,17 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		if (gr) {
 			gr->wakes++;
 			if (gr->home_miss >= GROOVE_HOME_MISS &&
-			    (gr->wakes & GROOVE_PROBE_MASK))
+			    (gr->wakes & GROOVE_PROBE_MASK)) {
 				ask_home = false;
+				/* §G93: the census word answers the question the
+				 * miss count guesses at; an idle home is asked. */
+				if (cake_tog_g93 && prev_cpu >= 0 &&
+				    (u32)prev_cpu < 64 &&
+				    ((cake_idle_words[0] >> prev_cpu) & 1)) {
+					cake_stat_inc(CAKE_SITE_G93_ASK);
+					ask_home = true;
+				}
+			}
 		}
 		if (!ask_home) {
 			cake_stat_inc(CAKE_STAT_HD_SKIP);
@@ -1616,6 +1703,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		else if (!cake_taci(prev_cpu, CAKE_SITE_TACI_STAGE)) cake_stat_inc(CAKE_STAT_HD_NOTIDLE);
 		else {
 			/* the claim just succeeded: place, exactly as below */
+			cake_claim_retire(prev_cpu);
 			if (gr)
 				gr->home_miss = 0;
 			cake_direct_clamp(p);
@@ -1639,6 +1727,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		       bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
 	if (home_askable && !cake_core_contended(prev_cpu) &&
 	    cake_taci(prev_cpu, CAKE_SITE_TACI_HOME)) {
+		cake_claim_retire(prev_cpu);
 		if (gr)
 			gr->home_miss = 0;
 		{	/* PROBE: is the claimed CPU actually running someone? */
@@ -1664,7 +1753,7 @@ skip_home:
 
 
 	/* §G69: claimed warm placement or the pool; nothing unclaimed below. */
-	c = cake_claim_warm(p, gr ? (s32)gr->last_win - 1 : -1);
+	c = cake_claim_warm(p, gr ? (s32)gr->last_win - 1 : -1, home_askable);
 	if (gr && c >= 0)
 		gr->last_win = (s16)(c + 1);
 
@@ -1691,10 +1780,24 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 	s32 cpu;
 
 	u32 llc = cake_llc_of((s32)p->thread_info.cpu);
+	u32 slot = 0, k;
+	struct cake_slot *hs = &cake.idle_hint[llc * HINT_SLOTS];
 
-	h = cake.idle_hint[llc].word;
+	/* §G96: HINT_SLOTS mailboxes per die; the wakee reads the slot its
+	 * previous CPU maps to first, so concurrent wakers spread. */
+	h = 0;
+	for (k = 0; k < HINT_SLOTS; k++) {
+		slot = cake_tog_g96 ?
+		       (((u32)p->thread_info.cpu + k) & (HINT_SLOTS - 1)) : 0;
+		h = cake.idle_hint[llc * HINT_SLOTS + slot].word;
+		if (h || !cake_tog_g96)
+			break;
+	}
 	if (!h)
 		return -1;
+	if (k)
+		cake_stat_inc(CAKE_SITE_G96_SLOT);
+	hs = &cake.idle_hint[llc * HINT_SLOTS + slot];
 	cpu = (s32)(u32)(h - 1);
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -1;
@@ -1706,7 +1809,7 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 		cake_probe_x(CAKE_SITE_HINT_X, (s32)p->thread_info.cpu, cpu);
 	cake_stat_inc(CAKE_SITE_HINT_CAS);
 	CAKE_TIMED_VOID(CAKE_SITE_T_HINT_CAS,
-			(void)__sync_val_compare_and_swap(&cake.idle_hint[llc].word, h, 0));
+			(void)__sync_val_compare_and_swap(&hs->word, h, 0));
 	return claimed ? cpu : -1;
 }
 
@@ -1729,16 +1832,19 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 
 		/* §G86: walk the word; an unclean or already-claimed bit costs
 		 * one test, not the whole pick (one try won 15% here). */
+		w = cake_prefer_clean(w);
 		for (i = 0; i < CLAIM_TRIES && w; i++) {
-			cpu = (s32)__builtin_ctzll(w);
+			cpu = cake_pick_bit(w, (u32)p->thread_info.cpu);
 			if (i)
 				cake_stat_inc(CAKE_SITE_CLAIM_RETRY);
 			if (cake_cpu_clean(cpu) &&
-			    cake_taci(cpu, CAKE_SITE_TACI_NOTIFY))
+			    cake_taci(cpu, CAKE_SITE_TACI_NOTIFY)) {
+				cake_claim_retire(cpu);
 				return cpu;
+			}
 			if (!cake_tog_g86)
 				break;
-			w &= w - 1;
+			w &= ~(1ULL << ((u32)cpu & 63));
 		}
 	}
 
@@ -1752,10 +1858,12 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 		int i;
 
 		for (i = 0; i < CLAIM_TRIES && w; i++) {
-			cpu = (s32)__builtin_ctzll(w);
-			if (cake_taci(cpu, CAKE_SITE_TACI_NOTIFY))
+			cpu = cake_pick_bit(w, (u32)p->thread_info.cpu);
+			if (cake_taci(cpu, CAKE_SITE_TACI_NOTIFY)) {
+				cake_claim_retire(cpu);
 				return cpu;
-			w &= w - 1;
+			}
+			w &= ~(1ULL << ((u32)cpu & 63));
 		}
 		return cake_idle_hint_claim(p);
 	}
@@ -2392,7 +2500,9 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	{
 		u64 hint = (u64)(u32)cpu + 1;
-		struct cake_slot *hs = &cake.idle_hint[cake_llc_of(cpu)];
+		u32 slot = cake_tog_g96 ? ((u32)cpu & (HINT_SLOTS - 1)) : 0;
+		struct cake_slot *hs =
+			&cake.idle_hint[cake_llc_of(cpu) * HINT_SLOTS + slot];
 
 		if (hs->word != hint) {
 			cake_stat_inc(CAKE_SITE_IDLE_HINT_ST);

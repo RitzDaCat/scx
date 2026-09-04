@@ -182,6 +182,11 @@ impl<'a> Scheduler<'a> {
                 "g90" => rodata.cake_tog_g90 = on,
                 "g91" => rodata.cake_tog_g91 = on,
                 "g92" => rodata.cake_tog_g92 = on,
+                "g93" => rodata.cake_tog_g93 = on,
+                "g94" => rodata.cake_tog_g94 = on,
+                "g95" => rodata.cake_tog_g95 = on,
+                "g96" => rodata.cake_tog_g96 = on,
+                "g97" => rodata.cake_tog_g97 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 // Test scaffold: present this host to the BPF side as two
                 // dies (lower and upper half of the cores, with siblings) so
@@ -192,15 +197,8 @@ impl<'a> Scheduler<'a> {
         }
         let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g85={} g86={} g87={} g89={} g90={} g91={} g92={} probe={}",
-            rodata.cake_tog_g85,
-            rodata.cake_tog_g86,
-            rodata.cake_tog_g87,
-            rodata.cake_tog_g89,
-            rodata.cake_tog_g90,
-            rodata.cake_tog_g91,
-            rodata.cake_tog_g92,
-            rodata.cake_tog_probe
+            "   toggle  g85={} g86={} g87={} g89={} g90={} g91={} g92={} g93={} g94={} g95={} g96={} g97={} probe={}",
+            rodata.cake_tog_g85, rodata.cake_tog_g86, rodata.cake_tog_g87, rodata.cake_tog_g89, rodata.cake_tog_g90, rodata.cake_tog_g91, rodata.cake_tog_g92, rodata.cake_tog_g93, rodata.cake_tog_g94, rodata.cake_tog_g95, rodata.cake_tog_g96, rodata.cake_tog_g97, rodata.cake_tog_probe
         );
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
@@ -503,7 +501,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 130] = [
+            const NAMES: [&str; 135] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -634,6 +632,11 @@ impl<'a> Scheduler<'a> {
                 "producer_preempt",
                 "stage_slice",
                 "pool_stage_first",
+                "g93_home",
+                "g93_ask",
+                "g95_clear",
+                "g96_slot",
+                "g97_skip",
             ];
             // The name table must match the BPF enum exactly; a drift prints
             // zeros silently because out-of-range lookups fail quietly.
@@ -697,11 +700,17 @@ impl<'a> Scheduler<'a> {
         let Some(bss) = self.skel.maps.bss_data.as_mut() else {
             return;
         };
+        let mut word = 0u64;
         for (cpu, hot) in set.iter().enumerate() {
             if cpu < bss.cpu_irq_hot.len() {
                 bss.cpu_irq_hot[cpu] = u8::from(*hot);
             }
+            if *hot && cpu < 64 {
+                word |= 1u64 << cpu;
+            }
         }
+        // §G97: the same set as one word for the census walks.
+        bss.cake_sink_word = word;
 
         if self.verbose || !self.sinks_logged {
             self.sinks_logged = true;

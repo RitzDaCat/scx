@@ -115,6 +115,7 @@ enum consts {
 	FANOUT_MIN			= 4,			/* §G90: wakes issued per burst that make a stage a producer */
 	FANOUT_SHIFT			= 3,			/* §G90: EWMA weight 1/8 */
 	STAGE_SLICE_MAX_NS		= 2 * SLICE_NS,		/* §G91: a stage's slice cap when the frame clock is slower */
+	HINT_SLOTS			= 4,			/* §G96: going-idle hint slots per LLC */
 };
 
 #endif /* __CAKE_INTF_H */

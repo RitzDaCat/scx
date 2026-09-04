@@ -87,6 +87,18 @@ higher for cake (30.7 vs 24.5 / 24.1): every waker reads the same lowest bit.
 Native's own biggest miss is 0->1 at 115k on the second worker pool: it leaves
 a warm, fully idle core more than cake does.
 
+**Built 2026-09-04 night, under test, default off (`runs/llc_20260904/
+placebench.py`: a sched trace of appsim per arm, audited by placeaudit.py;
+result appended when the mirrored run finishes):**
+
+| toggle | construct |
+|---|---|
+| g93 | warm home with a busy sibling is taken before a cold idle thread (`g93_home`); the groove gate asks a home the census word shows idle regardless of the miss count (`g93_ask`) |
+| g94 | every census walk starts at the task's previous CPU and wraps (`cake_pick_bit`), instead of bit 0: breaks the lowest-bit herd, keeps locality |
+| g95 | a won claim clears cake's idle-thread bit and the core's free bits at once (`cake_claim_retire`, two relaxed atomics per claim), so the next waker never reads a CPU already spoken for; update_idle clears again, idempotently |
+| g96 | HINT_SLOTS (4) going-idle mailboxes per die: dispatch publishes into slot cpu & 3, a wakee claims from the slot of its previous CPU first (`g96_slot`) |
+| g97 | census walks prefer non-sink bits (`cake_sink_word`, loader-published beside `cpu_irq_hot`), a sink only when nothing else is idle (`g97_skip`) |
+
 Next construct to discuss: placement order (§G93): home with a busy sibling
 before a cold idle thread; sinks masked out of the census walks with
 fallback; the groove gate asks an idle home regardless of miss count; the
