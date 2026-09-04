@@ -102,6 +102,8 @@ enum consts {
 	 */
 	MAX_CPUS	= 1024,
 	WAKE_DSQ	= MAX_CPUS,
+	MAX_LLCS	= 16,			/* §G89: wake pools, hints and served stamps per LLC */
+	LLC_WAKE_DSQ_BASE	= MAX_CPUS + 2,	/* §G89: pool of LLC i is LLC_WAKE_DSQ_BASE + i */
 
 	/* The steal-ring queue hint, one bit per CPU (§G25). */
 	QMASK_WORDS	= MAX_CPUS / 64,

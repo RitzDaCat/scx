@@ -32,6 +32,61 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-09-04 late — DUAL-CCD / LLC AWARENESS. §G88 confirmed in the
+field (9950X3D, DOOM TDA Uprising, single runs each on `f28fc5d21`): g85
+204.60 / 167.64 / 112.63 (97th / avg / 1% low), g86 206.69 / 168.47 / 108.10,
+both 202.61 / 165.52 / 111.54, g87=1 207.45 / 170.16 / 114.66; lavd 1.1.2 on
+the same box 206.57 / 169.50 / 117.54. The 47 fps 1% low of the 9-4 morning
+build is gone. Tester's setup: game pinned to die 0 (96 MB L3, cores 0-7 =
+PUs 0-7 and 16-23), everything else on die 1 (32 MB, cores 8-15), system in
+frequency mode. §G87 approved by the maintainer on that chart: default ON,
+`--toggle g87=0` is the off-switch.**
+
+**§G89 (shipped, default on, `--toggle g89=0` = one pool, LLC-blind): die-
+local pool and picks.** One wake pool per LLC (`LLC_WAKE_DSQ_BASE + llc`,
+`MAX_LLCS` 16, `cpu_llc_id` + `nr_llcs` in rodata; more LLCs than pools
+collapses to one, logged); `wake_served`, `wake_mark` and the going-idle
+hint per LLC; on a multi-LLC host `pick_idle_clean` never leaves the die
+(census walk, then an idle sink on the die, then the die's hint, then
+nothing -- the kernel's LLC-blind scan is not asked); the steal ring crosses
+a die only for a head a whole `SLICE_NS` behind the frontier, stage or
+worker; `cake_llc_pool_rescue` takes another die's pool head only when it
+is a slice behind or its pool hit the 24 ms wall; the neighbour probe walks
+the loader's steal order (same die first) instead of cpu+1. One-LLC hosts
+are unchanged by construction.
+
+**Scaffold: `--toggle llcsplit=1`** (loader-only) presents this 9800X3D to
+the BPF side as two dies (cores 0-3 + siblings 8-11, cores 4-7 + 12-15):
+every routing decision runs as on a 9950X3D; the fabric penalty is not
+emulated. Probe census gained per-site cross-die counters (`x_*`).
+`runs/llc_20260904/`, appsim HD2 mission, 45 s + 15 s idle, per 12-arm
+census (of ~7.05M selects):
+
+| counter | flat | split, g89=0 | split, g89=1 |
+|---|---|---|---|
+| x_claim (claim_warm) | 0 | 0 | 0 |
+| x_hint / hint claims | 0 / 5.6k | 169,011 / 177,396 | 0 / 80 |
+| x_notify_kick / kicks | 0 | 4,407 / 5,967 | 0 / 663 |
+| x_kt_local / kthread local | 0 | 1,420 / 46,589 | 0 / 18,481 |
+| x_probe_fired / fires | 0 | 110 / 235 | 0 / 311 |
+| x_pool_served / pool served | 0 / 630k | 470,744 / 735,915 | 0 / 104,794 |
+| x_steal_moved / attempts | 0 / 1.04M | 883,220 / 1.63M | 927 / 352,914 (b run) |
+| holds >300 us global | 1,105 | 719 | 89 |
+| appsim p99 / p99.9 / 1% low / 0.1% low | 0.622 / 0.654 / 1559 / 1407 (89b) | 0.624 / 0.664 / 1485 / 996 | 0.621 / 0.654 / 1559 / 1385; b: 0.623 / 0.660 / 1538 / 1274 |
+
+Flat g89=0 vs g89=1: 0.622 / 0.653 / 1566 / 1451 vs 0.622 / 0.654 / 1559 /
+1407 -- identical inside appsim noise (one flat89 run took a 1.020 p99.9 slot).
+Spills: select_cpu 61/72, enqueue 18/22, dispatch_search 29/34, ring_steal
+17/9, pool_rescue 6/3; TOTAL 307/191 (was 269/131).
+
+Owed: (1) the tester's DOOM run on this build, default and `--toggle
+g89=0`; (2) the V-cache preference for stages (first seat on the largest-L3
+die when it has a free core) -- the loader knows every LLC's cache size,
+nothing uses it for placement yet; (3) the handoff floor, slot stride and
+probe depth audit items stand; (4) the real cross-CCX counter on a 9950X3D:
+`perf stat -e ls_any_fills_from_sys.far_cache,l2_fill_rsp_src.far_cache -p
+<game>` per arm.
+
 **FIELD REGRESSION 2026-09-04 evening — DOOM: The Dark Ages (Uprising), 9950X3D
 (two LLCs), nightly `6c828c1cb` vs lavd 1.1.2: 97th 213.09 vs 206.57, avg
 128.59 vs 169.50, 1% low 47.14 vs 117.54 (avg of 2). The 09-02 nightly on the
@@ -819,6 +874,9 @@ real session), live replica (loader logic run standalone on the live host), audi
 
 | # | change | evidence | verdict | key numbers |
 |---|---|---|---|---|
+| **G89** | **die-local pool, hint, pick, steal gate, probe order; `--toggle llcsplit=1` scaffold** | **CENSUS on the fake split (appsim)** | ✅ **SHIPPED 2026-09-04** | cross-die: hint 169k → 0, pool service 471k → 0, steal 883k → 927; 1% low 1485 → 1559; one-LLC identical |
+| **G88** | **LLC-confined census walks and seat decline** | **FIELD (9950X3D DOOM)** | ✅ **SHIPPED 2026-09-04** | 1% low 47.14 → 108 to 115 across all flag combinations; lavd 117.54 on that box |
+| **G87** | **protect window and pinned margin bounded by the wakee's slice** | **rig + FIELD** | ✅ **SHIPPED 2026-09-04 (maintainer)** | cyclictest spikes >100 us 230 to 6331 → 10 to 14; DOOM g87=1 170.16 avg / 114.66 1% low, best of four |
 | **G86** | **claim retry across the idle word + unbound kthread wake takes the pool** | **CENSUS + WAKE + FRAME (HD2 GPU-bound)** | ✅ **SHIPPED 2026-09-04** | holds >300 us **3341 -> 105** /12 s; display kthread hop p99 **369 -> 125 us**; ISR->last hop p99 482 -> 267 (cosmos 317, native 377); frames tie cosmos; under test |
 | **G85** | **exclusive seat: immune / retake / reroute / decline** | **ATTR + FRAME (HD2 GPU-bound)** | ✅ **SHIPPED 2026-09-04** | renderer preempts **1128 -> 860/s**; 0.1% low 85.7 vs 85.0, p99.9 11.460 vs 11.529 (overlap) |
 | — | **cross-scheduler HD2 max preset** (native / cake / lavd / cosmos / pandemonium) | **FRAME, 20 s x 2-4/arm** | ⚖️ **all 109 fps; cosmos tails ahead of HEAD by 0.3 ms p99.9, tie after G85+G86** | slow frames are GPU-side on every arm (autopsy); CPU-bound rotation owed |

@@ -158,6 +158,7 @@ impl<'a> Scheduler<'a> {
         // Campaign toggles land in rodata before load so the verifier prunes
         // the off arms; the logged line is each arm's identity in an on/off
         // pair (STATE.md, toggle campaign 2026-08-22).
+        let mut llcsplit = false;
         for spec in &opts.toggle {
             let (name, val) = spec
                 .split_once('=')
@@ -171,14 +172,23 @@ impl<'a> Scheduler<'a> {
                 "g85" => rodata.cake_tog_g85 = on,
                 "g86" => rodata.cake_tog_g86 = on,
                 "g87" => rodata.cake_tog_g87 = on,
+                "g89" => rodata.cake_tog_g89 = on,
                 "probe" => rodata.cake_tog_probe = on,
+                // Test scaffold: present this host to the BPF side as two
+                // dies (lower and upper half of the cores, with siblings) so
+                // the routing runs as on a dual-CCD chip. Loader-only.
+                "llcsplit" => llcsplit = on == 1,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
         let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g85={} g86={} g87={} probe={}",
-            rodata.cake_tog_g85, rodata.cake_tog_g86, rodata.cake_tog_g87, rodata.cake_tog_probe
+            "   toggle  g85={} g86={} g87={} g89={} probe={}",
+            rodata.cake_tog_g85,
+            rodata.cake_tog_g86,
+            rodata.cake_tog_g87,
+            rodata.cake_tog_g89,
+            rodata.cake_tog_probe
         );
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
@@ -282,7 +292,22 @@ impl<'a> Scheduler<'a> {
                 .keys()
                 .next_back()
                 .is_none_or(|cpu| *cpu < span);
-            let multi_ccd = topo.all_llcs.len() > 1;
+            // §G88 scaffold: with --toggle llcsplit=1 the lower half of the
+            // cores (by core id) is die 0 and the upper half die 1.
+            let half_core = {
+                let mut cores: Vec<usize> = topo.all_cores.keys().copied().collect();
+                cores.sort_unstable();
+                cores.get(cores.len() / 2).copied().unwrap_or(usize::MAX)
+            };
+            let llc_of = |cpu: &scx_utils::Cpu| -> usize {
+                if llcsplit {
+                    usize::from(cpu.core_id >= half_core)
+                } else {
+                    cpu.llc_id
+                }
+            };
+            let nr_llcs = if llcsplit { 2 } else { topo.all_llcs.len() };
+            let multi_ccd = nr_llcs > 1;
             rodata.steal_order_live = u8::from(multi_ccd && fits);
             order.fill(0);
 
@@ -294,21 +319,47 @@ impl<'a> Scheduler<'a> {
                 let mut llc_words: BTreeMap<usize, u64> = BTreeMap::new();
                 for cpu in topo.all_cpus.values() {
                     if cpu.id < 64 {
-                        *llc_words.entry(cpu.llc_id).or_insert(0) |= 1u64 << cpu.id;
+                        *llc_words.entry(llc_of(cpu)).or_insert(0) |= 1u64 << cpu.id;
                     }
+                }
+                // §G89: dense LLC index per CPU and the count; more LLCs
+                // than the pools can hold collapses to one pool, logged.
+                let mut dense: BTreeMap<usize, u8> = BTreeMap::new();
+                for id in llc_words.keys() {
+                    let n = dense.len() as u8;
+                    dense.insert(*id, n);
+                }
+                let max_llcs = bpf_intf::consts_MAX_LLCS as usize;
+                if dense.len() > max_llcs {
+                    warn!(
+                        "   llc     {} domains exceed MAX_LLCS {}; one pool, LLC-blind",
+                        dense.len(),
+                        max_llcs
+                    );
+                    rodata.cpu_llc_id.fill(0);
+                    rodata.nr_llcs = 1;
+                } else {
+                    rodata.cpu_llc_id.fill(0);
+                    for cpu in topo.all_cpus.values() {
+                        if cpu.id < rodata.cpu_llc_id.len() {
+                            rodata.cpu_llc_id[cpu.id] = *dense.get(&llc_of(cpu)).unwrap_or(&0);
+                        }
+                    }
+                    rodata.nr_llcs = dense.len().max(1) as u32;
                 }
                 rodata.cpu_llc_word.fill(u64::MAX);
                 for cpu in topo.all_cpus.values() {
                     if let (Some(word), true) = (
-                        llc_words.get(&cpu.llc_id),
+                        llc_words.get(&llc_of(cpu)),
                         cpu.id < rodata.cpu_llc_word.len(),
                     ) {
                         rodata.cpu_llc_word[cpu.id] = *word;
                     }
                 }
                 info!(
-                    "   llc     {} domain(s); census claims and seat declines stay inside the task's LLC",
-                    topo.all_llcs.len()
+                    "   llc     {} domain(s){}; census claims and seat declines stay inside the task's LLC",
+                    nr_llcs,
+                    if llcsplit { " (SCAFFOLD: fake split, not the hardware)" } else { "" }
                 );
             }
 
@@ -316,20 +367,11 @@ impl<'a> Scheduler<'a> {
                 warn!("   ccd     host wider than steal matrix ({span} CPUs); ring steal only");
             }
             if multi_ccd && fits {
-                let llc_cache: BTreeMap<usize, usize> = topo
-                    .all_llcs
-                    .iter()
-                    .map(|(id, llc)| {
-                        (
-                            *id,
-                            llc.all_cpus
-                                .values()
-                                .map(|cpu| cpu.cache_size)
-                                .max()
-                                .unwrap_or(0),
-                        )
-                    })
-                    .collect();
+                let mut llc_cache: BTreeMap<usize, usize> = BTreeMap::new();
+                for cpu in topo.all_cpus.values() {
+                    let e = llc_cache.entry(llc_of(cpu)).or_insert(0);
+                    *e = (*e).max(cpu.cache_size);
+                }
                 let policy = bpf_intf::consts_CCD_STEAL_POLICY;
                 let nr_ids = *NR_CPU_IDS;
 
@@ -340,9 +382,9 @@ impl<'a> Scheduler<'a> {
                         .filter(|dst| dst.id != src.id)
                         .collect();
                     candidates.sort_by_key(|dst| {
-                        let class = if dst.llc_id == src.llc_id {
+                        let class = if llc_of(dst) == llc_of(src) {
                             0
-                        } else if policy > 1 && llc_cache[&dst.llc_id] == llc_cache[&src.llc_id] {
+                        } else if policy > 1 && llc_cache[&llc_of(dst)] == llc_cache[&llc_of(src)] {
                             1
                         } else {
                             2
@@ -449,7 +491,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 113] = [
+            const NAMES: [&str; 126] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -563,6 +605,19 @@ impl<'a> Scheduler<'a> {
                 "seat_decline",
                 "claim_retry",
                 "kt_pool",
+                "x_serial",
+                "kt_local",
+                "x_kt_local",
+                "x_claim",
+                "x_hint",
+                "notify_kick",
+                "x_notify_kick",
+                "probe_fired",
+                "x_probe_fired",
+                "pool_served",
+                "x_pool_served",
+                "steal_moved",
+                "x_steal_moved",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {

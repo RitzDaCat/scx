@@ -58,7 +58,8 @@ UEI_DEFINE(uei);
 /* Declared ahead of the toggle block: the probe census below reads it. */
 const volatile u8 cake_tog_g85 = 1;		/* §G85 seat rules; --toggle g85=0 is the field off-switch */
 const volatile u8 cake_tog_g86 = 1;		/* §G86 claim walk + kthread pool; --toggle g86=0 is the field off-switch */
-const volatile u8 cake_tog_g87;			/* a wakee's wait behind a fresh occupant is bounded by its own slice, not SLICE_NS>>4; pinned wakes preempt by the wakee's slice (§G87) */
+const volatile u8 cake_tog_g89 = 1;		/* §G89 die-local pool, hint, pick, steal gate, probe order; --toggle g89=0 = one pool, LLC-blind */
+const volatile u8 cake_tog_g87 = 1;		/* §G87 wakee-bounded protect window and pinned margin; --toggle g87=0 is the off-switch (approved 2026-09-04) */			/* a wakee's wait behind a fresh occupant is bounded by its own slice, not SLICE_NS>>4; pinned wakes preempt by the wakee's slice (§G87) */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 
 /*
@@ -176,6 +177,21 @@ enum cake_stat {
 	/* §G86: a second or later bit tried; a kthread wake sent to the pool. */
 	CAKE_SITE_CLAIM_RETRY,
 	CAKE_SITE_KT_POOL,
+	/* §G88 cross-LLC census: placements and moves whose destination die is
+	 * not the task's previous die, per site, with each site's total. */
+	CAKE_SITE_SERIAL_X,
+	CAKE_SITE_KT_LOCAL,
+	CAKE_SITE_KT_LOCAL_X,
+	CAKE_SITE_CLAIM_X,
+	CAKE_SITE_HINT_X,
+	CAKE_SITE_NOTIFY_KICK,
+	CAKE_SITE_NOTIFY_KICK_X,
+	CAKE_SITE_PROBE_FIRED,
+	CAKE_SITE_PROBE_FIRED_X,
+	CAKE_SITE_POOL_SERVED,
+	CAKE_SITE_POOL_SERVED_X,
+	CAKE_SITE_STEAL_MOVED,
+	CAKE_SITE_STEAL_MOVED_X,
 	CAKE_STAT_NR,
 };
 
@@ -565,20 +581,20 @@ struct cake_state {
 	 * line rather than two (§R.10).
 	 */
 	struct cake_run_slot run[MAX_CPUS];
-	/* ktime the global wake queue was last consumed by ANY CPU (§R.16). */
-	struct cake_slot wake_served;
+	/* ktime each LLC's wake pool was last consumed by any of its CPUs (§R.16, §G89). */
+	struct cake_slot wake_served[MAX_LLCS];
 	/*
 	 * "WAKE_DSQ may hold work" mark gating the global peek in dispatch
 	 * (§G41). Own slot: every CPU reads it every dispatch, and it must not
 	 * share a line with wake_served, which serving CPUs store to (§R.10).
 	 */
-	struct cake_slot wake_mark;
+	struct cake_slot wake_mark[MAX_LLCS];
 	/*
 	 * One recently idled CPU, cpu id + 1 (0 = none), published by its own
 	 * going-idle dispatch so the wake path can claim it with a single
 	 * test-and-clear instead of an idle-mask scan (§G43).
 	 */
-	struct cake_slot idle_hint;
+	struct cake_slot idle_hint[MAX_LLCS];
 	/*
 	 * "DSQ[i] may hold work" hint gating the steal ring, one bit per CPU, so
 	 * a going-idle dispatch reads QMASK_WORDS words instead of probing one
@@ -665,11 +681,11 @@ static __noinline void cake_qmark_publish(u32 cpu, bool queued)
  * no owner rescans that queue, so the setter marks AFTER the insert and
  * retirement is clear-then-repeek. Protocol: §G41. Test before set (§R.10).
  */
-static __always_inline void cake_wake_mark_set(void)
+static __always_inline void cake_wake_mark_set(u32 llc)
 {
-	if (!cake.wake_mark.word) {
+	if (!cake.wake_mark[llc & (MAX_LLCS - 1)].word) {
 		cake_stat_inc(CAKE_SITE_WAKE_MARK_ST);
-		cake.wake_mark.word = 1;
+		cake.wake_mark[llc & (MAX_LLCS - 1)].word = 1;
 	}
 }
 
@@ -828,6 +844,28 @@ const volatile u16 cpu_steal_order[STEAL_SPAN * STEAL_SPAN];
  * with one LLC or an unreadable topology gets all ones, which is exactly
  * the LLC-blind walk of 2026-09-04 that cost a 9950X3D 60% of its 1% low. */
 const volatile u64 cpu_llc_word[MAX_CPUS];
+/* §G89: dense LLC index per CPU (0 on a one-LLC host) and the LLC count. */
+const volatile u8 cpu_llc_id[MAX_CPUS];
+const volatile u32 nr_llcs = 1;
+
+static __always_inline u32 cake_llc_of(s32 cpu)
+{
+	return cake_tog_g89 ?
+	       (u32)cpu_llc_id[(u32)cpu & (MAX_CPUS - 1)] & (MAX_LLCS - 1) : 0;
+}
+
+static __always_inline u64 cake_pool_dsq(u32 llc)
+{
+	return (u64)LLC_WAKE_DSQ_BASE + (llc & (MAX_LLCS - 1));
+}
+
+/* PROBE: does @to sit on a different die than @from? Hosts inside one word. */
+static __always_inline bool cake_xllc(s32 from, s32 to)
+{
+	if (from < 0 || to < 0 || (u32)to >= 64)
+		return false;
+	return !((cpu_llc_word[(u32)from & (MAX_CPUS - 1)] >> (u32)to) & 1);
+}
 const volatile u8 steal_order_live;
 
 /*
@@ -940,6 +978,8 @@ static __always_inline bool cake_seat_blocks(s32 cpu, const struct task_struct *
 	return cake_tog_g85;
 }
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
+/* PROBE scratch: was the pool head this CPU is about to take from another die. */
+static u8 cake_probe_pool_x[MAX_CPUS];
 
 /* PROBE hold attribution -- not for scoring. */
 struct cake_probe_tag {
@@ -980,7 +1020,8 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 		return;
 	me = bpf_get_smp_processor_id() & (MAX_CPUS - 1);
 
-	if (dsq_id == (u64)WAKE_DSQ)
+	if (!(dsq_id & CAKE_DSQ_LOCAL_ON) && dsq_id >= (u64)LLC_WAKE_DSQ_BASE &&
+	    dsq_id < (u64)LLC_WAKE_DSQ_BASE + MAX_LLCS)
 		kind = 4;
 	else if (dsq_id & CAKE_DSQ_LOCAL_ON)
 		kind = ((u32)dsq_id & (MAX_CPUS - 1)) ==
@@ -1439,6 +1480,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)wcpu,
 					cake_task_slice(p), 0);
 			cake_stat_inc(CAKE_STAT_SERIAL);
+			if (cake_tog_probe && cake_xllc(prev_cpu, wcpu))
+				cake_stat_inc(CAKE_SITE_SERIAL_X);
 			return wcpu;
 		}
 	}
@@ -1568,6 +1611,8 @@ skip_home:
 		gr->last_win = (s16)(c + 1);
 
 	if (c >= 0) {
+		if (cake_tog_probe && cake_xllc(prev_cpu, c))
+			cake_stat_inc(CAKE_SITE_CLAIM_X);
 		cake_direct_clamp(p);
 		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)c,
 				cake_task_slice(p), 0);
@@ -1587,7 +1632,7 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 	bool claimed;
 	s32 cpu;
 
-	h = cake.idle_hint.word;
+	h = cake.idle_hint[cake_llc_of((s32)p->thread_info.cpu)].word;
 	if (!h)
 		return -1;
 	cpu = (s32)(u32)(h - 1);
@@ -1597,9 +1642,12 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 		return -1;
 
 	claimed = cake_taci(cpu, CAKE_SITE_TACI_HINT);
+	if (claimed && cake_tog_probe &&
+	    cake_xllc((s32)p->thread_info.cpu, cpu))
+		cake_stat_inc(CAKE_SITE_HINT_X);
 	cake_stat_inc(CAKE_SITE_HINT_CAS);
 	CAKE_TIMED_VOID(CAKE_SITE_T_HINT_CAS,
-			(void)__sync_val_compare_and_swap(&cake.idle_hint.word, h, 0));
+			(void)__sync_val_compare_and_swap(&cake.idle_hint[cake_llc_of((s32)p->thread_info.cpu)].word, h, 0));
 	return claimed ? cpu : -1;
 }
 
@@ -1633,6 +1681,24 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 				break;
 			w &= w - 1;
 		}
+	}
+
+	/* §G89: on a multi-LLC host the pick never leaves the die. A second
+	 * pass takes an idle sink on this die before anything off it; then the
+	 * die's own hint; then nothing -- the pool wake waits for a dispatch on
+	 * its die, and the kernel's LLC-blind scan is not asked. */
+	if (cake_tog_g89 && nr_llcs > 1 && nr_cpu_span <= 64) {
+		u64 w = cake_idle_words[0] & p->cpus_ptr->bits[0] &
+			cpu_llc_word[(u32)p->thread_info.cpu & (MAX_CPUS - 1)];
+		int i;
+
+		for (i = 0; i < CLAIM_TRIES && w; i++) {
+			cpu = (s32)__builtin_ctzll(w);
+			if (cake_taci(cpu, CAKE_SITE_TACI_NOTIFY))
+				return cpu;
+			w &= w - 1;
+		}
+		return cake_idle_hint_claim(p);
 	}
 
 	/* The hint short-circuits the scans; a miss costs one word read (§G43). */
@@ -1671,6 +1737,9 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu)
 
 	idle = cake_pick_idle_clean(p);
 	if (idle >= 0) {
+		cake_stat_inc(CAKE_SITE_NOTIFY_KICK);
+		if (cake_tog_probe && cake_xllc(tcpu, idle))
+			cake_stat_inc(CAKE_SITE_NOTIFY_KICK_X);
 		cake_kick(idle, CAKE_KICK_IDLE);
 		return 0;
 	}
@@ -1708,14 +1777,34 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu)
 		u32 pi;
 
 		for (pi = 0; pi < CAKE_NEIGHBOUR_PROBE_DEPTH; pi++) {
-			cand++;
-			if (cand >= nr_cpu_span)
-				cand = 0;
+			/* §G89: the loader's locality order (same die first)
+			 * instead of cpu+1, which wraps into the other die. */
+			if (cake_tog_g89 && steal_order_live &&
+			    (u32)tcpu < STEAL_SPAN) {
+				/* the compare must land on the register the load
+				 * uses: the compiler hoists the scale ahead of any
+				 * compare on tcpu, and the verifier does not carry a
+				 * later bound back to the scaled register */
+				u32 ix = (u32)tcpu * STEAL_SPAN + pi;
+
+				barrier_var(ix);
+				if (ix >= STEAL_SPAN * STEAL_SPAN)
+					break;
+				cand = cpu_steal_order[ix];
+			} else {
+				cand++;
+				if (cand >= nr_cpu_span)
+					cand = 0;
+			}
 			if (!bpf_cpumask_test_cpu((s32)cand, p->cpus_ptr))
 				continue;
 			if (cake_wake_preempt(p, (s32)cand,
-					       PROBE_PROTECT_SHIFT))
+					       PROBE_PROTECT_SHIFT)) {
+				cake_stat_inc(CAKE_SITE_PROBE_FIRED);
+				if (cake_tog_probe && cake_xllc(tcpu, (s32)cand))
+					cake_stat_inc(CAKE_SITE_PROBE_FIRED_X);
 				break;
+			}
 		}
 	}
 	return 0;
@@ -1757,10 +1846,11 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 	 * insert into a custom DSQ reads none of the caller's positional bits
 	 * (§R.5).
 	 */
-	cake_dsq_insert_vtime(p, (u64)WAKE_DSQ, cake_task_slice(p),
-			      cake_wake_vtime(p), CAKE_ENQ_WAKEUP);
+	cake_dsq_insert_vtime(p, cake_pool_dsq(cake_llc_of(tcpu)),
+			      cake_task_slice(p), cake_wake_vtime(p),
+			      CAKE_ENQ_WAKEUP);
 	/* AFTER the insert -- the §G41 ordering half. */
-	cake_wake_mark_set();
+	cake_wake_mark_set(cake_llc_of(tcpu));
 
 	cake_wake_notify(p, tcpu);
 	return 0;
@@ -1841,6 +1931,9 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 
+		cake_stat_inc(CAKE_SITE_KT_LOCAL);
+		if (cake_tog_probe && kcpu >= 0 && cake_xllc(tcpu, kcpu))
+			cake_stat_inc(CAKE_SITE_KT_LOCAL_X);
 		cake_direct_clamp(p);
 		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON |
 				   (u32)(kcpu >= 0 ? kcpu : tcpu),
@@ -1891,10 +1984,10 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1 &&
 		    hc && !(hc->flags & PF_IDLE) && !cake_starved(hc)) {
-			cake_dsq_insert_vtime(p, (u64)WAKE_DSQ,
+			cake_dsq_insert_vtime(p, cake_pool_dsq(cake_llc_of(tcpu)),
 					      cake_task_slice(p),
 					      cake_wake_vtime(p), enq_flags);
-			cake_wake_mark_set();	/* after the insert (§G41) */
+			cake_wake_mark_set(cake_llc_of(tcpu));	/* after the insert (§G41) */
 			goto kick_idle;
 		}
 
@@ -1907,9 +2000,9 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		    cake.run[(u32)tcpu & (MAX_CPUS - 1)].seat_pid !=
 		    (u64)(u32)p->pid) {
 			cake_stat_inc(CAKE_SITE_SEAT_REROUTE);
-			cake_dsq_insert_vtime(p, (u64)WAKE_DSQ,
+			cake_dsq_insert_vtime(p, cake_pool_dsq(cake_llc_of(tcpu)),
 					      cake_task_slice(p), vt, enq_flags);
-			cake_wake_mark_set();	/* after the insert (§G41) */
+			cake_wake_mark_set(cake_llc_of(tcpu));	/* after the insert (§G41) */
 			goto kick_idle;
 		}
 
@@ -1942,6 +2035,19 @@ kick_idle:
  * One subtraction wraps the index — no modulo.
  */
 
+/* PROBE: count a steal from @idx's queue by die relation; never gates. The
+ * count is per attempt that reached the move; the move itself may find the
+ * queue empty, so read it beside STEAL_MOVED's own-die share, not as a rate. */
+static __always_inline bool cake_probe_steal(u32 ucpu, u32 idx)
+{
+	if (cake_tog_probe) {
+		cake_stat_inc(CAKE_SITE_STEAL_MOVED);
+		if (cake_xllc((s32)ucpu, (s32)idx))
+			cake_stat_inc(CAKE_SITE_STEAL_MOVED_X);
+	}
+	return true;
+}
+
 static __noinline bool cake_ring_steal(u32 ucpu)
 {
 	u32 nr = nr_cpu_span;
@@ -1963,8 +2069,19 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 			if (i + 1 >= nr)
 				break;
 			idx = cpu_steal_order[ucpu * STEAL_SPAN + i];
-			if (cake_qmark_test(idx) &&
-			    cake_move_to_local((u64)idx))
+			if (!cake_qmark_test(idx))
+				continue;
+			/* §G89: across a die boundary only a head a whole slice
+			 * behind the frontier is worth the fabric; a fresh wake,
+			 * stage or worker, waits for its own die. */
+			if (cake_tog_g89 && cake_xllc((s32)ucpu, (s32)idx)) {
+				struct task_struct *h = cake_dsq_peek((u64)idx);
+
+				if (!h || !time_before(h->scx.dsq_vtime + SLICE_NS,
+						       cake.frontier.word))
+					continue;
+			}
+			if (cake_probe_steal(ucpu, idx) && cake_move_to_local((u64)idx))
 				return true;
 		}
 		return false;
@@ -1984,7 +2101,7 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 		}
 		if (!(m & (1ULL << (idx & 63))))
 			continue;
-		if (cake_move_to_local((u64)idx))
+		if (cake_probe_steal(ucpu, idx) && cake_move_to_local((u64)idx))
 			return true;
 	}
 
@@ -1992,17 +2109,17 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 }
 
 /* Has the global wake queue gone unserved for a full WALL-clock window? */
-static __noinline bool cake_wake_starved(void)
+static __noinline bool cake_wake_starved(u32 llc)
 {
-	return time_before(cake.wake_served.word + WAKE_STARVE_WALL_NS,
-			   cake_now(CAKE_SITE_KT_WAKECLOCK));
+	return time_before(cake.wake_served[llc & (MAX_LLCS - 1)].word +
+			   WAKE_STARVE_WALL_NS, cake_now(CAKE_SITE_KT_WAKECLOCK));
 }
 
 /* Record that someone served the global wake queue. */
-static __noinline void cake_wake_serve_stamp(void)
+static __noinline void cake_wake_serve_stamp(u32 llc)
 {
 	cake_stat_inc(CAKE_SITE_WAKE_SERVED_ST);
-	cake.wake_served.word = cake_now(CAKE_SITE_KT_WAKECLOCK);
+	cake.wake_served[llc & (MAX_LLCS - 1)].word = cake_now(CAKE_SITE_KT_WAKECLOCK);
 }
 
 /*
@@ -2012,14 +2129,45 @@ static __noinline void cake_wake_serve_stamp(void)
  * dispatch polls this line and an unconditional store would cost an RFO at
  * context-switch rate (§R.16).
  */
-static __noinline void cake_wake_idle_stamp(void)
+static __noinline void cake_wake_idle_stamp(u32 llc)
 {
 	u64 now = cake_now(CAKE_SITE_KT_WAKECLOCK);
+	struct cake_slot *ws = &cake.wake_served[llc & (MAX_LLCS - 1)];
 
-	if (time_before(cake.wake_served.word + WAKE_STARVE_REFRESH_NS, now)) {
+	if (time_before(ws->word + WAKE_STARVE_REFRESH_NS, now)) {
 		cake_stat_inc(CAKE_SITE_WAKE_SERVED_ST);
-		cake.wake_served.word = now;
+		ws->word = now;
 	}
+}
+
+/* §G89: the other dies' pools, taken only when a head is a whole slice
+ * behind the frontier or its pool went unserved for the wall. A die with
+ * idle CPUs helps a saturated die; a fresh wake waits for its own. */
+static __noinline bool cake_llc_pool_rescue(u32 own)
+{
+	u32 i;
+
+	if (!cake_tog_g89 || nr_llcs <= 1)
+		return false;
+	for (i = 0; i < MAX_LLCS; i++) {
+		struct task_struct *h;
+
+		if (i >= nr_llcs)
+			break;
+		if (i == own || !cake.wake_mark[i].word)
+			continue;
+		h = cake_dsq_peek(cake_pool_dsq(i));
+		if (!h)
+			continue;
+		if (time_before(h->scx.dsq_vtime + SLICE_NS, cake.frontier.word) ||
+		    cake_wake_starved(i)) {
+			if (cake_move_to_local(cake_pool_dsq(i))) {
+				cake_wake_serve_stamp(i);
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /*
@@ -2034,7 +2182,9 @@ static __noinline void cake_wake_idle_stamp(void)
 static __noinline bool cake_dispatch_search(s32 cpu)
 {
 	u32 ucpu = (u32)cpu;
-	u64 first = (u64)ucpu, second = (u64)WAKE_DSQ;
+	u32 llc = cake_llc_of(cpu);
+	u64 pool = cake_pool_dsq(llc);
+	u64 first = (u64)ucpu, second = pool;
 	struct task_struct *own, *wake;
 
 	/*
@@ -2059,10 +2209,10 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		 * unconditional second move used to heal (§G41), and trusting it
 		 * here stalled the game 20 ms. Two counts replace two iterators and
 		 * two blind moves on the empty path. */
-		wake_n = (u32)cake_nrq((u64)WAKE_DSQ);
+		wake_n = (u32)cake_nrq(pool);
 		if (wake_n) {
 			cake_stat_inc(CAKE_SITE_WAKE_MARK_ST);
-			cake.wake_mark.word = 1;
+			cake.wake_mark[llc & (MAX_LLCS - 1)].word = 1;
 		}
 		/* §G85 leak 3: a held seat with an empty own queue would take
 		 * pool work or steal, and its stage thread would return to a
@@ -2089,13 +2239,14 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 				}
 			}
 		}
-		wake = wake_n ? cake_dsq_peek((u64)WAKE_DSQ) : NULL;
+		wake = wake_n ? cake_dsq_peek(pool) : NULL;
 		if (!wake_n) {
 			if (!own_n)
-				return cake_ring_steal(ucpu);
+				return cake_ring_steal(ucpu) ||
+				       cake_llc_pool_rescue(llc);
 			/* an empty pool is served: the starvation clock only
 			 * matters when the own queue competes with it */
-			cake_wake_idle_stamp();
+			cake_wake_idle_stamp(llc);
 		}
 	}
 	if (wake) {
@@ -2108,25 +2259,45 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		if (!own ||
 		    time_before(wv + SLICE_NS,
 				own->scx.dsq_vtime) ||
-		    cake_wake_starved()) {
-			first  = (u64)WAKE_DSQ;
+		    cake_wake_starved(llc)) {
+			first  = pool;
 			second = (u64)ucpu;
 		}
 	}
+	if (cake_tog_probe && wake) {
+		/* PROBE: the pool head's previous die vs this CPU's, before the
+		 * move that may take it (the take is confirmed by wake_served). */
+		if (cake_xllc((s32)wake->thread_info.cpu, cpu))
+			cake_probe_pool_x[ucpu & (MAX_CPUS - 1)] = 1;
+		else
+			cake_probe_pool_x[ucpu & (MAX_CPUS - 1)] = 0;
+	}
 	if (cake_move_to_local(first)) {
-		if (first == (u64)WAKE_DSQ)
-			cake_wake_serve_stamp();
+		if (first == pool) {
+			cake_wake_serve_stamp(llc);
+			if (cake_tog_probe) {
+				cake_stat_inc(CAKE_SITE_POOL_SERVED);
+				if (cake_probe_pool_x[ucpu & (MAX_CPUS - 1)])
+					cake_stat_inc(CAKE_SITE_POOL_SERVED_X);
+			}
+		}
 		return true;
 	}
 	/* Unconditional: a second healing net under a lost mark, and a
 	 * peek-guard here measured 5 spills against this shape's 0 (§G41). */
 	if (cake_move_to_local(second)) {
-		if (second == (u64)WAKE_DSQ)
-			cake_wake_serve_stamp();
+		if (second == pool) {
+			cake_wake_serve_stamp(llc);
+			if (cake_tog_probe) {
+				cake_stat_inc(CAKE_SITE_POOL_SERVED);
+				if (cake_probe_pool_x[ucpu & (MAX_CPUS - 1)])
+					cake_stat_inc(CAKE_SITE_POOL_SERVED_X);
+			}
+		}
 		return true;
 	}
 
-	return cake_ring_steal(ucpu);
+	return cake_ring_steal(ucpu) || cake_llc_pool_rescue(llc);
 }
 
 /*
@@ -2149,10 +2320,11 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	{
 		u64 hint = (u64)(u32)cpu + 1;
+		struct cake_slot *hs = &cake.idle_hint[cake_llc_of(cpu)];
 
-		if (cake.idle_hint.word != hint) {
+		if (hs->word != hint) {
 			cake_stat_inc(CAKE_SITE_IDLE_HINT_ST);
-			cake.idle_hint.word = hint;
+			hs->word = hint;
 		}
 	}
 }
@@ -2364,9 +2536,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 		if (ret)
 			return ret;
 	}
-	ret = scx_bpf_create_dsq(WAKE_DSQ, -1);
-	if (ret)
-		return ret;
+	/* §G89: one wake pool per LLC; a one-LLC host, or g89=0, uses pool 0. */
+	bpf_for(i, 0, MAX_LLCS) {
+		if ((u32)i >= nr_llcs)
+			break;
+		ret = scx_bpf_create_dsq(cake_pool_dsq((u32)i), -1);
+		if (ret)
+			return ret;
+	}
 
 	/* Seed the §G45 census; every later transition corrects it. */
 	{
