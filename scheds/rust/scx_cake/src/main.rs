@@ -168,12 +168,18 @@ impl<'a> Scheduler<'a> {
                 _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
             };
             match name {
+                "g85" => rodata.cake_tog_g85 = on,
+                "g86" => rodata.cake_tog_g86 = on,
+                "g87" => rodata.cake_tog_g87 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
         let probe_on = rodata.cake_tog_probe == 1;
-        info!("   toggle  probe={}", rodata.cake_tog_probe);
+        info!(
+            "   toggle  g85={} g86={} g87={} probe={}",
+            rodata.cake_tog_g85, rodata.cake_tog_g86, rodata.cake_tog_g87, rodata.cake_tog_probe
+        );
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
         // Clamped so a probe perturbed by host load cannot mis-tune the
@@ -279,6 +285,32 @@ impl<'a> Scheduler<'a> {
             let multi_ccd = topo.all_llcs.len() > 1;
             rodata.steal_order_live = u8::from(multi_ccd && fits);
             order.fill(0);
+
+            // §G88: one word per CPU naming the CPUs that share its LLC, so
+            // the idle-census walks and the seat decline never leave the
+            // task's own die. All ones (LLC-blind) is the fallback for a CPU
+            // the topology does not describe.
+            {
+                let mut llc_words: BTreeMap<usize, u64> = BTreeMap::new();
+                for cpu in topo.all_cpus.values() {
+                    if cpu.id < 64 {
+                        *llc_words.entry(cpu.llc_id).or_insert(0) |= 1u64 << cpu.id;
+                    }
+                }
+                rodata.cpu_llc_word.fill(u64::MAX);
+                for cpu in topo.all_cpus.values() {
+                    if let (Some(word), true) = (
+                        llc_words.get(&cpu.llc_id),
+                        cpu.id < rodata.cpu_llc_word.len(),
+                    ) {
+                        rodata.cpu_llc_word[cpu.id] = *word;
+                    }
+                }
+                info!(
+                    "   llc     {} domain(s); census claims and seat declines stay inside the task's LLC",
+                    topo.all_llcs.len()
+                );
+            }
 
             if multi_ccd && !fits {
                 warn!("   ccd     host wider than steal matrix ({span} CPUs); ring steal only");
