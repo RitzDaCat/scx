@@ -112,6 +112,9 @@ enum consts {
 	GROOVE_PROBE_MASK		= 63,		/* §G75: re-probe the home every 64 wakes */
 	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
 	CLAIM_TRIES			= 4,			/* §G86: idle-word bits tried per claim */
+	FANOUT_MIN			= 4,			/* §G90: wakes issued per burst that make a stage a producer */
+	FANOUT_SHIFT			= 3,			/* §G90: EWMA weight 1/8 */
+	STAGE_SLICE_MAX_NS		= 2 * SLICE_NS,		/* §G91: a stage's slice cap when the frame clock is slower */
 };
 
 #endif /* __CAKE_INTF_H */

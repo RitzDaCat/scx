@@ -60,6 +60,9 @@ const volatile u8 cake_tog_g85 = 1;		/* §G85 seat rules; --toggle g85=0 is the 
 const volatile u8 cake_tog_g86 = 1;		/* §G86 claim walk + kthread pool; --toggle g86=0 is the field off-switch */
 const volatile u8 cake_tog_g89 = 1;		/* §G89 die-local pool, hint, pick, steal gate, probe order; --toggle g89=0 = one pool, LLC-blind */
 const volatile u8 cake_tog_g87 = 1;		/* §G87 wakee-bounded protect window and pinned margin; --toggle g87=0 is the off-switch (approved 2026-09-04) */			/* a wakee's wait behind a fresh occupant is bounded by its own slice, not SLICE_NS>>4; pinned wakes preempt by the wakee's slice (§G87) */
+const volatile u8 cake_tog_g90;			/* producer rank: a stage that wakes >= FANOUT_MIN tasks per burst inserts deeper and preempts through the protect window (§G90) */
+const volatile u8 cake_tog_g91;			/* stage slice: two bursts capped at one engine frame (<= STAGE_SLICE_MAX_NS) instead of half the clamped period (§G91) */
+const volatile u8 cake_tog_g92;			/* a stage at the pool head is served ahead of a non-stage own head without the one-slice margin (§G92) */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 
 /*
@@ -192,6 +195,11 @@ enum cake_stat {
 	CAKE_SITE_POOL_SERVED_X,
 	CAKE_SITE_STEAL_MOVED,
 	CAKE_SITE_STEAL_MOVED_X,
+	/* §G90-§G92 fires */
+	CAKE_SITE_PRODUCER_INS,
+	CAKE_SITE_PRODUCER_PREEMPT,
+	CAKE_SITE_STAGE_SLICE,
+	CAKE_SITE_POOL_STAGE_FIRST,
 	CAKE_STAT_NR,
 };
 
@@ -386,7 +394,9 @@ struct cake_run_slot {
 	/* §G85: the holder was just placed behind a stranger; the stranger's
 	 * re-enqueue reads it and takes the pool; ops.running clears it. */
 	u64 retake;
-	u64 pad[STATE_SLOT_WORDS - 5];
+	/* §G90: wakes issued by whatever runs here since its last stopping. */
+	u64 woke;
+	u64 pad[STATE_SLOT_WORDS - 6];
 };
 
 enum {
@@ -478,12 +488,11 @@ static __always_inline u64 cake_burst_ns(const struct task_struct *p)
  * wall-axis twin (§G12). Clamped to the fixed slice so a task that rarely
  * yields is bounded as compute, not trusted forever (§R.28).
  */
-static __always_inline u64 cake_period_ns(const struct task_struct *p)
+static __always_inline u64 cake_period_raw_ns(const struct task_struct *p)
 {
-	u64 per = (cake_now(CAKE_SITE_KT_PERIOD) - p->start_time) / (p->nvcsw | 1);
-
-	return per > SLICE_NS ? SLICE_NS : per;
+	return (cake_now(CAKE_SITE_KT_PERIOD) - p->start_time) / (p->nvcsw | 1);
 }
+
 
 /*
  * Does this task wait longer than it runs? run_delay is the kernel's lifetime
@@ -1099,6 +1108,41 @@ static __noinline void cake_probe_run(struct task_struct *p, u64 now)
  * stopping, so mid-slice it looks eternally deserving. A zero live vtime means
  * RT/DL or idle, which we neither can nor need preempt. §R.1.
  */
+/* §G75 GROOVES: a task's own placement history. The home claim is the
+ * warmest rung and the most expensive question (a kernel atomic); a task
+ * whose home keeps being busy stops asking after GROOVE_HOME_MISS misses and
+ * re-probes once every GROOVE_PROBE_MASK+1 wakes. The CPU its whole-core
+ * claim last won is tried first next time -- the groove -- under the same
+ * single-writer claim, so history orders the choice and never replaces the
+ * claim. One task-storage lookup per wake. */
+struct cake_groove {
+	u8 home_miss;
+	u8 wakes;
+	s16 last_win;		/* cpu + 1; 0 = none */
+	u16 fanout8;		/* §G90: wakes issued per burst, EWMA x8 */
+};
+
+/* §G90: a stage that fans work out to others is a producer. */
+static __always_inline bool cake_producer(const struct cake_groove *gr)
+{
+	return cake_tog_g90 && gr && (gr->fanout8 >> FANOUT_SHIFT) >= FANOUT_MIN;
+}
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct cake_groove);
+} cake_grooves SEC(".maps");
+
+static __always_inline struct cake_groove *cake_groove_of(struct task_struct *p)
+{
+	cake_stat_inc(CAKE_SITE_TASK_STORAGE);
+	return CAKE_TIMED(CAKE_SITE_T_TASK_STORAGE,
+			  bpf_task_storage_get(&cake_grooves, p, 0,
+					       BPF_LOCAL_STORAGE_GET_F_CREATE));
+}
+
 static __noinline u64 cake_task_slice(struct task_struct *p __arg_trusted);
 
 static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
@@ -1135,6 +1179,14 @@ static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
 
 			if (own < protect)
 				protect = own;
+		}
+		/* §G90: a producer waits for nobody's protect window; the
+		 * occupant keeps the handoff floor. Looked up only when the
+		 * window would refuse. */
+		if (cake_tog_g90 && ran < protect &&
+		    cake_producer(cake_groove_of(p))) {
+			cake_stat_inc(CAKE_SITE_PRODUCER_PREEMPT);
+			protect = cake_handoff_max_ns;
 		}
 		if (ran < protect) {
 			cake_stat_inc(CAKE_STAT_WP_PROTECT);
@@ -1276,33 +1328,7 @@ static __noinline void cake_kick_preempt(s32 cpu)
 	cake_kick(cpu, CAKE_KICK_PREEMPT);
 }
 
-/* §G75 GROOVES: a task's own placement history. The home claim is the
- * warmest rung and the most expensive question (a kernel atomic); a task
- * whose home keeps being busy stops asking after GROOVE_HOME_MISS misses and
- * re-probes once every GROOVE_PROBE_MASK+1 wakes. The CPU its whole-core
- * claim last won is tried first next time -- the groove -- under the same
- * single-writer claim, so history orders the choice and never replaces the
- * claim. One task-storage lookup per wake. */
-struct cake_groove {
-	u8 home_miss;
-	u8 wakes;
-	s16 last_win;		/* cpu + 1; 0 = none */
-};
 
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct cake_groove);
-} cake_grooves SEC(".maps");
-
-static __always_inline struct cake_groove *cake_groove_of(struct task_struct *p)
-{
-	cake_stat_inc(CAKE_SITE_TASK_STORAGE);
-	return CAKE_TIMED(CAKE_SITE_T_TASK_STORAGE,
-			  bpf_task_storage_get(&cake_grooves, p, 0,
-					       BPF_LOCAL_STORAGE_GET_F_CREATE));
-}
 
 static __noinline bool cake_system_serial(void)
 {
@@ -1362,9 +1388,25 @@ static __noinline bool cake_handoff_yields(s32 tcpu)
  */
 static __noinline u64 cake_task_slice(struct task_struct *p __arg_trusted)
 {
-	u64 want = cake_burst_ns(p) << 1;
-	u64 cap = cake_period_ns(p) >> PERIOD_SLICE_CAP_SHIFT;
+	u64 burst = cake_burst_ns(p);
+	u64 want = burst << 1;
+	u64 per = cake_period_raw_ns(p);
+	u64 cap = (per > SLICE_NS ? SLICE_NS : per) >> PERIOD_SLICE_CAP_SHIFT;
 
+	/* §G91: a stage that sleeps at the engine's cadence may finish its
+	 * burst: the cap is one voted frame, never more than
+	 * STAGE_SLICE_MAX_NS. A hog whose period is not a frame keeps the
+	 * half-period cap; a stage on an empty queue never reaches either. */
+	if (cake_tog_g91 && burst >= SEAT_BURST_MIN_NS &&
+	    per <= (cake_frame_ns << 1)) {
+		u64 fcap = cake_frame_ns > (u64)STAGE_SLICE_MAX_NS ?
+			   (u64)STAGE_SLICE_MAX_NS : cake_frame_ns;
+
+		if (fcap > cap) {
+			cake_stat_inc(CAKE_SITE_STAGE_SLICE);
+			cap = fcap;
+		}
+	}
 	if (want > cap)
 		want = cap;
 	if (want < cake_handoff_max_ns)
@@ -1462,6 +1504,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		if (!(wr->hint & CAKE_HINT_WOKE))
 			wr->hint |= CAKE_HINT_WOKE;
+		if (cake_tog_g90)
+			wr->woke++;
 
 		/* No core-contended veto here: the sibling's occupant in a
 		 * handoff regime is usually another transient pair, and the
@@ -1846,9 +1890,18 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 	 * insert into a custom DSQ reads none of the caller's positional bits
 	 * (§R.5).
 	 */
-	cake_dsq_insert_vtime(p, cake_pool_dsq(cake_llc_of(tcpu)),
-			      cake_task_slice(p), cake_wake_vtime(p),
-			      CAKE_ENQ_WAKEUP);
+	{
+		u64 vt = cake_wake_vtime(p);
+
+		/* §G90: a producer's key sits one of its own slices deeper,
+		 * so the thread the workers wait on leaves the pool first. */
+		if (cake_tog_g90 && cake_producer(cake_groove_of(p))) {
+			cake_stat_inc(CAKE_SITE_PRODUCER_INS);
+			vt -= cake_task_slice(p);
+		}
+		cake_dsq_insert_vtime(p, cake_pool_dsq(cake_llc_of(tcpu)),
+				      cake_task_slice(p), vt, CAKE_ENQ_WAKEUP);
+	}
 	/* AFTER the insert -- the §G41 ordering half. */
 	cake_wake_mark_set(cake_llc_of(tcpu));
 
@@ -2251,12 +2304,22 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	}
 	if (wake) {
 		u64 wv = wake->scx.dsq_vtime;
+		bool stage_first = false;
 
+		/* §G92: a stage at the pool head does not wait out the margin
+		 * behind a worker; against another stage plain vtime decides. */
+		if (cake_tog_g92 && own &&
+		    cake_burst_ns(wake) >= SEAT_BURST_MIN_NS &&
+		    (cake_burst_ns(own) < SEAT_BURST_MIN_NS ||
+		     time_before(wv, own->scx.dsq_vtime))) {
+			cake_stat_inc(CAKE_SITE_POOL_STAGE_FIRST);
+			stage_first = true;
+		}
 		/*
 		 * Either the vtime margin favours the wake head, or nobody
 		 * served that queue in a wall-clock window (§R.16, §G11.2).
 		 */
-		if (!own ||
+		if (!own || stage_first ||
 		    time_before(wv + SLICE_NS,
 				own->scx.dsq_vtime) ||
 		    cake_wake_starved(llc)) {
@@ -2382,6 +2445,24 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	u32 idx = cake_recip_index(p);
 	struct cake_run_slot *rs = &cake.run[cpu & (MAX_CPUS - 1)];
 	u64 hint = 0;
+
+	/* §G90: fold the wakes this run issued into the task's fan-out;
+	 * stage class only, so the storage lookup is paid a few hundred
+	 * times a second, not at every worker's block. */
+	if (cake_tog_g90) {
+		if (cake_burst_ns(p) >= SEAT_BURST_MIN_NS) {
+			struct cake_groove *gr = cake_groove_of(p);
+
+			if (gr) {
+				u32 f = gr->fanout8;
+
+				f = f - (f >> FANOUT_SHIFT) +
+				    (u32)(rs->woke > 255 ? 255 : rs->woke);
+				gr->fanout8 = (u16)(f > 0xffff ? 0xffff : f);
+			}
+		}
+		rs->woke = 0;
+	}
 
 	/* §G79: a blocking stage keeps its seat. */
 	if (!runnable && (cpu & (MAX_CPUS - 1)) < 64 &&
