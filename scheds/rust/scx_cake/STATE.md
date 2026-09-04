@@ -32,6 +32,67 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-09-04 late night — CODE AUDIT + PLACEMENT AUDIT.** Machine on
+EEVDF. Tree: cleanup committed (below); §G90-§G92 under test, off.
+
+**Redundancy audit, verified on the paths before touching anything.** Real:
+select_cpu computed the burst three times per wake (retake gate, stage probe,
+home gate); a pool wake computed its slice at the insert and again in
+`cake_wake_preempt` (§G87) and for the producer key; stopping computed the
+burst twice; every pool insert read the die twice; three pool insert sites
+were the same six lines. Not real: the five `cake_task_slice` calls inside
+select_cpu sit on exclusive return paths (one per wake). Fixed: one `stage`
+bool per function, the slice passed insert -> notify -> preempt, one
+`cake_pool_insert()`, `cake_cross_llc` (was `cake_xllc`, it gates the steal
+ring), probe cross-die counts in a `__noinline cake_probe_x`, and the loader
+warns when its census name table and the map disagree (two off-by-one build
+breaks today, a silent zero at runtime). The spill claim did NOT hold: probe
+code out of the hot frames moved select_cpu 60/71 -> 58/74, total 328/205 ->
+326/210; the frames are big for their own reasons. Decisions byte-identical.
+
+**Scheduler self-cost, probe off, appsim HD2 mission window, this build vs
+the 2026-09-03 base:** select_cpu 107 -> 125 ns at 151k/s; enqueue 243 -> 287
+ns but reached 62k -> 11k/s (direct claims 58 -> 85%); dispatch 230 -> 87 ns
+at 158k/s; running 41 -> 39; stopping 17 -> 13; update_idle 19 -> 19 at
+287k/s. **Sum 95.8 -> 50.5 ms/s of CPU (-47%)** with appsim p99 0.627 ->
+0.620, p99.9 0.680 -> 0.649, 1% low 1513 -> 1577. The day's stack halved the
+BPF cost by taking the pool and its dispatch churn out of the common path.
+
+**Placement audit (`runs/xsched_20260904/placeaudit.py`, 1.5M scored wakes
+per arm on the HD2 traces).** Rank order, measured (§G38): 0 warm previous
+CPU with its sibling idle, 1 a whole free core, 2 warm previous CPU with the
+sibling busy, 3 an idle thread beside a busy one, 4 a busy CPU while
+something was idle, 5 nothing idle. "ok" took the best available;
+"contended" = the best CPU was claimed by someone else within 30 us.
+
+| role | cake g86 ok / contended / miss % | cosmos | native | cake's top misses (best->chosen: n, p99 us) |
+|---|---|---|---|---|
+| `ad pool !LP wor` (641k) | 49.5 / 30.7 / 19.8 | 61.0 / 24.5 / 14.4 | 70.6 / 24.1 / 5.3 | 2->3 65,306 (2); 3->4 40,710 (202); 0->1 11,115 (2); sink 81,372 |
+| `thread pool wor` (557k) | 76.0 / 16.3 / 7.7 | 70.4 / 16.0 / 13.5 | 50.8 / 26.2 / 23.0 | 0->1 13,473 (3); 3->4 11,472 (233) |
+| nvidia kthreads (52k) | 88.8 / 1.5 / 9.7 | 94.2 / 1.5 / 4.3 | 74.5 / 1.1 / 24.3 | 3->4 3,006 (231) |
+| `vkd3d_fence` (44k) | 89.7 / 2.3 / 8.0 | 93.3 / 1.8 / 4.9 | 75.1 / 2.5 / 22.4 | 3->4 1,936 (262) |
+| `main` (16k) | 78.5 / 1.0 / 20.5 | 81.2 / 1.0 / 17.8 | 73.8 / 1.6 / 24.5 | 3->4 1,330 (57); 1->4 1,079 (4, the retake, by design) |
+
+Cake's decision misses, ranked: (1) 3->4, queued while an idle thread
+existed, ~62k across roles, the only one with latency (p99 200-260 us),
+cosmos near zero: a pool wake whose claim failed, served by a busy CPU's
+dispatch; (2) 2->3, warm half core declined for a cold half core, ~72k: the
+§G38 veto refuses the home when its sibling is busy and the walk then takes
+any idle thread, cache loss with no gain; (3) sink landings while a clean
+CPU was idle, 112k: the census walks pick the lowest bit and never skip
+sinks, every scheduler does it here (cosmos 148k, native 115k); (4) 0->1,
+warm whole core declined for another whole core, ~27k: the groove gate stops
+asking a home after 8 misses even when the word shows it idle. Contended is
+higher for cake (30.7 vs 24.5 / 24.1): every waker reads the same lowest bit.
+Native's own biggest miss is 0->1 at 115k on the second worker pool: it leaves
+a warm, fully idle core more than cake does.
+
+Next construct to discuss: placement order (§G93): home with a busy sibling
+before a cold idle thread; sinks masked out of the census walks with
+fallback; the groove gate asks an idle home regardless of miss count; the
+walk starts at the previous CPU and wraps. Then the 3->4 root cause (kick
+lost vs no kick) with a probe.
+
 **PICKUP 2026-09-04 night — SATURATION CONSTRUCTS §G90-§G92, under test, default
 off.** Field (9950X3D, Darktide Rolling Steel, single runs): lavd 1.1.2 211.50 /
 155.18 / 63.30 (97th / avg / 1% low) vs cake `9e252f622` 201.82 / 149.25 / 60.37
