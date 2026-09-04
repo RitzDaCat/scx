@@ -160,13 +160,19 @@ impl<'a> Scheduler<'a> {
         // pair (STATE.md, toggle campaign 2026-08-22).
         let mut llcsplit = false;
         for spec in &opts.toggle {
-            let (name, val) = spec
-                .split_once('=')
-                .with_context(|| format!("--toggle {spec}: expected NAME=0|1"))?;
+            // A bad toggle is reported and ignored, never fatal: a stale
+            // flag from an old config must not keep the scheduler off.
+            let Some((name, val)) = spec.split_once('=') else {
+                warn!("   toggle  ignored `{spec}`: expected NAME=0|1");
+                continue;
+            };
             let on = match val {
                 "0" => 0u8,
                 "1" => 1u8,
-                _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
+                _ => {
+                    warn!("   toggle  ignored `{spec}`: value must be 0 or 1");
+                    continue;
+                }
             };
             match name {
                 "g85" => rodata.cake_tog_g85 = on,
@@ -178,7 +184,7 @@ impl<'a> Scheduler<'a> {
                 // dies (lower and upper half of the cores, with siblings) so
                 // the routing runs as on a dual-CCD chip. Loader-only.
                 "llcsplit" => llcsplit = on == 1,
-                _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
+                _ => warn!("   toggle  ignored `{spec}`: no toggle named {name}"),
             }
         }
         let probe_on = rodata.cake_tog_probe == 1;
@@ -1118,6 +1124,57 @@ fn drop_all_capabilities() {
     }
 }
 
+/// Parse the command line, dropping options cake does not have instead of
+/// refusing to start. A legacy flag in a user's scx_loader config (for
+/// example `--profile default`) used to keep the scheduler off entirely;
+/// now the option and its bare value are dropped, the rest is parsed, and
+/// every dropped token is reported once logging is up. Real errors on real
+/// options (a bad value, `--help`, `--version`) keep clap's behaviour.
+fn parse_opts_lenient() -> (Opts, Vec<String>) {
+    use clap::error::ContextKind;
+    use clap::error::ErrorKind;
+
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut dropped: Vec<String> = Vec::new();
+    loop {
+        match Opts::try_parse_from(&args) {
+            Ok(opts) => return (opts, dropped),
+            Err(e) if e.kind() == ErrorKind::UnknownArgument => {
+                let Some(bad) = e
+                    .get(ContextKind::InvalidArg)
+                    .map(|v| v.to_string())
+                    .filter(|s| !s.is_empty())
+                else {
+                    e.exit();
+                };
+                // The offending token, matched on the option name so that
+                // both `--x=v` and `--x v` forms are found.
+                let name = bad.split('=').next().unwrap_or(&bad).to_string();
+                let Some(pos) = args.iter().skip(1).position(|a| {
+                    let s = a.to_string_lossy();
+                    s == bad || s == name || s.starts_with(&format!("{name}="))
+                }) else {
+                    e.exit();
+                };
+                let pos = pos + 1;
+                let mut tok = args.remove(pos).to_string_lossy().into_owned();
+                // `--x v`: the bare value that follows is part of the same
+                // mistake; a token starting with `-` is another option.
+                if !tok.contains('=') && tok.starts_with('-') && pos < args.len() {
+                    let next = args[pos].to_string_lossy();
+                    if !next.starts_with('-') {
+                        tok.push(' ');
+                        tok.push_str(&next);
+                        args.remove(pos);
+                    }
+                }
+                dropped.push(tok);
+            }
+            Err(e) => e.exit(),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // File capabilities (cap_bpf,cap_perfmon,cap_sys_nice) clear the dumpable
     // flag, which makes /proc/self/exe root-only and defeats the sudoless
@@ -1127,7 +1184,7 @@ fn main() -> Result<()> {
         libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
     }
 
-    let opts = Opts::parse();
+    let (opts, ignored_args) = parse_opts_lenient();
 
     if opts.version {
         println!(
@@ -1149,6 +1206,9 @@ fn main() -> Result<()> {
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     )?;
+    for a in &ignored_args {
+        warn!("   args    ignored unknown option `{a}`; cake has no such option, defaults used");
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

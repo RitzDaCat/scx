@@ -84,6 +84,11 @@ Spills: select_cpu 61/72, enqueue 18/22, dispatch_search 29/34, ring_steal
 110.94: +6.4 fps on 1% low from the die-local pool, level with lavd 1.1.2
 on that box (206.57 / 169.50 / 117.54). The 9-4 morning build read 47.14.
 
+Loader (2026-09-04): an option cake does not have (`--profile default`,
+`--mode=gaming`, a stray token) is dropped with a WARN line and the
+scheduler starts with defaults; an unknown or malformed `--toggle` is
+ignored the same way. Real errors on real options keep clap's behaviour.
+
 Owed: (1) a second pair of DOOM runs to firm the 1% low; (2) the V-cache preference for stages (first seat on the largest-L3
 die when it has a free core) -- the loader knows every LLC's cache size,
 nothing uses it for placement yet; (3) the handoff floor, slot stride and
