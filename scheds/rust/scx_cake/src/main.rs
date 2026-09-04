@@ -635,6 +635,22 @@ impl<'a> Scheduler<'a> {
                 "stage_slice",
                 "pool_stage_first",
             ];
+            // The name table must match the BPF enum exactly; a drift prints
+            // zeros silently because out-of-range lookups fail quietly.
+            let nr = self
+                .skel
+                .maps
+                .cake_stats
+                .info()
+                .map(|i| i.info.max_entries)
+                .unwrap_or(0) as usize;
+            if nr != NAMES.len() {
+                warn!(
+                    "   census  name table has {} entries, map has {}: names are out of sync",
+                    NAMES.len(),
+                    nr
+                );
+            }
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {
                 let key = (i as u32).to_ne_bytes();
