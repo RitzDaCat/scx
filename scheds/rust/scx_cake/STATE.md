@@ -79,8 +79,12 @@ Flat g89=0 vs g89=1: 0.622 / 0.653 / 1566 / 1451 vs 0.622 / 0.654 / 1559 /
 Spills: select_cpu 61/72, enqueue 18/22, dispatch_search 29/34, ring_steal
 17/9, pool_rescue 6/3; TOTAL 307/191 (was 269/131).
 
-Owed: (1) the tester's DOOM run on this build, default and `--toggle
-g89=0`; (2) the V-cache preference for stages (first seat on the largest-L3
+**FIELD 2026-09-04, `9e252f622`, same tester and setup, single runs:** g89=1
+205.27 / 169.11 / 117.34 (97th / avg / 1% low) vs g89=0 204.47 / 168.59 /
+110.94: +6.4 fps on 1% low from the die-local pool, level with lavd 1.1.2
+on that box (206.57 / 169.50 / 117.54). The 9-4 morning build read 47.14.
+
+Owed: (1) a second pair of DOOM runs to firm the 1% low; (2) the V-cache preference for stages (first seat on the largest-L3
 die when it has a free core) -- the loader knows every LLC's cache size,
 nothing uses it for placement yet; (3) the handoff floor, slot stride and
 probe depth audit items stand; (4) the real cross-CCX counter on a 9950X3D:
