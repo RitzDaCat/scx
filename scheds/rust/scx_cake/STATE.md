@@ -32,6 +32,30 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**FIELD REGRESSION 2026-09-04 evening — DOOM: The Dark Ages (Uprising), 9950X3D
+(two LLCs), nightly `6c828c1cb` vs lavd 1.1.2: 97th 213.09 vs 206.57, avg
+128.59 vs 169.50, 1% low 47.14 vs 117.54 (avg of 2). The 09-02 nightly on the
+same box read avg 170.64 / 1% low 112.03. Cause (by construction; this host
+has one LLC and cannot show it): §G85's seat decline and §G86's claim walk
+take the lowest set bit of the idle census word with no LLC awareness, so
+on a two-die host the whole-core and idle-thread claims, now effective (58 ->
+85% direct), and the declined pool work land on the other die. Yesterday's
+one-try claim failed often enough that wakes fell to the pool, which a
+same-die CPU usually served.**
+
+**§G88 (shipped, unconditional): `cpu_llc_word[cpu]` in rodata, one word per
+CPU naming the CPUs that share its LLC (loader-filled from `llc_id`, all ones
+for a CPU the topology does not describe). `claim_warm`, the seat-aware pick
+in `pick_idle_clean` and the seat decline are confined to the task's own
+LLC; a die with nothing idle sends the wake to the pool as before. One-LLC
+hosts are byte-identical in behaviour (mask all ones): schbench wake p99 6-7
+us, hackbench 0.18 s, attach clean. §G85 and §G86 got their off-switches
+back, default ON: `--toggle g85=0`, `--toggle g86=0` (one `--toggle` per
+name), so a field tester bisects on one binary. Owed from the tester: three
+runs, default / g86=0 / g85=0; if the default is still behind, the per-LLC
+pool (§S.8 shape) is the next construct, since the pool itself stays
+LLC-blind.**
+
 **PICKUP 2026-09-04 18:00 — CROSS-SCHEDULER SPOT CHECK (HD2, max preset,
 GPU-bound) + §G85 seat rules + §G86 claim retry. Machine on EEVDF, HD2 open.
 §G85 and §G86 SHIPPED (maintainer 2026-09-04, "pure wins"): both toggles
