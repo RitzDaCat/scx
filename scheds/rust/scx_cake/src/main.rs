@@ -179,6 +179,9 @@ impl<'a> Scheduler<'a> {
                 "g86" => rodata.cake_tog_g86 = on,
                 "g87" => rodata.cake_tog_g87 = on,
                 "g89" => rodata.cake_tog_g89 = on,
+                "g90" => rodata.cake_tog_g90 = on,
+                "g91" => rodata.cake_tog_g91 = on,
+                "g92" => rodata.cake_tog_g92 = on,
                 "probe" => rodata.cake_tog_probe = on,
                 // Test scaffold: present this host to the BPF side as two
                 // dies (lower and upper half of the cores, with siblings) so
@@ -189,11 +192,14 @@ impl<'a> Scheduler<'a> {
         }
         let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g85={} g86={} g87={} g89={} probe={}",
+            "   toggle  g85={} g86={} g87={} g89={} g90={} g91={} g92={} probe={}",
             rodata.cake_tog_g85,
             rodata.cake_tog_g86,
             rodata.cake_tog_g87,
             rodata.cake_tog_g89,
+            rodata.cake_tog_g90,
+            rodata.cake_tog_g91,
+            rodata.cake_tog_g92,
             rodata.cake_tog_probe
         );
 
@@ -497,7 +503,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 126] = [
+            const NAMES: [&str; 130] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -624,6 +630,10 @@ impl<'a> Scheduler<'a> {
                 "x_pool_served",
                 "steal_moved",
                 "x_steal_moved",
+                "producer_ins",
+                "producer_preempt",
+                "stage_slice",
+                "pool_stage_first",
             ];
             let mut tot = [0u64; NAMES.len()];
             for (i, t) in tot.iter_mut().enumerate() {

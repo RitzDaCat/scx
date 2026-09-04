@@ -32,6 +32,38 @@ in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
 
 ## RESUME HERE
 
+**PICKUP 2026-09-04 night — SATURATION CONSTRUCTS §G90-§G92, under test, default
+off.** Field (9950X3D, Darktide Rolling Steel, single runs): lavd 1.1.2 211.50 /
+155.18 / 63.30 (97th / avg / 1% low) vs cake `9e252f622` 201.82 / 149.25 / 60.37
+(crate 1.1.3: 178.91 / 128.73 / 53.76). A uniform 4-5% gap on all three columns
+with the game pinned to one 8-core die = throughput under a saturated die, the
+regime where the seat rules keep no queue empty. Three class-relative answers,
+each behind a toggle:
+
+| toggle | construct | saturated appsim here (HD2 mission spec pinned to 4 cores, 20 s slots, mirrored, 2/arm) |
+|---|---|---|
+| g92 | a stage at the pool head is served ahead of a non-stage own head without the one-slice margin (`pool_stage_first`) | 0.672 / 0.823 / 1347 vs off 0.771 / 0.927 / 1191 (p99 / p99.9 / 1% low) in its rotation |
+| g91 | stage slice: two bursts capped at one voted frame, never above `STAGE_SLICE_MAX_NS` (6 ms), instead of half the clamped period; only for a stage whose raw period is within 2 frames (`stage_slice`) | 0.728 / 0.870 / 1245 vs the same off |
+| g90 | producer rank: wakes issued per burst counted in the run slot (`woke`), folded into the groove at stopping for stage class (`fanout8` EWMA), `FANOUT_MIN` 4; a producer's pool key sits one slice deeper (`producer_ins`) and its wake preempt skips the protect window down to the handoff floor (`producer_preempt`) | 0.683 / 0.784 / 1373 vs off 0.661 / 0.748 / 1428 |
+| all three | | 0.679 / 0.803 / 1334 vs off 0.653 / 0.735 / 1446 |
+
+**Read: unresolved at n=2.** The off arm alone spans p99 0.636-0.771 and 1% low
+1191-1503 across rotations, wider than any toggle's effect; the stack read
+negative and g92 alone positive in different rotations. The simulated frame is
+a fork-join, so ranking a stage above its own workers can delay the join --
+a real caveat for g90/g91, not yet a verdict. Needs 6/arm (~10 min, a go) or
+the game: HD2 at a CPU-bound preset here, Darktide there with each toggle alone.
+Spills: wake_preempt 18/10, task_slice 3/0, stopping 11/9; TOTAL 328/205.
+Rig: `runs/llc_20260904/satrot.py` (mirrored appsim rotation, `CPUS`, `ROUNDS`),
+`hd2-mission-20s.conf`.
+
+**Dual-CCD extension of the same idea (not built):** the producer is the anchor.
+A worker woken by a producer on the other die should claim on the producer's
+die (the waker's LLC, known in select_cpu), not its own stale home; and a
+producer's first seat should land on the largest-L3 die. Both are `cpu_llc_word`
+reads at sites that exist; both need the fake split for coverage and a 9950X3D
+for the number.
+
 **PICKUP 2026-09-04 late — DUAL-CCD / LLC AWARENESS. §G88 confirmed in the
 field (9950X3D, DOOM TDA Uprising, single runs each on `f28fc5d21`): g85
 204.60 / 167.64 / 112.63 (97th / avg / 1% low), g86 206.69 / 168.47 / 108.10,
