@@ -109,6 +109,7 @@ enum consts {
 	GROOVE_HOME_MISS		= 8,		/* §G75: home misses before the task stops asking */
 	GROOVE_PROBE_MASK		= 63,		/* §G75: re-probe the home every 64 wakes */
 	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
+	CLAIM_TRIES			= 4,			/* §G86: idle-word bits tried per claim */
 };
 
 #endif /* __CAKE_INTF_H */

@@ -56,7 +56,6 @@ UEI_DEFINE(uei);
 	bpf_core_enum_value(enum scx_pick_idle_cpu_flags, SCX_PICK_IDLE_CORE)
 
 /* Declared ahead of the toggle block: the probe census below reads it. */
-const volatile u8 cake_tog_g85;			/* exclusive seat: strangers, pool kicks and the seat's own dispatch keep off a held seat (§G85) */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 
 /*
@@ -166,6 +165,14 @@ enum cake_stat {
 	CAKE_SITE_LEAK_HOME,
 	CAKE_SITE_LEAK_KICK,
 	CAKE_SITE_LEAK_DISPATCH,
+	/* §G85 seat rules, one count per fire. */
+	CAKE_SITE_SEAT_IMMUNE,
+	CAKE_SITE_SEAT_RETAKE,
+	CAKE_SITE_SEAT_REROUTE,
+	CAKE_SITE_SEAT_DECLINE,
+	/* §G86: a second or later bit tried; a kthread wake sent to the pool. */
+	CAKE_SITE_CLAIM_RETRY,
+	CAKE_SITE_KT_POOL,
 	CAKE_STAT_NR,
 };
 
@@ -357,7 +364,10 @@ struct cake_run_slot {
 	u64 hint;
 	/* §G85: pid that holds this CPU's seat; valid while the seat bit is up. */
 	u64 seat_pid;
-	u64 pad[STATE_SLOT_WORDS - 4];
+	/* §G85: the holder was just placed behind a stranger; the stranger's
+	 * re-enqueue reads it and takes the pool; ops.running clears it. */
+	u64 retake;
+	u64 pad[STATE_SLOT_WORDS - 5];
 };
 
 enum {
@@ -909,7 +919,7 @@ static u64 cake_core_free __attribute__((aligned(STATE_SLOT_BYTES)));
 static u64 cake_seat_word __attribute__((aligned(STATE_SLOT_BYTES)));
 
 /* §G85: is @cpu a seat held by a task other than @p? Counts the leak at
- * @site every time; blocks the caller only under the toggle. */
+ * @site and blocks the caller. */
 static __always_inline bool cake_seat_blocks(s32 cpu, const struct task_struct *p,
 					     u32 site)
 {
@@ -919,7 +929,7 @@ static __always_inline bool cake_seat_blocks(s32 cpu, const struct task_struct *
 	    cake.run[c].seat_pid == (u64)(u32)p->pid)
 		return false;
 	cake_stat_inc(site);
-	return cake_tog_g85;
+	return true;
 }
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 
@@ -1078,6 +1088,15 @@ static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
 		cake_stat_inc(CAKE_STAT_WP_STARVED);
 		return false;
 	}
+	/* §G85: a stage back on its own seat is not the victim. It runs more
+	 * than it waits, so cake_starved never covers it, and it carries the
+	 * highest live vtime on the box, so every gate above elects it. */
+	if (curr && (u32)tcpu < 64 &&
+	    cake.run[(u32)tcpu & (MAX_CPUS - 1)].seat_pid ==
+	    (u64)(u32)curr->pid) {
+		cake_stat_inc(CAKE_SITE_SEAT_IMMUNE);
+		return false;
+	}
 
 	cake_stat_inc(CAKE_STAT_WP_FIRED);
 	cake_kick_preempt(tcpu);
@@ -1133,6 +1152,7 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 	u64 aff = p->cpus_ptr->bits[0];
 	u64 seats, w;
 	s32 c;
+	int i;
 
 	if (nr_cpu_span > 64)
 		return -1;
@@ -1146,23 +1166,33 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 	/* §G71: the published words CHOOSE (one read each); the kernel idle
 	 * bit CLAIMS (one kfunc). Two kfuncs at most per wake, no scan. §G79:
 	 * held seats are skipped while any other core is free. */
+	/* §G86: the words lag the kernel bit by one claim window (a claimed
+	 * CPU stays published until it runs) and every waker reads the same
+	 * lowest bit, so one try lost 47% of core claims and 86% of thread
+	 * claims (HD2 census 2026-09-04). Walk up to CLAIM_TRIES bits. */
 	seats = cake_seat_word;
 	w = cake_core_free & aff & ~seats;
 	if (!w)
 		w = cake_core_free & aff;	/* only held cores left: take one */
-	if (w) {
+	for (i = 0; i < CLAIM_TRIES && w; i++) {
 		c = (s32)__builtin_ctzll(w);
+		if (i)
+			cake_stat_inc(CAKE_SITE_CLAIM_RETRY);
 		if (cake_taci(c, CAKE_SITE_TACI_WARM_CORE))
 			return c;
+		w &= w - 1;
 	}
 	w = cake_idle_words[0] & aff & ~seats;
 	if (!w)
 		w = cake_idle_words[0] & aff;
-	if (w) {
+	for (i = 0; i < CLAIM_TRIES && w; i++) {
 		c = (s32)__builtin_ctzll(w);
+		if (i)
+			cake_stat_inc(CAKE_SITE_CLAIM_RETRY);
 		if (c < 64 && !((cake_core_free >> c) & 1) &&
 		    cake_taci(c, CAKE_SITE_TACI_WARM_THREAD))
 			return c;
+		w &= w - 1;
 	}
 	return -1;
 }
@@ -1390,6 +1420,36 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * The claim is declined on a contended core: the home is only warm if
 	 * the task gets the whole core to run on (§G38).
 	 */
+	/* §G85 RETAKE: a stage whose own seat is run by a non-stage occupant
+	 * (the seat's dispatch took pool work while the stage blocked) takes
+	 * the seat back at once: placed behind the occupant, the occupant
+	 * kicked out and rerouted to the pool by ops.enqueue. Unfair on
+	 * purpose: the frame path outranks a worker slice (GAME-FIRST). RT,
+	 * idle, pinned and another stage are never evicted. */
+	if (prev_cpu >= 0 && (u32)prev_cpu < 64 &&
+	    cake.run[(u32)prev_cpu & (MAX_CPUS - 1)].seat_pid ==
+	    (u64)(u32)p->pid &&
+	    cake_burst_ns(p) >= SEAT_BURST_MIN_NS &&
+	    !cake_cpu_irq_bad(prev_cpu) &&
+	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+		u64 ran = 0;
+		u64 live = cake_occupant_live(prev_cpu, &ran);
+		struct task_struct *hc = cake_cpu_curr(prev_cpu);
+
+		if (live && hc && hc != p && hc->nr_cpus_allowed > 1 &&
+		    cake_burst_ns(hc) < SEAT_BURST_MIN_NS) {
+			cake.run[(u32)prev_cpu & (MAX_CPUS - 1)].retake = 1;
+			if (gr)
+				gr->home_miss = 0;
+			cake_direct_clamp(p);
+			cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)prev_cpu,
+					cake_task_slice(p), 0);
+			cake_kick_preempt(prev_cpu);
+			cake_stat_inc(CAKE_SITE_SEAT_RETAKE);
+			return prev_cpu;
+		}
+	}
+
 	{
 		bool ask_home = true;
 
@@ -1519,15 +1579,21 @@ static __noinline s32 cake_pick_idle_clean(struct task_struct *p __arg_trusted)
 
 	/* §G85: an idle CPU that is nobody's seat, from the census, first;
 	 * held seats are taken only when nothing else is idle. */
-	if (cake_tog_g85 && nr_cpu_span <= 64) {
+	if (nr_cpu_span <= 64) {
 		u64 w = cake_idle_words[0] & p->cpus_ptr->bits[0] &
 			~cake_seat_word;
+		int i;
 
-		if (w) {
+		/* §G86: walk the word; an unclean or already-claimed bit costs
+		 * one test, not the whole pick (one try won 15% here). */
+		for (i = 0; i < CLAIM_TRIES && w; i++) {
 			cpu = (s32)__builtin_ctzll(w);
+			if (i)
+				cake_stat_inc(CAKE_SITE_CLAIM_RETRY);
 			if (cake_cpu_clean(cpu) &&
 			    cake_taci(cpu, CAKE_SITE_TACI_NOTIFY))
 				return cpu;
+			w &= w - 1;
 		}
 	}
 
@@ -1721,6 +1787,18 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	if ((enq_flags & CAKE_ENQ_WAKEUP) && (p->flags & PF_KTHREAD)) {
 		s32 kcpu = cake_pick_idle_clean(p);
 
+		/* §G86: nothing idle was claimed. The pool with the notify's
+		 * preempt bounds the wait by a vtime test, not by the occupant's
+		 * slice: the display kthreads the nvidia ISR wakes queued behind
+		 * a worker for 110 us median and 1.5 ms max while another CPU
+		 * sat idle 95% of the time (HD2 chain trace 2026-09-04). Pinned
+		 * kthreads keep the local queue: no other CPU may serve them. */
+		if (kcpu < 0 && p->nr_cpus_allowed > 1) {
+			cake_stat_inc(CAKE_SITE_KT_POOL);
+			cake_enqueue_wake(p, tcpu);
+			return;
+		}
+
 		cake_direct_clamp(p);
 		cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON |
 				   (u32)(kcpu >= 0 ? kcpu : tcpu),
@@ -1774,6 +1852,21 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 			cake_dsq_insert_vtime(p, (u64)WAKE_DSQ,
 					      cake_task_slice(p),
 					      cake_wake_vtime(p), enq_flags);
+			cake_wake_mark_set();	/* after the insert (§G41) */
+			goto kick_idle;
+		}
+
+		/* §G85: the seat's queue is the holder's. A task re-enqueued on
+		 * a seat whose holder was just placed behind it (the retake)
+		 * takes the pool and runs on another CPU now, instead of
+		 * alternating with the holder at slice granularity. */
+		if ((u32)tcpu < 64 && p->nr_cpus_allowed > 1 &&
+		    cake.run[(u32)tcpu & (MAX_CPUS - 1)].retake &&
+		    cake.run[(u32)tcpu & (MAX_CPUS - 1)].seat_pid !=
+		    (u64)(u32)p->pid) {
+			cake_stat_inc(CAKE_SITE_SEAT_REROUTE);
+			cake_dsq_insert_vtime(p, (u64)WAKE_DSQ,
+					      cake_task_slice(p), vt, enq_flags);
 			cake_wake_mark_set();	/* after the insert (§G41) */
 			goto kick_idle;
 		}
@@ -1934,12 +2027,20 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		 * busy CPU (the hold). While another idle CPU is nobody's seat,
 		 * the seat stays idle; that CPU was kicked for the pool wake. */
 		if (!own_n && nr_cpu_span <= 64 && ucpu < 64 &&
-		    ((cake_seat_word >> ucpu) & 1) &&
-		    (cake_idle_words[0] & ~cake_seat_word)) {
-			if (wake_n || (cake.qmask[0] & ~(1ULL << ucpu)))
+		    ((cake_seat_word >> ucpu) & 1)) {
+			u64 free = cake_idle_words[0] & ~cake_seat_word;
+
+			if (free && (wake_n || (cake.qmask[0] & ~(1ULL << ucpu)))) {
 				cake_stat_inc(CAKE_SITE_LEAK_DISPATCH);
-			/* count only: blocking it stranded pool wakes on appsim
-			 * (p99 0.65 -> 0.80 ms, probe_g85 2026-09-03) */
+				/* §G85: the seat stays idle for its holder; an
+				 * idle CPU that is nobody's seat is kicked for the
+				 * work. Declining WITHOUT the kick stranded pool
+				 * wakes on appsim (p99 0.65 -> 0.80 ms, 2026-09-03). */
+				cake_stat_inc(CAKE_SITE_SEAT_DECLINE);
+				cake_kick((s32)__builtin_ctzll(free),
+					  CAKE_KICK_IDLE);
+				return false;
+			}
 		}
 		wake = wake_n ? cake_dsq_peek((u64)WAKE_DSQ) : NULL;
 		if (!wake_n) {
@@ -2030,6 +2131,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
 	run->stamp = now;
 	run->sum = p->se.sum_exec_runtime;
+	run->retake = 0;
 	cake_stat_inc(CAKE_SITE_RUNNING);
 	CAKE_TIMED_VOID(CAKE_SITE_T_CAL, (void)0);
 	if ((cpu & (MAX_CPUS - 1)) < 64 &&
