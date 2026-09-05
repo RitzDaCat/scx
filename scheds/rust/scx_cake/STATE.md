@@ -99,6 +99,33 @@ result appended when the mirrored run finishes):**
 | g96 | HINT_SLOTS (4) going-idle mailboxes per die: dispatch publishes into slot cpu & 3, a wakee claims from the slot of its previous CPU first (`g96_slot`) |
 | g97 | census walks prefer non-sink bits (`cake_sink_word`, loader-published beside `cpu_irq_hot`), a sink only when nothing else is idle (`g97_skip`) |
 
+**Placement benchmark result (appsim HD2 mission, unpinned, 20 s sched trace
+per slot audited by placeaudit.py, ~1.47M scored wakes per slot):**
+
+| arm (2 slots, mirrored) | ok % | contended % | miss % | queued while idle | p99 / p99.9 ms | 1% / 0.1% low |
+|---|---|---|---|---|---|---|
+| off | 58.4 | 17.0 | 24.6 | 89,891 | 0.623 / 0.655 | 1527 / 1244 |
+| g93 | 63.5 | 18.6 | 17.8 | 68,305 | 0.623 / 0.651 | 1572 / 1515 |
+| g94 | 64.4 | 18.3 | 17.3 | 60,610 | 0.621 / 0.650 | 1575 / 1520 |
+| g95 | 61.7 | 18.6 | 19.7 | 38,124 | 0.621 / 0.649 | 1576 / 1521 |
+| g96 | 55.8 | 15.7 | 28.4 | 100,908 | 0.624 / 0.661 | 1559 / 1456 |
+| g97 | 59.4 | 16.9 | 23.7 | 83,734 | 0.622 / 0.651 | 1573 / 1518 |
+| all five | 65.8 | 20.3 | 13.9 | 34,510 | 0.620 / 0.653 | 1572 / 1480 |
+
+Confirm, 4 slots each, mirrored: off ok 60.4% / contended 17.0% / miss
+22.6% / queued-while-idle 74923 / p99 0.622 / p99.9 0.651 / 1% low 1568 /
+0.1% low 1568; **stack g93+g94+g95+g97: ok 66.6% / 19.2% / 14.2% /
+23124 / 0.620 / 0.650 / 1577 / 1577.** Every stack slot beat every off slot
+on the queued-while-idle count (21,030-23,718 vs 75,623-88,596). g96 loses on
+its own and leaves the tree. g97 was inert on appsim: cake's live sink set
+without a game is CPU 9 only; its number is a game read (under HD2 the set is
+[9, 13]). g95 shifts claims toward higher-numbered CPUs as the low bits retire
+first, which is the case g97 exists for. Contended rises with every winner
+(17.0 -> 18.3-19.2): more claims land on real idle CPUs and race.
+
+Owed: the same audit on an HD2 trace, stack on vs off, then the frame
+rotation; the pinned/saturated read; then hardwire the keeps.
+
 Next construct to discuss: placement order (§G93): home with a busy sibling
 before a cold idle thread; sinks masked out of the census walks with
 fallback; the groove gate asks an idle home regardless of miss count; the
