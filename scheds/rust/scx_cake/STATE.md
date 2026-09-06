@@ -25,12 +25,44 @@ live WoW confirm); all hashes cited below resolve via those local backup branche
 2026-08-25: PR #3767 merged upstream (`4a2ab1fce`) with ALL of nightly's scx_cake
 content (subtree hash identical) — nightly reset onto upstream/main; pre-reset state
 in `backup/nightly-pre-rebase-20260825`; origin fork NOT yet force-pushed.
+2026-09-06: PR #3786 merged upstream (`c410fcbd7`) with the §G82 state — nightly
+rebased onto upstream/main `38872eded` (12 pre-§G82 commits dropped as already
+merged, 14 replayed clean); pre-rebase tip in `backup/nightly-pre-rebase-20260906`;
+the day's three commits squashed to one; origin force-pushed.
 
 </details>
 
 ---
 
 ## RESUME HERE
+
+**PICKUP 2026-09-06 — REBASE, §G96 OUT, A FREEZE REPORT.** Nightly rebased
+onto upstream/main `38872eded` (PR #3786 merged the §G82 state, subtree
+identical; pre-rebase tip in `backup/nightly-pre-rebase-20260906`). §G96
+removed from the tree (lost on its own). §G90-§G97 stay under test, default
+off, one `--toggle gNN=1` each; the g93+g94+g95+g97 stack is the candidate
+default, held for a game read. Field: a tester reports a complete freeze on
+first run of the pushed nightly `bff058461` -- g90-g97 were all off in that
+binary, so the cause is in the default-on set (g85 g86 g87 g89) or §G88 (no
+toggle). Triage order for the tester: `--toggle g89=0` (host-LLC keyed,
+newest), then g86=0, g85=0, g87=0; all four off is the §G82 state upstream
+ships. Wanted from the report: CPU/CCD count, kernel, binary hash, any
+watchdog line, dmesg. Origin fork force-pushed 2026-09-06 with this state:
+defaults unchanged from `bff058461`, g96 gone. Startup trimmed: stock prints
+version, host, attached, and overrides only when given; slice, kernel paths, the
+full toggle line, sinks, frame clock and exit events sit under `-v`; `--help`
+lists every toggle with its default from one table checked against rodata.
+
+**Appsim 2026-09-06, every toggle on (g90-g95, g97) vs off, placebench
+mirrored, 2 slots per arm (`runs/llc_20260904/placebench_20260906_142859`,
+run binary `4caa6c92`, arm `g90-97`):** ok 71.2 / 69.0 vs 64.7 / 66.4 %;
+miss 8.9 / 12.7 vs 17.1 / 15.5 %; queued-while-idle 14,609 / 17,690 vs
+42,453 / 62,460; p99.9 0.664 / 0.662 vs 0.655 / 0.743; 1% low 1478 / 1409
+vs 1548 / 1420; 0.1% low 962 / 733 vs 1326 / 785. Placement wins as the
+g93-g97 stack did; the 0.1% tail is not better and leans worse (n=2, not a
+verdict). Today's off arm sits above the 2026-09-04 off arm (ok 65.6 vs
+58.4-60.4 %), so compare inside one rotation only. Loader now prints a
+second start line, `toggle  changed from default: ...`, naming each override.
 
 **PICKUP 2026-09-04 late night — CODE AUDIT + PLACEMENT AUDIT.** Machine on
 EEVDF. Tree: cleanup committed (below); §G90-§G92 under test, off.
@@ -87,7 +119,7 @@ higher for cake (30.7 vs 24.5 / 24.1): every waker reads the same lowest bit.
 Native's own biggest miss is 0->1 at 115k on the second worker pool: it leaves
 a warm, fully idle core more than cake does.
 
-**Built 2026-09-04 night, under test, default off (`runs/llc_20260904/
+**Built 2026-09-04 night, under test, default off; g96 removed 2026-09-06 (`runs/llc_20260904/
 placebench.py`: a sched trace of appsim per arm, audited by placeaudit.py;
 result appended when the mirrored run finishes):**
 

@@ -39,17 +39,13 @@ use scx_utils::NR_CPU_IDS;
 
 const SCHEDULER_NAME: &str = "scx_cake";
 
-/// scx_cake: a gaming-first sched_ext scheduler — one master algorithm on
-/// kernel primitives, no feature flags, no knobs, no runtime telemetry.
-/// Placement is the kernel's idle-CPU pick with direct dispatch on a hit.
-/// Under saturation, wakeups queue on one global vtime queue while
-/// slice-expired tasks requeue on their own CPU's queue ("wakeups global,
-/// continuations local"), and each CPU dispatches the earliest eligible of
-/// the two. The time slice is a compile-time constant.
+/// scx_cake: a gaming-first sched_ext scheduler.
 #[derive(Debug, Parser)]
+#[command(after_help = toggle_help())]
 struct Opts {
-    /// Enable verbose libbpf output and runtime diagnostics. A release run
-    /// without this prints only identity, attach and exit.
+    /// Verbose libbpf output and runtime diagnostics: slice and queue
+    /// layout, kernel fast paths, the full toggle line, interrupt sinks as
+    /// they change, frame clock, kernel event counts at exit.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
@@ -57,11 +53,38 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
-    /// Diagnostics toggle, `probe=1`: placement census, hold attribution,
-    /// site counters and the hitch black box. Rodata, so the verifier
-    /// deletes it all when off. Unknown names refuse to start.
+    /// Override one construct toggle, NAME=0|1, repeatable; the list is
+    /// below. Rodata, so the verifier deletes an off arm. An unknown name
+    /// or value is dropped with a warning.
     #[clap(long = "toggle", value_name = "NAME=0|1")]
     toggle: Vec<String>,
+}
+
+/// Every construct toggle: name, construct, BPF default. The default is
+/// checked against the compiled rodata at start so the two cannot drift;
+/// --help prints this table.
+const TOGGLES: [(&str, &str, u8); 12] = [
+    ("g85", "seat-rules", 1),
+    ("g86", "claim-retry", 1),
+    ("g87", "wakee-protect", 1),
+    ("g89", "die-local-pool", 1),
+    ("g90", "producer-rank", 0),
+    ("g91", "stage-slice", 0),
+    ("g92", "stage-pool-first", 0),
+    ("g93", "warm-home-first", 0),
+    ("g94", "walk-from-prev", 0),
+    ("g95", "claim-retires-idle", 0),
+    ("g97", "skip-sinks", 0),
+    ("probe", "diagnostics", 0),
+];
+
+fn toggle_help() -> String {
+    let mut s = String::from("Toggles (--toggle NAME=0|1, repeatable):\n");
+    for (name, what, dfl) in TOGGLES {
+        s.push_str(&format!("  {name:<9} {what:<20} default {dfl}\n"));
+    }
+    s.push_str("  llcsplit  fake-two-dies        default 0, loader-only test scaffold\n");
+    s
 }
 
 struct Scheduler<'a> {
@@ -86,9 +109,6 @@ struct Scheduler<'a> {
     verbose: bool,
     /// Live IRQ-sink tracking state (§G30, §G33).
     sinks: SinkMonitor,
-    /// The first live sink set completes the startup banner at INFO; later
-    /// changes are diagnostics and follow --verbose.
-    sinks_logged: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -113,17 +133,6 @@ impl<'a> Scheduler<'a> {
             "🍰 {} {}",
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION"))
-        );
-        info!("   cores   {physical} physical + {smt} SMT = {total} CPUs");
-        info!("   slice   {slice_us}µs · queues {total} per-CPU vtime + 1 global wake");
-        info!(
-            "   kernel  queued_wakeup {} · dsq_peek {}",
-            if queued_wakeup { "on" } else { "UNSUPPORTED" },
-            // cake calls scx_bpf_dsq_peek() unconditionally -- the
-            // __COMPAT_ iterator arm was deleted with the other compat
-            // ladders. On a kernel without the ksym the load fails
-            // outright, so "MISSING" is the honest word, not "fallback".
-            if dsq_peek { "native" } else { "MISSING" },
         );
 
         // Open the BPF program.
@@ -157,8 +166,35 @@ impl<'a> Scheduler<'a> {
 
         // Campaign toggles land in rodata before load so the verifier prunes
         // the off arms; the logged line is each arm's identity in an on/off
-        // pair (STATE.md, toggle campaign 2026-08-22).
+        // pair (STATE.md, toggle campaign 2026-08-22). One table names every
+        // toggle; a second line prints only what differs from the build's
+        // defaults, which is what a tester needs to read back.
         let mut llcsplit = false;
+        let fields: [&mut u8; 12] = [
+            &mut rodata.cake_tog_g85,
+            &mut rodata.cake_tog_g86,
+            &mut rodata.cake_tog_g87,
+            &mut rodata.cake_tog_g89,
+            &mut rodata.cake_tog_g90,
+            &mut rodata.cake_tog_g91,
+            &mut rodata.cake_tog_g92,
+            &mut rodata.cake_tog_g93,
+            &mut rodata.cake_tog_g94,
+            &mut rodata.cake_tog_g95,
+            &mut rodata.cake_tog_g97,
+            &mut rodata.cake_tog_probe,
+        ];
+        let mut slots: Vec<(&str, &str, &mut u8)> = TOGGLES
+            .iter()
+            .zip(fields)
+            .map(|((name, what, dfl), field)| {
+                if *field != *dfl {
+                    warn!("   toggle  {name} defaults to {} in BPF but {dfl} in TOGGLES; fix the table", *field);
+                }
+                (*name, *what, field)
+            })
+            .collect();
+        let defaults: Vec<u8> = slots.iter().map(|s| *s.2).collect();
         for spec in &opts.toggle {
             // A bad toggle is reported and ignored, never fatal: a stale
             // flag from an old config must not keep the scheduler off.
@@ -174,32 +210,64 @@ impl<'a> Scheduler<'a> {
                     continue;
                 }
             };
-            match name {
-                "g85" => rodata.cake_tog_g85 = on,
-                "g86" => rodata.cake_tog_g86 = on,
-                "g87" => rodata.cake_tog_g87 = on,
-                "g89" => rodata.cake_tog_g89 = on,
-                "g90" => rodata.cake_tog_g90 = on,
-                "g91" => rodata.cake_tog_g91 = on,
-                "g92" => rodata.cake_tog_g92 = on,
-                "g93" => rodata.cake_tog_g93 = on,
-                "g94" => rodata.cake_tog_g94 = on,
-                "g95" => rodata.cake_tog_g95 = on,
-                "g96" => rodata.cake_tog_g96 = on,
-                "g97" => rodata.cake_tog_g97 = on,
-                "probe" => rodata.cake_tog_probe = on,
+            if let Some(slot) = slots.iter_mut().find(|s| s.0 == name) {
+                *slot.2 = on;
+            } else if name == "llcsplit" {
                 // Test scaffold: present this host to the BPF side as two
                 // dies (lower and upper half of the cores, with siblings) so
                 // the routing runs as on a dual-CCD chip. Loader-only.
-                "llcsplit" => llcsplit = on == 1,
-                _ => warn!("   toggle  ignored `{spec}`: no toggle named {name}"),
+                llcsplit = on == 1;
+            } else {
+                warn!("   toggle  ignored `{spec}`: no toggle named {name}");
             }
         }
-        let probe_on = rodata.cake_tog_probe == 1;
+        // Host identity right under the version line; the LLC count is the
+        // same expression the steal and pool setup below uses.
         info!(
-            "   toggle  g85={} g86={} g87={} g89={} g90={} g91={} g92={} g93={} g94={} g95={} g96={} g97={} probe={}",
-            rodata.cake_tog_g85, rodata.cake_tog_g86, rodata.cake_tog_g87, rodata.cake_tog_g89, rodata.cake_tog_g90, rodata.cake_tog_g91, rodata.cake_tog_g92, rodata.cake_tog_g93, rodata.cake_tog_g94, rodata.cake_tog_g95, rodata.cake_tog_g96, rodata.cake_tog_g97, rodata.cake_tog_probe
+            "   host    {physical} cores + {smt} SMT = {total} CPUs, {} LLC{}",
+            if llcsplit { 2 } else { topo.all_llcs.len() },
+            if llcsplit {
+                " (SCAFFOLD: fake split, not the hardware)"
+            } else {
+                ""
+            }
         );
+        if opts.verbose {
+            info!("   slice   {slice_us}µs, {total} per-CPU vtime queues + 1 global wake queue");
+        }
+        // cake calls scx_bpf_dsq_peek() unconditionally; on a kernel without
+        // the ksym the load fails outright, so "MISSING" is the honest word.
+        let kernel_line = format!(
+            "   kernel  queued_wakeup {}, dsq_peek {}",
+            if queued_wakeup { "on" } else { "UNSUPPORTED" },
+            if dsq_peek { "native" } else { "MISSING" }
+        );
+        if !queued_wakeup || !dsq_peek {
+            warn!("{kernel_line}");
+        } else if opts.verbose {
+            info!("{kernel_line}");
+        }
+        let probe_on = slots.iter().any(|s| s.0 == "probe" && *s.2 == 1);
+        // Stock start says nothing about toggles. An override prints one
+        // line naming what moved; the full identity line is --verbose only.
+        let mut changed: Vec<String> = slots
+            .iter()
+            .zip(&defaults)
+            .filter(|(s, d)| *s.2 != **d)
+            .map(|(s, _)| format!("{}={} {}", s.0, s.2, s.1))
+            .collect();
+        if llcsplit {
+            changed.push("llcsplit=1 fake-two-dies".to_string());
+        }
+        if opts.verbose {
+            let line: Vec<String> = slots.iter().map(|s| format!("{}={}", s.0, s.2)).collect();
+            info!("   toggle  {}", line.join(" "));
+        }
+        if !changed.is_empty() {
+            info!("   toggle  {} (all others at default)", changed.join(", "));
+        } else if !opts.toggle.is_empty() {
+            info!("   toggle  all at default");
+        }
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
         // Clamped so a probe perturbed by host load cannot mis-tune the
@@ -233,7 +301,6 @@ impl<'a> Scheduler<'a> {
                 // wake. Zero (probe failed) leaves the predictor off.
                 rodata.cake_wake_hop_ns = p99;
                 if opts.verbose {
-                    info!("   class   starvation = mean wait > mean burst (no threshold)");
                     info!(
                         "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
                     );
@@ -251,9 +318,8 @@ impl<'a> Scheduler<'a> {
         // distribution's own widest gap (§G30, §G33, §R.26). Nothing is
         // sampled at attach — an attach-time window measures whatever the
         // machine happened to be doing during launch (§G30's observer
-        // effect) — so the scheduler starts sink-free and announces the
-        // first honest set seconds later.
-        info!("   irq     interrupt sinks tracked live by handler-time share");
+        // effect) — so the scheduler starts sink-free; -v announces each
+        // set as it changes.
 
         let siblings = &mut rodata.cpu_sibling;
         siblings.fill(-1);
@@ -366,11 +432,6 @@ impl<'a> Scheduler<'a> {
                         rodata.cpu_llc_word[cpu.id] = *word;
                     }
                 }
-                info!(
-                    "   llc     {} domain(s){}; census claims and seat declines stay inside the task's LLC",
-                    nr_llcs,
-                    if llcsplit { " (SCAFFOLD: fake split, not the hardware)" } else { "" }
-                );
             }
 
             if multi_ccd && !fits {
@@ -429,7 +490,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        info!("🍰 attached — wakeups queue globally, continuations locally");
+        info!("🍰 attached");
 
         // The file capabilities (cap_bpf,cap_perfmon,cap_sys_nice) are only
         // needed to load and attach; detach and map access use already-open
@@ -451,7 +512,6 @@ impl<'a> Scheduler<'a> {
             frame_floor: 0,
             verbose: opts.verbose,
             sinks: SinkMonitor::new(*NR_CPU_IDS),
-            sinks_logged: false,
         })
     }
 
@@ -501,7 +561,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 135] = [
+            const NAMES: [&str; 134] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -635,7 +695,6 @@ impl<'a> Scheduler<'a> {
                 "g93_home",
                 "g93_ask",
                 "g95_clear",
-                "g96_slot",
                 "g97_skip",
             ];
             // The name table must match the BPF enum exactly; a drift prints
@@ -677,7 +736,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        if let Some(bss) = self.skel.maps.bss_data.as_mut() {
+        if let (true, Some(bss)) = (self.verbose, self.skel.maps.bss_data.as_mut()) {
             let ev = &bss.cake_events;
             info!(
                 "   events  select_fallback {} keep_last {} enq_skip_exiting {}",
@@ -688,7 +747,7 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
-        info!("🍰 {SCHEDULER_NAME} detached — default scheduler restored");
+        info!("🍰 detached");
         uei_report!(&self.skel, uei)
     }
 
@@ -712,14 +771,13 @@ impl<'a> Scheduler<'a> {
         // §G97: the same set as one word for the census walks.
         bss.cake_sink_word = word;
 
-        if self.verbose || !self.sinks_logged {
-            self.sinks_logged = true;
+        if self.verbose {
             let named: Vec<usize> = set
                 .iter()
                 .enumerate()
                 .filter_map(|(cpu, hot)| hot.then_some(cpu))
                 .collect();
-            info!("   irq     interrupt-sink CPUs {named:?} — steered around");
+            info!("   irq     sinks {named:?} steered around");
         }
     }
 

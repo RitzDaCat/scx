@@ -66,7 +66,6 @@ const volatile u8 cake_tog_g92;			/* a stage at the pool head is served ahead of
 const volatile u8 cake_tog_g93;			/* warm home with a busy sibling before a cold idle thread; the groove gate asks a home the census shows idle (§G93) */
 const volatile u8 cake_tog_g94;			/* census walks start at the task's previous CPU and wrap, not at bit 0 (§G94) */
 const volatile u8 cake_tog_g95;			/* a successful claim clears cake's idle and core bits at once, not at the next update_idle (§G95) */
-const volatile u8 cake_tog_g96;			/* HINT_SLOTS going-idle hints per LLC, publish by cpu, claim from the wakee's slot first (§G96) */
 const volatile u8 cake_tog_g97;			/* census walks skip interrupt sinks while a clean idle CPU exists (§G97) */
 const volatile u8 cake_tog_probe;		/* diagnostics: placement census, hold attribution, black box (--toggle probe=1) */
 
@@ -209,7 +208,6 @@ enum cake_stat {
 	CAKE_SITE_G93_HOME,
 	CAKE_SITE_G93_ASK,
 	CAKE_SITE_G95_CLEAR,
-	CAKE_SITE_G96_SLOT,
 	CAKE_SITE_G97_SKIP,
 	CAKE_STAT_NR,
 };
@@ -614,7 +612,7 @@ struct cake_state {
 	 * going-idle dispatch so the wake path can claim it with a single
 	 * test-and-clear instead of an idle-mask scan (§G43).
 	 */
-	struct cake_slot idle_hint[MAX_LLCS * HINT_SLOTS];
+	struct cake_slot idle_hint[MAX_LLCS];
 	/*
 	 * "DSQ[i] may hold work" hint gating the steal ring, one bit per CPU, so
 	 * a going-idle dispatch reads QMASK_WORDS words instead of probing one
@@ -1780,24 +1778,10 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 	s32 cpu;
 
 	u32 llc = cake_llc_of((s32)p->thread_info.cpu);
-	u32 slot = 0, k;
-	struct cake_slot *hs = &cake.idle_hint[llc * HINT_SLOTS];
 
-	/* §G96: HINT_SLOTS mailboxes per die; the wakee reads the slot its
-	 * previous CPU maps to first, so concurrent wakers spread. */
-	h = 0;
-	for (k = 0; k < HINT_SLOTS; k++) {
-		slot = cake_tog_g96 ?
-		       (((u32)p->thread_info.cpu + k) & (HINT_SLOTS - 1)) : 0;
-		h = cake.idle_hint[llc * HINT_SLOTS + slot].word;
-		if (h || !cake_tog_g96)
-			break;
-	}
+	h = cake.idle_hint[llc].word;
 	if (!h)
 		return -1;
-	if (k)
-		cake_stat_inc(CAKE_SITE_G96_SLOT);
-	hs = &cake.idle_hint[llc * HINT_SLOTS + slot];
 	cpu = (s32)(u32)(h - 1);
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -1;
@@ -1809,7 +1793,7 @@ static __noinline s32 cake_idle_hint_claim(struct task_struct *p __arg_trusted)
 		cake_probe_x(CAKE_SITE_HINT_X, (s32)p->thread_info.cpu, cpu);
 	cake_stat_inc(CAKE_SITE_HINT_CAS);
 	CAKE_TIMED_VOID(CAKE_SITE_T_HINT_CAS,
-			(void)__sync_val_compare_and_swap(&hs->word, h, 0));
+			(void)__sync_val_compare_and_swap(&cake.idle_hint[llc].word, h, 0));
 	return claimed ? cpu : -1;
 }
 
@@ -2500,9 +2484,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	{
 		u64 hint = (u64)(u32)cpu + 1;
-		u32 slot = cake_tog_g96 ? ((u32)cpu & (HINT_SLOTS - 1)) : 0;
-		struct cake_slot *hs =
-			&cake.idle_hint[cake_llc_of(cpu) * HINT_SLOTS + slot];
+		struct cake_slot *hs = &cake.idle_hint[cake_llc_of(cpu)];
 
 		if (hs->word != hint) {
 			cake_stat_inc(CAKE_SITE_IDLE_HINT_ST);
