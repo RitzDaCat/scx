@@ -6,6 +6,7 @@
 // GNU General Public License version 2.
 
 mod bpf_skel;
+mod core_performance;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
@@ -39,13 +40,26 @@ use scx_utils::NR_CPU_IDS;
 
 const SCHEDULER_NAME: &str = "scx_cake";
 
+/// Narrow placement uses kernel idle masks; its private idle callback is empty.
+/// Omit the callback entirely instead of entering BPF just to return.
+fn configure_idle_tracking(skel: &mut OpenBpfSkel<'_>, one_word: bool) {
+    if one_word {
+        skel.struct_ops.cake_ops_mut().update_idle = std::ptr::null_mut();
+        skel.progs.cake_update_idle.set_autoload(false);
+    }
+}
+
 /// scx_cake: a gaming-first sched_ext scheduler.
 #[derive(Debug, Parser)]
 #[command(after_help = toggle_help())]
 struct Opts {
+    /// Print startup core topology and platform performance preferences without attaching.
+    #[clap(long)]
+    print_topology: bool,
+
     /// Verbose libbpf output and runtime diagnostics: slice and queue
     /// layout, kernel fast paths, the full toggle line, interrupt sinks as
-    /// they change, frame clock, kernel event counts at exit.
+    /// they change, kernel event counts at exit.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
@@ -63,18 +77,11 @@ struct Opts {
 /// Every construct toggle: name, construct, BPF default. The default is
 /// checked against the compiled rodata at start so the two cannot drift;
 /// --help prints this table.
-const TOGGLES: [(&str, &str, u8); 12] = [
+const TOGGLES: [(&str, &str, u8); 5] = [
     ("g85", "seat-rules", 1),
     ("g86", "claim-retry", 1),
     ("g87", "wakee-protect", 1),
     ("g89", "die-local-pool", 1),
-    ("g90", "producer-rank", 0),
-    ("g91", "stage-slice", 0),
-    ("g92", "stage-pool-first", 0),
-    ("g93", "warm-home-first", 0),
-    ("g94", "walk-from-prev", 0),
-    ("g95", "claim-retires-idle", 0),
-    ("g97", "skip-sinks", 0),
     ("probe", "diagnostics", 0),
 ];
 
@@ -87,6 +94,16 @@ fn toggle_help() -> String {
     s
 }
 
+/// Retain complete pairs only, ordered for entry-first teardown.
+fn attach_irq_pair<L>(
+    leave: impl FnOnce() -> Result<L>,
+    enter: impl FnOnce() -> Result<L>,
+) -> Result<[L; 2]> {
+    let leave = leave().context("exit hook failed")?;
+    let enter = enter().context("entry hook failed")?;
+    Ok([enter, leave])
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -94,16 +111,6 @@ struct Scheduler<'a> {
     _irq_links: Vec<libbpf_rs::Link>,
     /// Diagnostics on (--toggle probe=1): census, hold attribution, black box.
     probe_on: bool,
-    /// Frame-clock incumbent bucket, held against near-ties (§R.22).
-    frame_bucket: Option<u32>,
-    /// Last published period; the reference for slow-direction hysteresis.
-    frame_period: u64,
-    /// Consecutive polls a slower candidate has won; slow switches need
-    /// agreement, fast ones are instant (§G27.1).
-    slow_polls: u32,
-    /// Pessimistic frame estimate: fast down, slow up. Feeds the slice cap,
-    /// which must not widen when the mode wobbles (§G18).
-    frame_floor: u64,
     /// Print runtime diagnostics. Off by default: a release run is not a
     /// measurement session, and a scheduler logging into a game is noise.
     verbose: bool,
@@ -138,7 +145,25 @@ impl<'a> Scheduler<'a> {
         // Open the BPF program.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
+        // debug(false) disables every libbpf message, including verifier
+        // failures. Keep errors visible without the verbose loader chatter.
+        if !opts.verbose {
+            scx_utils::init_libbpf_logging(Some(libbpf_rs::PrintLevel::Warn));
+        }
         let mut skel = scx_ops_open!(skel_builder, open_object, cake_ops, None)?;
+        // The handler-edge hooks attach by hand, exit first (below). The
+        // skeleton's auto-attach in scx_ops_attach! attached them too, in
+        // section order (entry first, so one CPU started mid-handler for
+        // the run) and a second time, so every program ran twice per edge
+        // (review 2026-09-06).
+        for prog in [
+            &mut skel.progs.cake_irq_enter,
+            &mut skel.progs.cake_irq_leave,
+            &mut skel.progs.cake_softirq_enter,
+            &mut skel.progs.cake_softirq_leave,
+        ] {
+            prog.set_autoattach(false);
+        }
 
         // Linux CPU numbering does not guarantee that an SMT sibling is
         // cpu +/- nr_cpus/2. Populate the immutable BPF lookup from sysfs
@@ -155,14 +180,33 @@ impl<'a> Scheduler<'a> {
         // folded by the verifier) instead of being written into mutable BPF
         // state from ops.init. `ops.init` refuses to attach if this is
         // narrower than the kernel's own nr_cpu_ids.
+        // The span must cover the kernel's nr_cpu_ids, which counts POSSIBLE
+        // CPUs; the topology only lists present ones, and a guest or a board
+        // with disabled entries has more possible than present. ops.init
+        // refused such hosts as "narrower than nr_cpu_ids" (audit 2026-09-06).
+        let span = (*NR_CPU_IDS).max(
+            std::fs::read_to_string("/sys/devices/system/cpu/possible")
+                .ok()
+                .and_then(|t| last_cpu_id(&t))
+                .map_or(0, |last| last + 1),
+        );
         anyhow::ensure!(
-            *NR_CPU_IDS <= bpf_intf::consts_MAX_CPUS as usize,
+            span <= bpf_intf::consts_MAX_CPUS as usize,
             "host nr_cpu_ids {} exceeds Cake's compiled MAX_CPUS {}",
-            *NR_CPU_IDS,
+            span,
             bpf_intf::consts_MAX_CPUS
         );
-        rodata.nr_cpu_span = *NR_CPU_IDS as u32;
-        rodata.cake_span_mask = (*NR_CPU_IDS as u32).next_power_of_two() - 1;
+        rodata.nr_cpu_span = span as u32;
+        // The census word covers PRESENT ids; hotplug headroom past 64 costs
+        // nothing, a present id past 64 turns the one-word paths off.
+        let one_word = *NR_CPU_IDS <= 64;
+        rodata.cake_one_word = u8::from(one_word);
+        if !one_word {
+            warn!(
+                "   span    {} CPU ids exceed one census word: claim walk, seats and die-local pools off, kernel idle pick only",
+                *NR_CPU_IDS
+            );
+        }
 
         // Campaign toggles land in rodata before load so the verifier prunes
         // the off arms; the logged line is each arm's identity in an on/off
@@ -170,18 +214,11 @@ impl<'a> Scheduler<'a> {
         // toggle; a second line prints only what differs from the build's
         // defaults, which is what a tester needs to read back.
         let mut llcsplit = false;
-        let fields: [&mut u8; 12] = [
+        let fields: [&mut u8; 5] = [
             &mut rodata.cake_tog_g85,
             &mut rodata.cake_tog_g86,
             &mut rodata.cake_tog_g87,
             &mut rodata.cake_tog_g89,
-            &mut rodata.cake_tog_g90,
-            &mut rodata.cake_tog_g91,
-            &mut rodata.cake_tog_g92,
-            &mut rodata.cake_tog_g93,
-            &mut rodata.cake_tog_g94,
-            &mut rodata.cake_tog_g95,
-            &mut rodata.cake_tog_g97,
             &mut rodata.cake_tog_probe,
         ];
         let mut slots: Vec<(&str, &str, &mut u8)> = TOGGLES
@@ -221,6 +258,7 @@ impl<'a> Scheduler<'a> {
                 warn!("   toggle  ignored `{spec}`: no toggle named {name}");
             }
         }
+
         // Host identity right under the version line; the LLC count is the
         // same expression the steal and pool setup below uses.
         info!(
@@ -232,6 +270,21 @@ impl<'a> Scheduler<'a> {
                 ""
             }
         );
+        let core_performance = core_performance::CorePerformanceLayout::discover(&topo);
+        let rank_words = core_performance.rank_words();
+        if one_word && rank_words.len() > 1 {
+            rodata.cake_rank_tiers = rank_words.len() as u32;
+            rodata.cpu_perf_known = rank_words.iter().fold(0, |all, word| all | word);
+            for (slot, word) in rodata.cpu_perf_tier.iter_mut().zip(rank_words) {
+                *slot = word;
+            }
+        }
+        info!("   cores   {}", core_performance.summary());
+        if opts.verbose {
+            for core in core_performance.details() {
+                info!("   {core}");
+            }
+        }
         if opts.verbose {
             info!("   slice   {slice_us}µs, {total} per-CPU vtime queues + 1 global wake queue");
         }
@@ -298,8 +351,16 @@ impl<'a> Scheduler<'a> {
                 let hm = rodata.cake_handoff_max_ns;
                 // The probe's p99 IS the pick-to-landing horizon the tick
                 // predictor needs (§G36): how long this host takes to land a
-                // wake. Zero (probe failed) leaves the predictor off.
-                rodata.cake_wake_hop_ns = p99;
+                // wake. Zero (probe failed, or a hop too long to predict
+                // with) leaves the predictor off.
+                rodata.cake_wake_hop_ns = if p99 <= WAKE_HOP_MAX_NS {
+                    p99
+                } else {
+                    warn!(
+                        "   probe   hop p99 {p99}ns exceeds {WAKE_HOP_MAX_NS}ns; tick predictor off"
+                    );
+                    0
+                };
                 if opts.verbose {
                     info!(
                         "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
@@ -339,17 +400,10 @@ impl<'a> Scheduler<'a> {
                 siblings[cpu] = sibling as i32;
             }
         }
-
-        // Bootstrap each frame word in its SAFE direction. The clock starts
-        // slow so occupant protection is never divided into a zero; the FLOOR
-        // starts at the display-class fast end (2 ms, NOT the engine-band min:
-        // a vote-free host would keep a 250 µs slice cap forever) so the cap
-        // begins tight and relaxes only as evidence arrives (§G18, §G19).
-        // Geometry starts at the fixed slice; only votes move it (§G27).
-        if let Some(bss) = skel.maps.bss_data.as_mut() {
-            bss.cake_frame_ns = bpf_intf::consts_FRAME_PERIOD_MAX_NS as u64;
-            bss.cake_frame_floor_ns = bpf_intf::consts_FRAME_FLOOR_BOOT_NS as u64;
-            bss.cake_frame_slice_ns = bpf_intf::consts_SLICE_NS as u64;
+        if let Some((shift, left, right)) = smt_fold(siblings) {
+            rodata.cake_smt_shift = shift;
+            rodata.cake_smt_left = left;
+            rodata.cake_smt_right = right;
         }
 
         // Multi-CCD steal order is a runtime decision, never a build-host
@@ -385,53 +439,37 @@ impl<'a> Scheduler<'a> {
             let nr_llcs = if llcsplit { 2 } else { topo.all_llcs.len() };
             let multi_ccd = nr_llcs > 1;
             rodata.steal_order_live = u8::from(multi_ccd && fits);
+            rodata.nr_steal_cpus = topo.all_cpus.len().saturating_sub(1) as u32;
             order.fill(0);
 
-            // §G88: one word per CPU naming the CPUs that share its LLC, so
-            // the idle-census walks and the seat decline never leave the
-            // task's own die. All ones (LLC-blind) is the fallback for a CPU
-            // the topology does not describe.
+            // §G88/§G89: the per-CPU LLC word, the dense LLC id and the LLC
+            // count, from every CPU the topology describes.
             {
-                let mut llc_words: BTreeMap<usize, u64> = BTreeMap::new();
-                for cpu in topo.all_cpus.values() {
-                    if cpu.id < 64 {
-                        *llc_words.entry(llc_of(cpu)).or_insert(0) |= 1u64 << cpu.id;
-                    }
-                }
-                // §G89: dense LLC index per CPU and the count; more LLCs
-                // than the pools can hold collapses to one pool, logged.
-                let mut dense: BTreeMap<usize, u8> = BTreeMap::new();
-                for id in llc_words.keys() {
-                    let n = dense.len() as u8;
-                    dense.insert(*id, n);
-                }
-                let max_llcs = bpf_intf::consts_MAX_LLCS as usize;
-                if dense.len() > max_llcs {
-                    warn!(
-                        "   llc     {} domains exceed MAX_LLCS {}; one pool, LLC-blind",
-                        dense.len(),
-                        max_llcs
-                    );
-                    rodata.cpu_llc_id.fill(0);
-                    rodata.nr_llcs = 1;
+                let cpus: Vec<(usize, usize)> =
+                    topo.all_cpus.values().map(|c| (c.id, llc_of(c))).collect();
+                // Die-local pools need the one-word census: past it the pool
+                // kick is LLC-blind and lands on a die whose dispatch reads
+                // its own pool, so the wake waits (audit 2026-09-06).
+                let max_llcs = if rodata.cake_one_word != 0 {
+                    bpf_intf::consts_MAX_LLCS as usize
                 } else {
-                    rodata.cpu_llc_id.fill(0);
-                    for cpu in topo.all_cpus.values() {
-                        if cpu.id < rodata.cpu_llc_id.len() {
-                            rodata.cpu_llc_id[cpu.id] = *dense.get(&llc_of(cpu)).unwrap_or(&0);
-                        }
-                    }
-                    rodata.nr_llcs = dense.len().max(1) as u32;
+                    1
+                };
+                let layout = LlcLayout::build(&cpus, max_llcs);
+                if let Some(n) = layout.collapsed {
+                    warn!("   llc     {n} domains, {max_llcs} pool(s) usable here; one pool, LLC-blind");
                 }
+                rodata.cpu_llc_id.fill(0);
+                rodata.cpu_llc_domain.fill(u16::MAX);
                 rodata.cpu_llc_word.fill(u64::MAX);
-                for cpu in topo.all_cpus.values() {
-                    if let (Some(word), true) = (
-                        llc_words.get(&llc_of(cpu)),
-                        cpu.id < rodata.cpu_llc_word.len(),
-                    ) {
-                        rodata.cpu_llc_word[cpu.id] = *word;
+                for (cpu, llc) in &cpus {
+                    if *cpu < rodata.cpu_llc_id.len() {
+                        rodata.cpu_llc_id[*cpu] = layout.dense[llc];
+                        rodata.cpu_llc_domain[*cpu] = layout.domain[llc];
+                        rodata.cpu_llc_word[*cpu] = layout.word[llc];
                     }
                 }
+                rodata.nr_llcs = layout.nr_llcs;
             }
 
             if multi_ccd && !fits {
@@ -470,25 +508,39 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        configure_idle_tracking(&mut skel, one_word);
+
         // Load and attach.
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
-        let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
-        // Handler-edge tracepoints feed the in-handler word (§G35). A failed
-        // attach degrades to chronic-only steering, never blocks the
-        // scheduler; the word simply stays zero.
+        // Handler-edge tracepoints feed the in-handler depth (§G35). The
+        // exit hook of each pair attaches FIRST: cake_irq_edge drops an exit
+        // with no entry, so a handler in flight across the attach costs
+        // nothing, while an entry counted before its exit hook existed
+        // left that CPU mid-handler for the whole run (review 2026-09-06).
+        // A pair whose exit hook fails skips its entry hook for the same
+        // reason; the depth stays zero and steering is chronic-only.
         let mut irq_links = Vec::with_capacity(4);
-        for (name, res) in [
-            ("irq_enter", skel.progs.cake_irq_enter.attach()),
-            ("irq_leave", skel.progs.cake_irq_leave.attach()),
-            ("softirq_enter", skel.progs.cake_softirq_enter.attach()),
-            ("softirq_leave", skel.progs.cake_softirq_leave.attach()),
+        for (name, leave, enter) in [
+            (
+                "irq",
+                &skel.progs.cake_irq_leave,
+                &skel.progs.cake_irq_enter,
+            ),
+            (
+                "softirq",
+                &skel.progs.cake_softirq_leave,
+                &skel.progs.cake_softirq_enter,
+            ),
         ] {
-            match res {
-                Ok(link) => irq_links.push(link),
-                Err(e) => warn!("   irq     {name} hook failed ({e}); chronic steering only"),
+            match attach_irq_pair(|| Ok(leave.attach()?), || Ok(enter.attach()?)) {
+                Ok(links) => irq_links.extend(links),
+                Err(e) => warn!("   irq     {name} {e:#}; this source uses chronic steering only"),
             }
         }
+
+        // Begin scheduling only after handler accounting is installed.
+        let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
         info!("🍰 attached");
 
@@ -499,17 +551,15 @@ impl<'a> Scheduler<'a> {
         // /proc/<pid>/exe to unprivileged observers even with dumpable
         // restored, which breaks the sudoless bench runner's hash-of-exe
         // identity verification (and holding dead privileges is bad hygiene).
-        drop_all_capabilities();
+        if let Err(err) = scx_utils::misc::drop_privileges_for_observers() {
+            warn!("post-attach capability drop failed: {err}");
+        }
 
         Ok(Self {
             skel,
             struct_ops,
             _irq_links: irq_links,
             probe_on,
-            frame_bucket: None,
-            frame_period: 0,
-            slow_polls: 0,
-            frame_floor: 0,
             verbose: opts.verbose,
             sinks: SinkMonitor::new(*NR_CPU_IDS),
         })
@@ -520,24 +570,44 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        // Frame clock, reported under --verbose on a material change only, so
-        // a moving line there means the observed cadence really moved (§G11).
-        let mut shown: u64 = 0;
+        let mut polls: u32 = 0;
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             std::thread::sleep(Duration::from_secs(1));
+            polls += 1;
+
+            // §G35 self-check: a CPU mid-handler across two reads 50 ms
+            // apart is the signature of an entry counted before its exit
+            // hook existed (review 2026-09-06); a real handler is gone by
+            // the second read. The healthy answer is zero.
+            if self.verbose && (polls == 2 || polls == 6) {
+                let depths = |bss: &bpf_skel::types::bss| -> Vec<u32> {
+                    bss.cake_irq_live
+                        .iter()
+                        .take(*NR_CPU_IDS)
+                        .map(|s| s.depth)
+                        .collect()
+                };
+                let first = self.skel.maps.bss_data.as_ref().map(|b| depths(b));
+                std::thread::sleep(Duration::from_millis(50));
+                let second = self.skel.maps.bss_data.as_ref().map(|b| depths(b));
+                if let (Some(a), Some(b)) = (first, second) {
+                    let stuck: Vec<String> = a
+                        .iter()
+                        .zip(&b)
+                        .enumerate()
+                        .filter(|(_, (x, y))| **x != 0 && **y != 0)
+                        .map(|(cpu, (x, y))| format!("cpu{cpu}:{x}/{y}"))
+                        .collect();
+                    info!(
+                        "   irq     in-handler depth stuck on {} CPU(s) at {polls} s {}",
+                        stuck.len(),
+                        stuck.join(" ")
+                    );
+                }
+            }
 
             if let Some(set) = self.sinks.tick(*NR_CPU_IDS) {
                 self.publish_sinks(&set);
-            }
-
-            let observed = self.publish_frame_clock();
-            if self.verbose && observed != 0 && observed.abs_diff(shown) > shown / 16 {
-                shown = observed;
-                info!(
-                    "   frame   observed period {}us ({:.1} Hz)",
-                    observed / 1000,
-                    1e9 / observed as f64
-                );
             }
         }
 
@@ -561,7 +631,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if self.probe_on {
-            const NAMES: [&str; 134] = [
+            const NAMES: [&str; 119] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -590,7 +660,6 @@ impl<'a> Scheduler<'a> {
                 "pl_self",
                 "h300_self",
                 "h1ms_self",
-                "hd_skip",
                 "hd_sync",
                 "hd_starved",
                 "hd_irq",
@@ -602,22 +671,18 @@ impl<'a> Scheduler<'a> {
                 "h300_home_busy",
                 "ui_enter",
                 "ui_enter_idlew",
-                "ui_enter_coref",
                 "ui_exit",
                 "ui_exit_idlew",
-                "ui_exit_coref",
                 "qmark_set",
                 "qmark_set_skip",
                 "qmark_clr",
                 "qmark_clr_skip",
                 "seat_clr",
                 "seat_set",
-                "hint_cas",
                 "running",
                 "frontier_st",
                 "wake_served_st",
                 "wake_mark_st",
-                "idle_hint_st",
                 "taci",
                 "taci_win",
                 "taci_stage",
@@ -662,8 +727,6 @@ impl<'a> Scheduler<'a> {
                 "t_move",
                 "t_insert",
                 "t_ui_idlew",
-                "t_ui_coref",
-                "t_hint_cas",
                 "t_qmark",
                 "t_cal",
                 "leak_home",
@@ -673,13 +736,13 @@ impl<'a> Scheduler<'a> {
                 "seat_retake",
                 "seat_reroute",
                 "seat_decline",
+                "pool_forward",
                 "claim_retry",
                 "kt_pool",
                 "x_serial",
                 "kt_local",
                 "x_kt_local",
                 "x_claim",
-                "x_hint",
                 "notify_kick",
                 "x_notify_kick",
                 "probe_fired",
@@ -688,14 +751,6 @@ impl<'a> Scheduler<'a> {
                 "x_pool_served",
                 "steal_moved",
                 "x_steal_moved",
-                "producer_ins",
-                "producer_preempt",
-                "stage_slice",
-                "pool_stage_first",
-                "g93_home",
-                "g93_ask",
-                "g95_clear",
-                "g97_skip",
             ];
             // The name table must match the BPF enum exactly; a drift prints
             // zeros silently because out-of-range lookups fail quietly.
@@ -751,25 +806,20 @@ impl<'a> Scheduler<'a> {
         uei_report!(&self.skel, uei)
     }
 
-    /// Push a changed sink set live: rewrite the per-CPU flags, then bump
-    /// the generation so the next ranked pick rebuilds the nonsink mask
-    /// (§G30). Flags settle before the bump; a torn read costs at most one
-    /// extra rebuild.
+    /// Publish the existing IRQ measurements as aligned CPU-mask words.
+    /// Wide hosts may observe different publication epochs across words;
+    /// these are placement preferences, never CPU admission or reservations.
     fn publish_sinks(&mut self, set: &[bool]) {
         let Some(bss) = self.skel.maps.bss_data.as_mut() else {
             return;
         };
-        let mut word = 0u64;
-        for (cpu, hot) in set.iter().enumerate() {
-            if cpu < bss.cpu_irq_hot.len() {
-                bss.cpu_irq_hot[cpu] = u8::from(*hot);
-            }
-            if *hot && cpu < 64 {
-                word |= 1u64 << cpu;
-            }
+        let words = sink_words::<{ bpf_intf::consts_QMASK_WORDS as usize }>(set);
+        for (published, word) in bss.cpu_irq_hot_words.iter_mut().zip(words) {
+            // SAFETY: the skeleton maps writable, u64-aligned BSS. A volatile
+            // word store prevents the compiler from eliding a publication
+            // consumed asynchronously by BPF. No cross-word atomicity assumed.
+            unsafe { std::ptr::write_volatile(published, word) };
         }
-        // §G97: the same set as one word for the census walks.
-        bss.cake_sink_word = word;
 
         if self.verbose {
             let named: Vec<usize> = set
@@ -780,124 +830,18 @@ impl<'a> Scheduler<'a> {
             info!("   irq     sinks {named:?} steered around");
         }
     }
-
-    /// Publish the binding cadence from the vote histogram.
-    ///
-    /// Every crowd near the biggest is a REAL cadence (a game plus the
-    /// desktop coexist legitimately), so no argmax: the FASTEST real crowd
-    /// is published, because every consumer of the clock is a bound and the
-    /// fastest cadence is the one that binds. The clock moves faster the
-    /// moment a faster crowd qualifies; it moves slower only when the fast
-    /// crowd actually fades — one noisy poll cannot drag it slower (§G27.1).
-    /// Buckets are cleared as read; sum/count keeps the value exact.
-    /// Returns the published period, 0 when there are no votes.
-    fn publish_frame_clock(&mut self) -> u64 {
-        const WIDTH: usize = std::mem::size_of::<u64>() * 2;
-        /// A crowd within 2x of the biggest is real, not noise.
-        const QUALIFY: u64 = 2;
-        /// The incumbent stays alive down to a quarter of the biggest crowd.
-        const FADE: u64 = 4;
-
-        let hist = &self.skel.maps.cake_frame_hist;
-        let mut crowds: Vec<(u32, u64, u64)> = Vec::new();
-
-        for idx in 0..bpf_intf::consts_FRAME_BUCKETS {
-            let key = idx.to_ne_bytes();
-            let Ok(Some(percpu)) = hist.lookup_percpu(&key, MapFlags::ANY) else {
-                continue;
-            };
-            let (mut count, mut sum) = (0u64, 0u64);
-            for cpu in &percpu {
-                if cpu.len() < WIDTH {
-                    continue;
-                }
-                count += u64::from_ne_bytes(cpu[..8].try_into().unwrap());
-                sum += u64::from_ne_bytes(cpu[8..16].try_into().unwrap());
-            }
-            if count == 0 {
-                continue;
-            }
-            crowds.push((idx, count, sum));
-            let zeroed = vec![vec![0u8; WIDTH]; percpu.len()];
-            let _ = hist.update_percpu(&key, &zeroed, MapFlags::ANY);
-        }
-
-        let Some(max_count) = crowds.iter().map(|c| c.1).max() else {
-            return 0;
-        };
-        // Fastest qualified crowd; bucket index is monotone in period.
-        let Some((qi, qc, qs)) = crowds
-            .iter()
-            .copied()
-            .filter(|c| c.1 * QUALIFY >= max_count)
-            .min_by_key(|c| c.0)
-        else {
-            return 0;
-        };
-
-        let held = self
-            .frame_bucket
-            .and_then(|hb| crowds.iter().copied().find(|c| c.0 == hb));
-        let (bucket, count, sum) = match held {
-            // The incumbent holds only while at least as fast as the
-            // challenger AND still alive; a faster challenger wins at once.
-            Some((hi, hc, hs)) if hi <= qi && hc * FADE >= max_count => (hi, hc, hs),
-            _ => (qi, qc, qs),
-        };
-        let cand = sum / count;
-
-        // Fast up, slow down: a faster cadence binds immediately, a slower
-        // one must win SLOW_POLLS in a row — an app's own threads form
-        // several fast crowds whose per-second counts wobble, and a one-poll
-        // silence must not publish a slow blip (§G27.1; live 2026-08-17).
-        const SLOW_POLLS: u32 = 3;
-        let (period, bucket) = if self.frame_period == 0 || cand <= self.frame_period {
-            self.slow_polls = 0;
-            (cand, Some(bucket))
-        } else {
-            self.slow_polls += 1;
-            if self.slow_polls >= SLOW_POLLS {
-                self.slow_polls = 0;
-                (cand, Some(bucket))
-            } else {
-                (self.frame_period, self.frame_bucket)
-            }
-        };
-        self.frame_period = period;
-
-        // A bound takes the pessimistic side of a noisy estimate: drop to a new
-        // low at once, climb back over ~16 polls. One 17372us excursion off a
-        // true 3621us previously doubled the slice cap (§G18).
-        self.frame_floor = match self.frame_floor {
-            0 => period,
-            f if period < f => period,
-            f => f + (period - f) / 16,
-        };
-        self.frame_bucket = bucket;
-        if let Some(bss) = self.skel.maps.bss_data.as_mut() {
-            bss.cake_frame_ns = period;
-            bss.cake_frame_floor_ns = self.frame_floor;
-            // Diagnostic only: feeds the --verbose clock line; no policy
-            // consumes these — geometry is per task (§R.28).
-            bss.cake_frame_slice_ns = ((self.frame_floor >> 1) + (self.frame_floor >> 2))
-                .min(bpf_intf::consts_SLICE_NS as u64);
-        }
-        period
-    }
 }
 
-/// Re-execute this image to service a kernel-requested restart.
-///
-/// `drop_all_capabilities()` runs after every successful attach, and a
-/// permitted set cleared through `capset` cannot be regained in-process —
-/// file capabilities are applied only at `execve`. Re-entering
-/// `Scheduler::init` would therefore fail `BPF_PROG_LOAD` with `EPERM` and
-/// kill the scheduler instead of restarting it. Exec'ing ourselves restores
-/// the file capabilities from the bounding set (which `capset` never
-/// touched), keeps the PID and `/proc/<pid>/exe` identity the bench runner
-/// verifies, and re-runs `PR_SET_DUMPABLE` on the way in. The struct_ops link
-/// is already dropped by `run()`, so the scheduler is detached before we
-/// replace the image.
+fn sink_words<const N: usize>(set: &[bool]) -> [u64; N] {
+    let mut words = [0; N];
+    for (cpu, hot) in set.iter().take(N * 64).enumerate() {
+        if *hot {
+            words[cpu / 64] |= 1u64 << (cpu % 64);
+        }
+    }
+    words
+}
+
 /// One host's wake+block+switch hop, as a distribution rather than a mean.
 struct HandoffProbe {
     /// Typical hop — the switch-cost anchor for the preempt-protect window.
@@ -922,9 +866,9 @@ struct HandoffProbe {
 /// unflagged CPU, while a slow line with a heavy handler could never reach
 /// a count bar (§G33). Softirq time is included because NAPI network
 /// processing shadows wakes the same way and never appeared as line counts.
-fn read_irq_ticks(nr_cpus: usize) -> Option<Vec<u64>> {
+fn read_irq_ticks(nr_cpus: usize) -> Option<Vec<Option<u64>>> {
     let text = std::fs::read_to_string("/proc/stat").ok()?;
-    let mut ticks = vec![0u64; nr_cpus];
+    let mut ticks = vec![None; nr_cpus];
     let mut seen = false;
     for line in text.lines() {
         let mut fields = line.split_whitespace();
@@ -943,10 +887,35 @@ fn read_irq_ticks(nr_cpus: usize) -> Option<Vec<u64>> {
         if vals.len() < 7 {
             continue;
         }
-        ticks[cpu] = vals[5] + vals[6];
+        ticks[cpu] = Some(vals[5] + vals[6]);
         seen = true;
     }
     seen.then_some(ticks)
+}
+
+/// The highest CPU id in a sysfs cpulist ("0-15", "0-3,8-11", "0").
+fn last_cpu_id(list: &str) -> Option<usize> {
+    list.trim()
+        .rsplit(',')
+        .next()?
+        .rsplit('-')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The CPUs `/proc/stat` reported in both reads, and their handler-time
+/// deltas in that order. Only those are ranked: a possible-but-offline id
+/// has no handler time and would sit under every online CPU, turning the
+/// whole online set into the loud side of the widest gap (review
+/// 2026-09-06).
+fn sink_deltas(current: &[Option<u64>], before: &[Option<u64>]) -> (Vec<usize>, Vec<u64>) {
+    current
+        .iter()
+        .zip(before)
+        .enumerate()
+        .filter_map(|(cpu, (c, b))| Some((cpu, (*c)?.checked_sub((*b)?)?)))
+        .unzip()
 }
 
 /// Split the host's own handler-time distribution at its widest gap: sinks
@@ -1008,7 +977,7 @@ fn sinks_by_widest_gap(deltas: &[u64]) -> Option<Vec<bool>> {
 struct SinkMonitor {
     /// Last accepted read; deltas span the full gap between accepted reads,
     /// so a slower cadence measures a longer, smoother window.
-    prev: Option<Vec<u64>>,
+    prev: Option<Vec<Option<u64>>>,
     /// The set currently pushed to the scheduler.
     published: Vec<bool>,
     /// Consecutive windows each CPU has ranked above the cut.
@@ -1050,31 +1019,59 @@ impl SinkMonitor {
         if !self.ticks.is_multiple_of(self.interval) {
             return None;
         }
-        // A failed read leaves prev in place, so the next sample just spans
-        // a longer window; an untrusted split still advances the baseline.
-        let sample = read_irq_ticks(nr_cpus)?;
+        self.observe(read_irq_ticks(nr_cpus))
+    }
+
+    /// Unknown windows are not consecutive evidence for either direction.
+    /// Keep the last published preference, but restart confidence promptly.
+    fn uncertain(&mut self) {
+        self.hot_streak.fill(0);
+        self.quiet.fill(0);
+        self.stable = 0;
+        self.interval = 1;
+    }
+
+    fn observe(&mut self, sample: Option<Vec<Option<u64>>>) -> Option<Vec<bool>> {
+        let Some(sample) = sample else {
+            self.prev = None;
+            self.uncertain();
+            return None;
+        };
         let before = self.prev.replace(sample)?;
         let current = self.prev.as_ref()?;
-        let deltas: Vec<u64> = current
-            .iter()
-            .zip(before.iter())
-            .map(|(c, b)| c.saturating_sub(*b))
-            .collect();
-        let hot = sinks_by_widest_gap(&deltas)?;
+        let (present, deltas) = sink_deltas(current, &before);
+        if present.is_empty() {
+            self.uncertain();
+            return None;
+        }
+        let Some(ranked) = sinks_by_widest_gap(&deltas) else {
+            self.uncertain();
+            return None;
+        };
+        let mut hot = vec![false; self.published.len()];
+        for (&cpu, &is_hot) in present.iter().zip(&ranked) {
+            if cpu < hot.len() {
+                hot[cpu] = is_hot;
+            }
+        }
 
         let mut changed = false;
-        for (cpu, &is_hot) in hot.iter().enumerate().take(self.published.len()) {
+        for (cpu, &is_hot) in hot.iter().enumerate() {
+            if present.binary_search(&cpu).is_err() {
+                self.hot_streak[cpu] = 0;
+                self.quiet[cpu] = 0;
+                continue;
+            }
             if is_hot {
                 self.quiet[cpu] = 0;
-                self.hot_streak[cpu] += 1;
+                self.hot_streak[cpu] = (self.hot_streak[cpu] + 1).min(Self::FLAG_POLLS);
                 // The cut wanders under load, so flagged CPUs accrete across
                 // polls — the per-sample half-machine guard cannot see the
                 // UNION. Bound it here: the published set stays a strict
                 // minority, so placement always keeps most of the machine.
                 if !self.published[cpu]
                     && self.hot_streak[cpu] >= Self::FLAG_POLLS
-                    && (self.published.iter().filter(|h| **h).count() + 1) * 2
-                        < self.published.len()
+                    && (self.published.iter().filter(|h| **h).count() + 1) * 2 < present.len()
                 {
                     self.published[cpu] = true;
                     changed = true;
@@ -1105,6 +1102,14 @@ impl SinkMonitor {
         None
     }
 }
+
+/// The longest wake hop the tick predictor (§G36) can use. The predictor
+/// asks whether a CPU's next tick lands inside one hop; a hop at a quarter
+/// of the fastest tick period cake runs under (HZ=1000) or longer would call
+/// every CPU tick-soon at all times and `cake_cpu_clean` would refuse every
+/// candidate. A probe run under a loaded or virtualised host lands here and
+/// turns the predictor off instead (review 2026-09-06).
+const WAKE_HOP_MAX_NS: u64 = 250_000;
 
 /// Measure one wake + block + switch hop on THIS host.
 ///
@@ -1174,49 +1179,6 @@ fn probe_handoff_hop_ns() -> Option<HandoffProbe> {
     Some(HandoffProbe { median, p99 })
 }
 
-fn reexec_self() -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let exe = std::fs::read_link("/proc/self/exe")
-        .context("failed to resolve /proc/self/exe for restart")?;
-    /* exec() only returns on failure. */
-    let err = std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
-        .exec();
-
-    Err(anyhow::Error::new(err).context("re-exec after kernel restart request failed"))
-}
-
-/// Clear the effective, permitted, and inheritable capability sets.
-fn drop_all_capabilities() {
-    #[repr(C)]
-    struct CapHeader {
-        version: u32,
-        pid: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CapData {
-        effective: u32,
-        permitted: u32,
-        inheritable: u32,
-    }
-    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-    let hdr = CapHeader {
-        version: LINUX_CAPABILITY_VERSION_3,
-        pid: 0,
-    };
-    let data = [CapData {
-        effective: 0,
-        permitted: 0,
-        inheritable: 0,
-    }; 2];
-    let rc = unsafe { libc::syscall(libc::SYS_capset, &hdr, data.as_ptr()) };
-    if rc != 0 {
-        log::warn!("capset drop failed ({})", std::io::Error::last_os_error());
-    }
-}
-
 /// Parse the command line, dropping options cake does not have instead of
 /// refusing to start. A legacy flag in a user's scx_loader config (for
 /// example `--profile default`) used to keep the scheduler off entirely;
@@ -1269,14 +1231,6 @@ fn parse_opts_lenient() -> (Opts, Vec<String>) {
 }
 
 fn main() -> Result<()> {
-    // File capabilities (cap_bpf,cap_perfmon,cap_sys_nice) clear the dumpable
-    // flag, which makes /proc/self/exe root-only and defeats the sudoless
-    // bench runner's process-identity verification (hash of /proc/<pid>/exe).
-    // The binary holds no secrets, so restore normal /proc introspection.
-    unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
-    }
-
     let (opts, ignored_args) = parse_opts_lenient();
 
     if opts.version {
@@ -1285,6 +1239,15 @@ fn main() -> Result<()> {
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
+        return Ok(());
+    }
+    if opts.print_topology {
+        let topo = Topology::new().context("failed to read topology")?;
+        let layout = core_performance::CorePerformanceLayout::discover(&topo);
+        println!("{}", layout.summary());
+        for core in layout.details() {
+            println!("{core}");
+        }
         return Ok(());
     }
 
@@ -1315,15 +1278,327 @@ fn main() -> Result<()> {
 
     if sched.run(shutdown.clone())?.should_restart() {
         info!("🍰 restart requested by the kernel — re-executing");
-        reexec_self()?;
+        scx_utils::misc::reexec_self()?;
     }
 
     Ok(())
 }
 
+/// Factor the narrow sibling map into two shifts when every edge has the
+/// same distance. Irregular numbering keeps the exact per-CPU lookup.
+fn smt_fold(siblings: &[i32]) -> Option<(u32, u64, u64)> {
+    let (mut shift, mut left, mut right) = (0, 0, 0);
+    for (cpu, &sib) in siblings.iter().take(64).enumerate() {
+        if !(0..64).contains(&sib) || sib as usize == cpu {
+            continue;
+        }
+        let distance = (cpu as u32).abs_diff(sib as u32);
+        if shift != 0 && shift != distance {
+            return None;
+        }
+        shift = distance;
+        if cpu < sib as usize {
+            left |= 1u64 << cpu;
+        } else {
+            right |= 1u64 << cpu;
+        }
+    }
+    Some((shift, left, right))
+}
+
+/// The §G88/§G89 LLC topology the loader publishes to rodata, built from
+/// (cpu id, llc id) pairs so any host shape can be tested without a machine.
+struct LlcLayout {
+    /// Physical identity is never collapsed to the bounded pool namespace.
+    domain: BTreeMap<usize, u16>,
+    /// Dense pool index per topology LLC id; every id maps, ids are
+    /// assigned in ascending LLC order.
+    dense: BTreeMap<usize, u8>,
+    /// §G88: the CPUs (ids below 64) sharing each LLC, as one word. An LLC
+    /// with no CPU below 64 gets all ones: the census paths that read the
+    /// word only run inside one word, and all ones is the LLC-blind walk.
+    word: BTreeMap<usize, u64>,
+    nr_llcs: u32,
+    /// Set when more LLCs exist than pools: everything went to pool 0.
+    collapsed: Option<usize>,
+}
+
+impl LlcLayout {
+    fn build(cpus: &[(usize, usize)], max_llcs: usize) -> Self {
+        let mut word: BTreeMap<usize, u64> = BTreeMap::new();
+        for (cpu, llc) in cpus {
+            let w = word.entry(*llc).or_insert(0);
+            if *cpu < 64 {
+                *w |= 1u64 << cpu;
+            }
+        }
+        for w in word.values_mut() {
+            if *w == 0 {
+                *w = u64::MAX;
+            }
+        }
+        let n = word.len();
+        let collapsed = (n > max_llcs).then_some(n);
+        let domain = word
+            .keys()
+            .enumerate()
+            .map(|(i, llc)| (*llc, i as u16))
+            .collect();
+        let dense: BTreeMap<usize, u8> = word
+            .keys()
+            .enumerate()
+            .map(|(i, llc)| (*llc, if collapsed.is_some() { 0 } else { i as u8 }))
+            .collect();
+        let nr_llcs = if collapsed.is_some() {
+            1
+        } else {
+            n.max(1) as u32
+        };
+        Self {
+            domain,
+            dense,
+            word,
+            nr_llcs,
+            collapsed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sinks_by_widest_gap;
+    #[test]
+    fn smt_fold_matches_every_single_cpu_mapping() {
+        let mut siblings = [-1; 64];
+        assert_eq!(super::smt_fold(&siblings), Some((0, 0, 0)));
+        // Covers adjacent, split-half, sparse and one-way maps, including
+        // the maximum legal shift. OR-linearity extends these checks to
+        // every possible combination of reserved CPUs.
+        for distance in 1..64 {
+            for (cpu, sib) in siblings.iter_mut().enumerate() {
+                *sib = if cpu + distance < 64 {
+                    (cpu + distance) as i32
+                } else if cpu >= distance {
+                    (cpu - distance) as i32
+                } else {
+                    -1
+                };
+            }
+            let (shift, left, right) = super::smt_fold(&siblings).unwrap();
+            for (cpu, &sib) in siblings.iter().enumerate() {
+                let bit = 1u64 << cpu;
+                let actual = bit | ((bit & left) << shift) | ((bit & right) >> shift);
+                let expected = bit | if sib >= 0 { 1u64 << sib } else { 0 };
+                assert_eq!(actual, expected);
+            }
+        }
+        siblings.fill(-1);
+        siblings[0] = 1;
+        siblings[1] = 0;
+        siblings[2] = 4;
+        assert_eq!(super::smt_fold(&siblings), None);
+        siblings.fill(64); // beyond-word edges do not affect the narrow mask
+        assert_eq!(super::smt_fold(&siblings), Some((0, 0, 0)));
+    }
+
+    #[test]
+    fn idle_callback_is_omitted_only_for_kernel_mask_path() {
+        use libbpf_rs::skel::SkelBuilder;
+        use std::mem::MaybeUninit;
+
+        for one_word in [false, true] {
+            let mut object = MaybeUninit::uninit();
+            let builder = super::BpfSkelBuilder::default();
+            let mut skel = builder.open(&mut object).expect("open embedded BPF object");
+            assert!(!skel.struct_ops.cake_ops_mut().update_idle.is_null());
+            super::configure_idle_tracking(&mut skel, one_word);
+            assert_eq!(
+                skel.struct_ops.cake_ops_mut().update_idle.is_null(),
+                one_word
+            );
+            assert_eq!(skel.progs.cake_update_idle.autoload(), !one_word);
+            assert!(!skel.struct_ops.cake_ops_mut().cpu_release.is_null());
+            assert!(skel.progs.cake_cpu_release.autoload());
+        }
+    }
+
+    use super::{
+        attach_irq_pair, last_cpu_id, sink_deltas, sink_words, sinks_by_widest_gap, LlcLayout,
+        SinkMonitor,
+    };
+
+    #[test]
+    fn irq_publication_preserves_sparse_wide_cpu_ids_and_clears_old_bits() {
+        let mut set = vec![false; 257];
+        for cpu in [0, 63, 64, 127, 128, 255, 256] {
+            set[cpu] = true;
+        }
+        assert_eq!(
+            sink_words::<4>(&set),
+            [1 | (1 << 63), 1 | (1 << 63), 1, 1 << 63]
+        );
+        assert_eq!(sink_words::<4>(&[false; 1]), [0; 4]);
+        assert_eq!(sink_words::<4>(&[]), [0; 4]);
+    }
+
+    #[test]
+    fn unknown_irq_windows_break_streaks_without_inventing_quiet() {
+        let mut monitor = SinkMonitor::new(8);
+        monitor.published[0] = true;
+        monitor.hot_streak[1] = 1;
+        monitor.quiet[0] = 2;
+        monitor.stable = 7;
+        monitor.interval = 16;
+        assert_eq!(monitor.observe(None), None);
+        assert!(monitor.published[0]);
+        assert_eq!(monitor.hot_streak, vec![0; 8]);
+        assert_eq!(monitor.quiet, vec![0; 8]);
+        assert_eq!((monitor.stable, monitor.interval), (0, 1));
+        assert_eq!(monitor.observe(Some(vec![Some(0); 8])), None);
+        // Half-machine split is untrusted, not a second confirming sample.
+        monitor.hot_streak[1] = 1;
+        assert_eq!(
+            monitor.observe(Some(vec![
+                Some(100),
+                Some(100),
+                Some(100),
+                Some(100),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0)
+            ])),
+            None
+        );
+        assert_eq!(monitor.hot_streak, vec![0; 8]);
+        assert!(monitor.published[0]);
+    }
+
+    #[test]
+    fn irq_counter_reset_and_missing_cpu_are_unknown_not_zero_load() {
+        assert_eq!(
+            sink_deltas(&[Some(2), Some(5)], &[Some(10), Some(3)]),
+            (vec![1], vec![2])
+        );
+        let mut monitor = SinkMonitor::new(8);
+        monitor.observe(Some(vec![Some(100); 8]));
+        monitor.published[0] = true;
+        monitor.quiet[0] = 2;
+        let mut next = vec![Some(101); 8];
+        next[0] = None;
+        monitor.observe(Some(next));
+        assert!(monitor.published[0]);
+        assert_eq!(monitor.quiet[0], 0);
+    }
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn irq_pair_orders_attach_teardown_and_cleans_partial_failures() {
+        struct Link(&'static str, Rc<RefCell<Vec<&'static str>>>);
+        impl Drop for Link {
+            fn drop(&mut self) {
+                self.1.borrow_mut().push(self.0);
+            }
+        }
+        for fail in [None, Some("leave"), Some("enter")] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let pair = attach_irq_pair(
+                || {
+                    events.borrow_mut().push("attach leave");
+                    anyhow::ensure!(fail != Some("leave"), "injected");
+                    Ok(Link("drop leave", events.clone()))
+                },
+                || {
+                    events.borrow_mut().push("attach enter");
+                    anyhow::ensure!(fail != Some("enter"), "injected");
+                    Ok(Link("drop enter", events.clone()))
+                },
+            );
+            assert_eq!(pair.is_ok(), fail.is_none());
+            drop(pair);
+            let expected = match fail {
+                None => vec!["attach leave", "attach enter", "drop enter", "drop leave"],
+                Some("leave") => vec!["attach leave"],
+                _ => vec!["attach leave", "attach enter", "drop leave"],
+            };
+            assert_eq!(*events.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn llc_identity_survives_wide_pool_collapse_and_sparse_llc_ids() {
+        let cpus: Vec<_> = (0..128).map(|c| (c, 1000 + (c % 64) / 4)).collect();
+        let l = LlcLayout::build(&cpus, 1);
+        assert_eq!(l.nr_llcs, 1);
+        assert_ne!(l.domain[&cpus[0].1], l.domain[&cpus[80].1]);
+        assert_eq!(l.domain[&cpus[0].1], l.domain[&cpus[64].1]);
+        assert!(l.dense.values().all(|d| *d == 0));
+    }
+
+    #[test]
+    fn cpulist_last_id() {
+        assert_eq!(last_cpu_id("0-15\n"), Some(15));
+        assert_eq!(last_cpu_id("0-3,8-11"), Some(11));
+        assert_eq!(last_cpu_id("0"), Some(0));
+        assert_eq!(last_cpu_id(""), None);
+    }
+
+    fn grid(nr_cpus: usize, per_llc: usize) -> Vec<(usize, usize)> {
+        (0..nr_cpus).map(|c| (c, c / per_llc)).collect()
+    }
+
+    #[test]
+    fn offline_possible_ids_are_not_ranked() {
+        // Eight online CPUs at equal handler time and 56 possible-but-
+        // offline ids: ranked as zeros they would make every online CPU a
+        // sink. Absent ids leave the ranking instead.
+        let before: Vec<Option<u64>> = (0..64).map(|c| (c < 8).then_some(100)).collect();
+        let current: Vec<Option<u64>> = (0..64).map(|c| (c < 8).then_some(103)).collect();
+        let (present, deltas) = sink_deltas(&current, &before);
+        assert_eq!(present, (0..8).collect::<Vec<_>>());
+        assert_eq!(deltas, vec![3; 8]);
+        assert_eq!(sinks_by_widest_gap(&deltas).unwrap(), vec![false; 8]);
+    }
+
+    #[test]
+    fn llc_layout_counts_domains_above_cpu_63() {
+        // 128 CPUs in 16 LLCs of 8: every LLC is a pool, and a CPU above
+        // 63 lands in its own LLC's pool, not pool 0 (review 2026-09-06).
+        let l = LlcLayout::build(&grid(128, 8), 16);
+        assert_eq!(l.nr_llcs, 16);
+        assert!(l.collapsed.is_none());
+        assert_eq!(l.dense[&9], 9);
+        assert_eq!(l.word[&0], 0xff);
+        assert_eq!(l.word[&7], 0xff << 56);
+        // No CPU of LLC 9 fits a word: LLC-blind for the census paths.
+        assert_eq!(l.word[&9], u64::MAX);
+    }
+
+    #[test]
+    fn llc_layout_dual_ccd() {
+        let l = LlcLayout::build(&grid(32, 16), 16);
+        assert_eq!(l.nr_llcs, 2);
+        assert_eq!(l.dense[&0], 0);
+        assert_eq!(l.dense[&1], 1);
+        assert_eq!(l.word[&1], 0xffff << 16);
+    }
+
+    #[test]
+    fn llc_layout_collapses_past_max_llcs() {
+        let l = LlcLayout::build(&grid(256, 4), 16);
+        assert_eq!(l.collapsed, Some(64));
+        assert_eq!(l.nr_llcs, 1);
+        assert!(l.dense.values().all(|d| *d == 0));
+        assert_eq!(l.domain[&0], 0);
+        assert_eq!(l.domain[&63], 63);
+    }
+
+    #[test]
+    fn llc_layout_one_llc_and_sparse_ids() {
+        let l = LlcLayout::build(&[(0, 3), (2, 3), (70, 3)], 16);
+        assert_eq!(l.nr_llcs, 1);
+        assert_eq!(l.dense[&3], 0);
+        assert_eq!(l.word[&3], 0b101);
+    }
 
     fn flagged(hot: &[bool]) -> Vec<usize> {
         hot.iter()
