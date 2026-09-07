@@ -36,6 +36,32 @@ the day's three commits squashed to one; origin force-pushed.
 
 ## RESUME HERE
 
+**2026-09-07 — DUAL-LLC AND WIDE-HOST VERIFIER REPAIRS.**
+Current source is pool-direct plus two verifier repairs; the FPS results below
+belong to the pre-fix build. A user's 32-CPU/two-LLC load failed at the remote
+offer's atomic store: LLVM removed the ctz result's `& 63`, while the verifier
+could only bound the lowered byte lookup to 255. Preserve the array-index mask
+with `barrier_var`; the release BPF retains the AND. CPU selection is unchanged.
+Expanded load tests also exposed the frontier scan exceeding the one-million
+instruction verification budget on wide spans. Use numeric BPF iteration with
+the same scan bound, order, self exclusion and early exit. Ordinary advances
+still return before the scan; iterator overhead on outliers is not benchmarked.
+
+Reproduced the original map-access error locally (`off=299776`, map size
+280960), and the wide-host complexity failure. Both release and debug now pass
+the kernel verifier on synthetic CPU/LLC layouts 1/1, 16/1, 32/1, 32/2, 64/16,
+128/1 and 1024/1, using kernel `7.2.2-1-cachyos`. The new ignored
+`tests::verifier_load_topologies` requires BPF capabilities and loads without
+attaching or executing synthetic scheduling policy. This validates loadability
+on this kernel, not physical multi-CCD scheduling or other kernels.
+Both builds, 26 ordinary unit tests, placement/topology models (including all
+64 offer slots and frontier spans through MAX_CPUS), clippy, formatting and
+diff checks pass. Native scheduling remains active. Release SHA256
+`8fe31fcf4f685e15c12a91cf18863133629219f35371ef3ff999129f18a32886`.
+Evidence: `target/cake-verifier-fix/verifier-before.log.gz`,
+`verifier-debug.log`, `verifier-release.log`, and the build/model logs in
+that directory. No new game performance claim.
+
 **2026-09-07 — NIGHTLY SELECTION: POOL-DIRECT (USER AUTHORIZED PUSH).**
 The user selected the measured pool-direct build after a full campaign review
 (26 completed frame blocks, 114 windows; retained CSV hashes and recorded

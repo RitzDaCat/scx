@@ -1792,7 +1792,13 @@ static __noinline bool cake_offer_remote(struct task_struct *p __arg_trusted, s3
 		s32 cpu = cake_pick_cold(w, cores, seats, noisy);
 
 		if (cake_taci(cpu, CAKE_SITE_TACI_NOTIFY)) {
-			__atomic_exchange_n(&cake.remote_pool[(u32)cpu & 63].word,
+			u32 target = (u32)cpu;
+
+			/* LLVM knows ctz is < 64 and otherwise removes the mask.
+			 * Its BPF byte-table lowering only proves < 256 to the
+			 * verifier. Keep the bound on the actual array index. */
+			barrier_var(target);
+			__atomic_exchange_n(&cake.remote_pool[target & 63].word,
 					    (u64)cake_llc_of(tcpu) + 1, __ATOMIC_SEQ_CST);
 			cake_kick(cpu, CAKE_KICK_IDLE);
 			return true;
@@ -2536,16 +2542,16 @@ void BPF_STRUCT_OPS(cake_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 static __noinline u64 cake_frontier_candidate(u64 vtime, u32 cpu)
 {
 	u64 near = cake.frontier.word + SLICE_NS;
-	u32 c;
+	int c;
 
 	if (!time_before(near, vtime))
 		return vtime;
-	for (c = 0; c < MAX_CPUS; c++) {
+	/* Numeric iteration keeps verifier work bounded on wide CPU spans.
+	 * Ordinary advances return before creating the iterator. */
+	bpf_for(c, 0, nr_cpu_span < MAX_CPUS ? nr_cpu_span : MAX_CPUS) {
 		u64 ran = 0, live;
 
-		if (c >= nr_cpu_span)
-			break;
-		if (c == cpu)
+		if ((u32)c == cpu)
 			continue;
 		live = cake_occupant_live((s32)c, &ran);
 		if (live && time_before(live, vtime)) {

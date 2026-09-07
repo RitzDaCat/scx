@@ -10,6 +10,7 @@
 #define __noinline
 #define __arg_trusted
 #define barrier_var(x) ((void)(x))
+#define bpf_for(i, start, end) for ((i) = (start); (i) < (int)(end); (i)++)
 #define CAKE_KICK_IDLE 1
 #define CAKE_ENQ_WAKEUP 1
 #define CAKE_ENQ_REENQ (1ULL << 40)
@@ -400,6 +401,20 @@ static void pools(void) {
     kernel_idle = 0; cake_idle_words[0] = 240;
     assert(!cake_offer_remote(&task, 0) && kicks == 0);
     puts("PASS: 255 offer affinities, disappearing heads and stale idle census preserve targeting and retire failed offers");
+    for (u32 cpu = 0; cpu < 64; cpu++) {
+        reset(); nr_llcs = 2; nr_cpu_span = 64;
+        u32 owner = cpu ^ 32;
+        u64 bit = 1ULL << cpu;
+        cpu_llc_word[owner] = ~bit;
+        affinity.bits[0] = kernel_idle = cake_core_free = bit;
+        assert(cake_offer_remote(&task, (s32)owner));
+        assert(kicks == 1 && last_kick == (s32)cpu);
+        assert(!(kernel_idle & bit));
+        for (u32 slot = 0; slot < 64; slot++)
+            assert(cake.remote_pool[slot].word ==
+                   (slot == cpu ? (u64)cake_llc_of((s32)owner) + 1 : 0));
+    }
+    puts("PASS: all 64 remote targets publish only to the claimed CPU's slot and kick that same CPU");
 }
 static void frontier(void) {
     const unsigned idxs[] = {20, 39, IDLE_RECIP_INDEX};
@@ -427,6 +442,16 @@ static void frontier(void) {
     if (time_before(cake.frontier.word, next)) cake.frontier.word = next;
     assert(cake.frontier.word == 100000000);
     puts("PASS: all-low-weight and lone-CPU clocks advance; peer cap cannot rewind the frontier; normal advances avoid peer reads");
+    for (u32 span = 1; span <= MAX_CPUS; span *= 2) {
+        reset(); nr_cpu_span = span;
+        assert(cake_frontier_candidate(101000000, 0) == 101000000);
+        assert(occupant_reads == 0);
+        lives[span - 1] = 101000000;
+        assert(cake_frontier_candidate(168000000, 0) ==
+               (span == 1 ? 168000000 : 101000000));
+        assert(occupant_reads == (int)span - 1);
+    }
+    puts("PASS: frontier spans 1..MAX_CPUS preserve ordinary fast return, self exclusion and last-peer service");
 }
 static void ring(void) {
     reset(); nr_llcs = 2; steal_order_live = true; own_present = true; cake.qmask[0] = 1;

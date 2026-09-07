@@ -1426,6 +1426,84 @@ mod tests {
         SinkMonitor,
     };
 
+    // Load only: synthetic topology exposes paths pruned on the build host.
+    // Never attach struct_ops or tracepoints, or execute the synthetic policy.
+    #[test]
+    #[ignore = "requires BPF load capabilities and a sched_ext kernel"]
+    fn verifier_load_topologies() -> anyhow::Result<()> {
+        use super::{configure_idle_tracking, BpfSkelBuilder};
+        use scx_utils::{scx_ops_load, scx_ops_open};
+        use std::mem::MaybeUninit;
+
+        libbpf_rs::set_print(Some((libbpf_rs::PrintLevel::Warn, |_, message| {
+            eprint!("{message}");
+        })));
+        let mut failures = Vec::new();
+        let steal_span = super::bpf_intf::consts_STEAL_SPAN as usize;
+        for (cpus, llcs) in [
+            (1usize, 1usize),
+            (16, 1),
+            (32, 1),
+            (32, 2),
+            (64, 16),
+            (128, 1),
+            (1024, 1),
+        ] {
+            let mut object = MaybeUninit::uninit();
+            let builder = BpfSkelBuilder::default();
+            let mut skel = scx_ops_open!(builder, &mut object, cake_ops, None)?;
+            let one_word = cpus <= 64;
+            let cores = cpus.div_ceil(2);
+            let ro = skel.maps.rodata_data.as_mut().unwrap();
+            ro.nr_cpu_span = cpus as u32;
+            ro.nr_llcs = llcs as u32;
+            ro.cake_one_word = u8::from(one_word);
+            ro.cake_rank_tiers = if one_word { cores as u32 } else { 0 };
+            ro.cpu_perf_known = if one_word { u64::MAX >> (64 - cpus) } else { 0 };
+            ro.cpu_sibling.fill(-1);
+            ro.cpu_llc_domain.fill(u16::MAX);
+            ro.cake_smt_shift = if cpus == 1 { 0 } else { cores.min(64) as u32 };
+            if cores < 64 {
+                ro.cake_smt_left = u64::MAX >> (64 - cores);
+                ro.cake_smt_right = ro.cake_smt_left << cores;
+            }
+            ro.steal_order_live = u8::from(llcs > 1 && cpus <= steal_span);
+            ro.nr_steal_cpus = (cpus - 1) as u32;
+            for cpu in 0..cpus {
+                let domain = (cpu % cores) / (cores / llcs);
+                if cpus > 1 {
+                    ro.cpu_sibling[cpu] = (cpu ^ cores) as i32;
+                }
+                ro.cpu_llc_id[cpu] = domain as u8;
+                ro.cpu_llc_domain[cpu] = domain as u16;
+                if one_word {
+                    ro.cpu_perf_tier[cpu % cores] |= 1u64 << cpu;
+                }
+                for peer in 0..cpus.min(64) {
+                    if (peer % cores) / (cores / llcs) == domain {
+                        ro.cpu_llc_word[cpu] |= 1u64 << peer;
+                    }
+                }
+                if ro.steal_order_live != 0 {
+                    for peer in 1..cpus {
+                        ro.cpu_steal_order[cpu * steal_span + peer - 1] =
+                            ((cpu + peer) % cpus) as u16;
+                    }
+                }
+            }
+            configure_idle_tracking(&mut skel, one_word);
+            match scx_ops_load!(skel, cake_ops, uei) {
+                Ok(loaded) => {
+                    eprintln!("verifier accepted: {cpus} CPUs, {llcs} LLCs");
+                    drop(loaded);
+                }
+                Err(error) => failures.push(format!("{cpus} CPUs, {llcs} LLCs: {error:#}")),
+            };
+        }
+        anyhow::ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+
     #[test]
     fn irq_publication_preserves_sparse_wide_cpu_ids_and_clears_old_bits() {
         let mut set = vec![false; 257];
