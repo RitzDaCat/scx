@@ -36,6 +36,31 @@ the day's three commits squashed to one; origin force-pushed.
 
 ## RESUME HERE
 
+**2026-09-08 — REBASED NIGHTLY AND LAUNCHER ARGUMENT COMPATIBILITY.**
+Nightly is based on upstream/main `7cec98c51`. Range-diff against the
+published nightly confirms all 17 commits were replayed without source
+changes; the verifier fix's commit reference was updated. The subsequent
+private-runtime-helper fix is also retained. A separate squashed PR snapshot
+keeps the full final Cake tree and avoids rewriting the published nightly.
+
+Obsolete profile options continue with defaults and a warning, including
+`--profile gaming`, `--profile=performance`, `-p powersave` and attached
+short values. Fixed the retry parser's failure on `-pperformance` and
+`-vpperformance`; accepted short prefixes and other valid arguments survive.
+Warnings now precede version/topology exits as well as scheduler startup.
+Invalid values on supported options still fail; invalid toggle specifications
+continue to be ignored by the existing loader logic.
+
+Validation: debug/release builds, 31 unit tests plus 3 CLI integration tests,
+formatting, clippy, placement/topology regression models and the pool-mark
+ordering model pass. Cake emits no compiler warnings; Cargo still reports the
+unrelated existing `scx_rustland_core` unused `lib.include` manifest key.
+Release `--profile gaming --print-topology` and `-vpperformance --version`
+both succeed and print warnings. The capability-gated verifier test was not
+rerun; BPF source is unchanged from the prior verifier repairs. No scheduler
+activation or new performance measurement; native scheduling remains active.
+Model artifacts: `target/cake-nightly-pr-20260908/{review,topology}/`.
+
 **2026-09-07 — DUAL-LLC AND WIDE-HOST VERIFIER REPAIRS.**
 Current source is pool-direct plus two verifier repairs; the FPS results below
 belong to the pre-fix build. A user's 32-CPU/two-LLC load failed at the remote

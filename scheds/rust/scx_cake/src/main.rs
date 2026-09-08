@@ -50,7 +50,7 @@ fn configure_idle_tracking(skel: &mut OpenBpfSkel<'_>, one_word: bool) {
 }
 
 /// scx_cake: a gaming-first sched_ext scheduler.
-#[derive(Debug, Parser)]
+#[derive(Debug, PartialEq, Eq, Parser)]
 #[command(after_help = toggle_help())]
 struct Opts {
     /// Print startup core topology and platform performance preferences without attaching.
@@ -1184,48 +1184,75 @@ fn probe_handoff_hop_ns() -> Option<HandoffProbe> {
 /// example `--profile default`) used to keep the scheduler off entirely;
 /// now the option and its bare value are dropped, the rest is parsed, and
 /// every dropped token is reported once logging is up. Real errors on real
-/// options (a bad value, `--help`, `--version`) keep clap's behaviour.
-fn parse_opts_lenient() -> (Opts, Vec<String>) {
+/// options (a bad value or `--help`) keep clap's behaviour.
+fn parse_opts_lenient(
+    args: impl IntoIterator<Item = impl Into<std::ffi::OsString>>,
+) -> std::result::Result<(Opts, Vec<String>), clap::Error> {
     use clap::error::ContextKind;
     use clap::error::ErrorKind;
 
-    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
     let mut dropped: Vec<String> = Vec::new();
     loop {
         match Opts::try_parse_from(&args) {
-            Ok(opts) => return (opts, dropped),
+            Ok(opts) => return Ok((opts, dropped)),
             Err(e) if e.kind() == ErrorKind::UnknownArgument => {
                 let Some(bad) = e
                     .get(ContextKind::InvalidArg)
                     .map(|v| v.to_string())
                     .filter(|s| !s.is_empty())
                 else {
-                    e.exit();
+                    return Err(e);
                 };
                 // The offending token, matched on the option name so that
                 // both `--x=v` and `--x v` forms are found.
                 let name = bad.split('=').next().unwrap_or(&bad).to_string();
-                let Some(pos) = args.iter().skip(1).position(|a| {
+                let short = name
+                    .strip_prefix('-')
+                    .filter(|s| s.chars().count() == 1)
+                    .and_then(|s| s.chars().next());
+                let Some((pos, split)) = args.iter().enumerate().skip(1).find_map(|(pos, a)| {
                     let s = a.to_string_lossy();
-                    s == bad || s == name || s.starts_with(&format!("{name}="))
+                    if s == bad || s == name || s.starts_with(&format!("{name}=")) {
+                        return Some((pos, 0));
+                    }
+                    // Clap reports only `-p` for `-pgaming` or `-vpgaming`.
+                    // Keep the accepted prefix; the unknown option owns the
+                    // suffix, which may be its attached value.
+                    if s.starts_with('-') && !s.starts_with("--") {
+                        if let Some(short) = short {
+                            return s
+                                .char_indices()
+                                .skip(1)
+                                .find_map(|(split, c)| (c == short).then_some((pos, split)));
+                        }
+                    }
+                    None
                 }) else {
-                    e.exit();
+                    return Err(e);
                 };
-                let pos = pos + 1;
                 let mut tok = args.remove(pos).to_string_lossy().into_owned();
+                let mut next_pos = pos;
+                if split > 0 {
+                    if split > 1 {
+                        args.insert(pos, tok[..split].into());
+                        next_pos += 1;
+                    }
+                    tok = format!("-{}", &tok[split..]);
+                }
                 // `--x v`: the bare value that follows is part of the same
                 // mistake; a token starting with `-` is another option.
-                if !tok.contains('=') && tok.starts_with('-') && pos < args.len() {
-                    let next = args[pos].to_string_lossy();
+                if tok == name && tok.starts_with('-') && next_pos < args.len() {
+                    let next = args[next_pos].to_string_lossy();
                     if !next.starts_with('-') {
                         tok.push(' ');
                         tok.push_str(&next);
-                        args.remove(pos);
+                        args.remove(next_pos);
                     }
                 }
                 dropped.push(tok);
             }
-            Err(e) => e.exit(),
+            Err(e) => return Err(e),
         }
     }
 }
@@ -1276,7 +1303,22 @@ fn reexec_self() -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let (opts, ignored_args) = parse_opts_lenient();
+    let (opts, ignored_args) = parse_opts_lenient(std::env::args_os()).unwrap_or_else(|e| e.exit());
+
+    let mut lcfg = simplelog::ConfigBuilder::new();
+    lcfg.set_time_level(simplelog::LevelFilter::Error)
+        .set_location_level(simplelog::LevelFilter::Off)
+        .set_target_level(simplelog::LevelFilter::Off)
+        .set_thread_level(simplelog::LevelFilter::Off);
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Info,
+        lcfg.build(),
+        simplelog::TerminalMode::Stderr,
+        simplelog::ColorChoice::Auto,
+    )?;
+    for a in &ignored_args {
+        warn!("   args    ignored unknown option `{a}`; cake has no such option, defaults used");
+    }
 
     if opts.version {
         println!(
@@ -1294,21 +1336,6 @@ fn main() -> Result<()> {
             println!("{core}");
         }
         return Ok(());
-    }
-
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        simplelog::LevelFilter::Info,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
-    for a in &ignored_args {
-        warn!("   args    ignored unknown option `{a}`; cake has no such option, defaults used");
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1411,6 +1438,74 @@ impl LlcLayout {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_profiles_use_default_options() {
+        let (defaults, _) = super::parse_opts_lenient(["scx_cake"]).unwrap();
+        for args in [
+            vec!["--profile", "gaming"],
+            vec!["--profile=performance"],
+            vec!["-p", "powersave"],
+            vec!["-pperformance"],
+            vec!["--profile"],
+            vec!["--performance", "--powersave"],
+        ] {
+            let (opts, dropped) =
+                super::parse_opts_lenient(std::iter::once("scx_cake").chain(args.clone())).unwrap();
+            assert_eq!(opts, defaults, "{args:?}");
+            assert!(!dropped.is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_options_preserve_supported_arguments() {
+        let (expected, _) =
+            super::parse_opts_lenient(["scx_cake", "-v", "--toggle", "g85=0", "--print-topology"])
+                .unwrap();
+        let (opts, dropped) = super::parse_opts_lenient([
+            "scx_cake",
+            "--profile",
+            "gaming",
+            "-v",
+            "--obsolete=42",
+            "--toggle",
+            "g85=0",
+            "--powersave",
+            "--print-topology",
+        ])
+        .unwrap();
+        assert_eq!(opts, expected);
+        assert_eq!(
+            dropped,
+            ["--profile gaming", "--obsolete=42", "--powersave"]
+        );
+    }
+
+    #[test]
+    fn legacy_short_option_preserves_cluster_prefix() {
+        let (opts, dropped) =
+            super::parse_opts_lenient(["scx_cake", "-vpperformance", "--toggle=g85=0"]).unwrap();
+        assert!(opts.verbose);
+        assert_eq!(opts.toggle, ["g85=0"]);
+        assert_eq!(dropped, ["-pperformance"]);
+    }
+
+    #[test]
+    fn supported_option_errors_and_help_remain_errors() {
+        use clap::error::ErrorKind;
+        for (args, kind) in [
+            (vec!["--toggle"], ErrorKind::InvalidValue),
+            (vec!["--verbose=garbage"], ErrorKind::TooManyValues),
+            (
+                vec!["--profile", "gaming", "--help"],
+                ErrorKind::DisplayHelp,
+            ),
+        ] {
+            let err = super::parse_opts_lenient(std::iter::once("scx_cake").chain(args.clone()))
+                .unwrap_err();
+            assert_eq!(err.kind(), kind, "{args:?}");
+        }
+    }
+
     #[test]
     fn drop_privileges_in_child() {
         const CHILD: &str = "SCX_CAKE_OBSERVER_TEST_CHILD";
