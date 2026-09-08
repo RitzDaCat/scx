@@ -551,7 +551,7 @@ impl<'a> Scheduler<'a> {
         // /proc/<pid>/exe to unprivileged observers even with dumpable
         // restored, which breaks the sudoless bench runner's hash-of-exe
         // identity verification (and holding dead privileges is bad hygiene).
-        if let Err(err) = scx_utils::misc::drop_privileges_for_observers() {
+        if let Err(err) = drop_privileges_for_observers() {
             warn!("post-attach capability drop failed: {err}");
         }
 
@@ -1230,6 +1230,51 @@ fn parse_opts_lenient() -> (Opts, Vec<String>) {
     }
 }
 
+/// Drop the calling thread's capability sets and restore process inspection.
+/// Call after privileged setup. Earlier-created threads retain their own
+/// capabilities; a subsequent privileged initialization requires re-exec.
+fn drop_privileges_for_observers() -> std::io::Result<()> {
+    #[repr(C)]
+    struct CapHeader {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let header = CapHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let data = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    if unsafe { libc::syscall(libc::SYS_capset, &header, data.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Restore file capabilities for a requested restart after dropping the link.
+fn reexec_self() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::fs::read_link("/proc/self/exe")
+        .context("failed to resolve /proc/self/exe for restart")?;
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    Err(anyhow::Error::new(err).context("re-exec after kernel restart request failed"))
+}
+
 fn main() -> Result<()> {
     let (opts, ignored_args) = parse_opts_lenient();
 
@@ -1278,7 +1323,7 @@ fn main() -> Result<()> {
 
     if sched.run(shutdown.clone())?.should_restart() {
         info!("🍰 restart requested by the kernel — re-executing");
-        scx_utils::misc::reexec_self()?;
+        reexec_self()?;
     }
 
     Ok(())
@@ -1366,6 +1411,30 @@ impl LlcLayout {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drop_privileges_in_child() {
+        const CHILD: &str = "SCX_CAKE_OBSERVER_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::drop_privileges_in_child"])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        super::drop_privileges_for_observers().unwrap();
+        let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        for set in ["CapInh:", "CapPrm:", "CapEff:"] {
+            let value = status.lines().find(|line| line.starts_with(set)).unwrap();
+            assert_eq!(
+                u64::from_str_radix(value.split_whitespace().nth(1).unwrap(), 16).unwrap(),
+                0
+            );
+        }
+        assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 1);
+    }
+
     #[test]
     fn smt_fold_matches_every_single_cpu_mapping() {
         let mut siblings = [-1; 64];
