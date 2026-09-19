@@ -41,16 +41,7 @@ use scx_utils::uei_report;
 
 const SCHEDULER_NAME: &str = "scx_cake";
 
-/// Narrow placement uses kernel idle masks; its private idle callback is empty.
-/// Omit the callback entirely instead of entering BPF just to return.
-fn configure_idle_tracking(skel: &mut OpenBpfSkel<'_>, one_word: bool) {
-    if one_word {
-        skel.struct_ops.cake_ops_mut().update_idle = std::ptr::null_mut();
-        skel.progs.cake_update_idle.set_autoload(false);
-    }
-}
-
-/// ops.cpu_acquire exists for the §G93 hold census only; a release run does
+/// ops.cpu_acquire exists for the probe hold census only; a release run does
 /// not pay a BPF entry per RT-to-SCX switch to record nothing.
 fn configure_acquire_census(skel: &mut OpenBpfSkel<'_>, probe_on: bool) {
     if !probe_on {
@@ -82,25 +73,23 @@ struct Opts {
     /// or value is dropped with a warning.
     #[clap(long = "toggle", value_name = "NAME=0|1")]
     toggle: Vec<String>,
+
+    /// Observe-only sweep: override the handoff floor (ns) so the probe
+    /// histograms show how the split moves with the threshold.
+    #[clap(long = "handoff-ns", value_name = "NS")]
+    handoff_ns: Option<u64>,
 }
 
 /// Every construct toggle: name, construct, BPF default. The default is
 /// checked against the compiled rodata at start so the two cannot drift;
 /// --help prints this table.
-const TOGGLES: [(&str, &str, u8); 5] = [
-    ("g85", "seat-rules", 1),
-    ("g86", "claim-retry", 1),
-    ("g87", "wakee-protect", 1),
-    ("g89", "die-local-pool", 1),
-    ("probe", "diagnostics", 0),
-];
+const TOGGLES: [(&str, &str, u8); 1] = [("probe", "diagnostics", 0)];
 
 fn toggle_help() -> String {
     let mut s = String::from("Toggles (--toggle NAME=0|1, repeatable):\n");
     for (name, what, dfl) in TOGGLES {
         s.push_str(&format!("  {name:<9} {what:<20} default {dfl}\n"));
     }
-    s.push_str("  llcsplit  fake-two-dies        default 0, loader-only test scaffold\n");
     s
 }
 
@@ -117,26 +106,26 @@ fn attach_irq_pair<L>(
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    /// Handler-edge tracepoint links (§G35); dropped on exit with the rest.
+    /// Handler-edge tracepoint links; dropped on exit with the rest.
     _irq_links: Vec<libbpf_rs::Link>,
     /// Diagnostics on (--toggle probe=1): census, hold attribution, black box.
     probe_on: bool,
     /// Print runtime diagnostics. Off by default: a release run is not a
     /// measurement session, and a scheduler logging into a game is noise.
     verbose: bool,
-    /// Live IRQ-sink tracking state (§G30, §G33).
+    /// Live IRQ-sink tracking state.
     sinks: SinkMonitor,
+    /// Multi-LLC hosts: the die each V-cache mode prefers, and the mode last seen.
+    pref_die: Option<PreferredDie>,
+    x3d_mode: Option<String>,
 }
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         try_set_rlimit_infinity();
 
-        // The startup banner is the only "telemetry" cake emits, and it is
-        // one-shot: version, machine shape, the compiled constants, and
-        // which kernel fast paths the RUNNING kernel provides (probed from
-        // BTF, not what the source requested) — so every log is
-        // self-describing about what actually loaded.
+        // The startup banner is cake's only telemetry, one-shot: version, machine
+        // shape, compiled constants, and the fast paths the running kernel provides.
         let topo = Topology::new().context("failed to read topology")?;
         let physical = topo.all_cores.len();
         let total = topo.all_cpus.len();
@@ -161,39 +150,30 @@ impl<'a> Scheduler<'a> {
             scx_utils::init_libbpf_logging(Some(libbpf_rs::PrintLevel::Warn));
         }
         let mut skel = scx_ops_open!(skel_builder, open_object, cake_ops, None)?;
-        // The handler-edge hooks attach by hand, exit first (below). The
-        // skeleton's auto-attach in scx_ops_attach! attached them too, in
-        // section order (entry first, so one CPU started mid-handler for
-        // the run) and a second time, so every program ran twice per edge
-        // (review 2026-09-06).
+        // The handler-edge hooks attach by hand, exit first (below); the skeleton's
+        // auto-attach ran them in section order and a second time.
         for prog in [
             &mut skel.progs.cake_irq_enter,
             &mut skel.progs.cake_irq_leave,
             &mut skel.progs.cake_softirq_enter,
             &mut skel.progs.cake_softirq_leave,
+            &mut skel.progs.cake_cpu_idle,
         ] {
             prog.set_autoattach(false);
         }
 
-        // Linux CPU numbering does not guarantee that an SMT sibling is
-        // cpu +/- nr_cpus/2. Populate the immutable BPF lookup from sysfs
-        // topology and cycle within wider-than-SMT2 cores. The fallback path
-        // treats -1 as "no online sibling" and uses the kernel idle picker.
+        // Linux CPU numbering does not guarantee that an SMT sibling is cpu +/-
+        // nr_cpus/2: populate the BPF lookup from sysfs topology. -1 means no online
+        // sibling, and the fallback uses the kernel idle picker.
         let rodata = skel
             .maps
             .rodata_data
             .as_mut()
             .context("BPF rodata unavailable for CPU topology")?;
 
-        // The CPU id span the steal ring and neighbour probe scan. It is a
-        // load-time constant, so it goes in rodata (frozen before load, hence
-        // folded by the verifier) instead of being written into mutable BPF
-        // state from ops.init. `ops.init` refuses to attach if this is
-        // narrower than the kernel's own nr_cpu_ids.
-        // The span must cover the kernel's nr_cpu_ids, which counts POSSIBLE
-        // CPUs; the topology only lists present ones, and a guest or a board
-        // with disabled entries has more possible than present. ops.init
-        // refused such hosts as "narrower than nr_cpu_ids" (audit 2026-09-06).
+        // The CPU id span the steal ring and neighbour probe scan: rodata, so the
+        // verifier folds it. It must cover the kernel's nr_cpu_ids, which counts
+        // POSSIBLE CPUs; the topology lists present ones only. ops.init refuses less.
         let span = (*NR_CPU_IDS).max(
             std::fs::read_to_string("/sys/devices/system/cpu/possible")
                 .ok()
@@ -211,26 +191,57 @@ impl<'a> Scheduler<'a> {
         // nothing, a present id past 64 turns the one-word paths off.
         let one_word = *NR_CPU_IDS <= 64;
         rodata.cake_one_word = u8::from(one_word);
+        rodata.cake_tick_ns = coarse_tick_ns();
+        if let Some(ns) = opts.handoff_ns {
+            rodata.cake_handoff_max_ns = ns;
+            warn!("   sweep   handoff_max {ns} ns (observe-only override)");
+        }
+        let (idle_driver, idle_states) = cpuidle_states();
+        for (slot, ns) in rodata.cake_idle_state_ns.iter_mut().zip(&idle_states) {
+            *slot = *ns;
+        }
+        rodata.cake_idle_exit_max_ns = idle_states.iter().copied().max().unwrap_or(0);
+        // The deep-idle word is read only by the one-word pickers: a wider host
+        // leaves the cpu_idle tracepoint unloaded rather than fed for nobody.
+        let idle_exit_max_ns = if one_word {
+            rodata.cake_idle_exit_max_ns
+        } else {
+            0
+        };
+        match &idle_driver {
+            Some(d) => info!(
+                "   idle    driver {d}, {} states, deepest exit {} us",
+                idle_states.len(),
+                idle_exit_max_ns / 1000
+            ),
+            None => {
+                info!("   idle    no cpuidle driver (MWAIT/polling idle, exits priced at zero)")
+            }
+        }
+        // Capacity asymmetry inside one cache domain is the hybrid signature;
+        // across dies it is binning or cache, which the die model handles.
+        if one_word && topo.all_llcs.len() == 1 && topo.has_little_cores() {
+            rodata.cake_cap_tiers = 1;
+            rodata.cake_cap_word = topo
+                .all_cpus
+                .values()
+                .filter(|c| c.core_type != scx_utils::CoreType::Little)
+                .fold(0u64, |w, c| w | (1u64 << c.id));
+            info!(
+                "   cores   hybrid: {} high-capacity CPUs preferred before whole cores",
+                rodata.cake_cap_word.count_ones()
+            );
+        }
         if !one_word {
             warn!(
-                "   span    {} CPU ids exceed one census word: claim walk, seats and die-local pools off, kernel idle pick only",
+                "   span    {} CPU ids exceed one census word: claim walk, seats, deep-idle avoidance and die-local pools off, kernel idle pick only",
                 *NR_CPU_IDS
             );
         }
 
-        // Campaign toggles land in rodata before load so the verifier prunes
-        // the off arms; the logged line is each arm's identity in an on/off
-        // pair (STATE.md, toggle campaign 2026-08-22). One table names every
-        // toggle; a second line prints only what differs from the build's
-        // defaults, which is what a tester needs to read back.
-        let mut llcsplit = false;
-        let fields: [&mut u8; 5] = [
-            &mut rodata.cake_tog_g85,
-            &mut rodata.cake_tog_g86,
-            &mut rodata.cake_tog_g87,
-            &mut rodata.cake_tog_g89,
-            &mut rodata.cake_tog_probe,
-        ];
+        // Campaign toggles land in rodata before load so the verifier prunes the off
+        // arms; one table names every toggle, a second line prints what differs.
+        let fields: [&mut u8; 1] = [&mut rodata.cake_tog_probe];
         let mut slots: Vec<(&str, &str, &mut u8)> = TOGGLES
             .iter()
             .zip(fields)
@@ -259,11 +270,6 @@ impl<'a> Scheduler<'a> {
             };
             if let Some(slot) = slots.iter_mut().find(|s| s.0 == name) {
                 *slot.2 = on;
-            } else if name == "llcsplit" {
-                // Test scaffold: present this host to the BPF side as two
-                // dies (lower and upper half of the cores, with siblings) so
-                // the routing runs as on a dual-CCD chip. Loader-only.
-                llcsplit = on == 1;
             } else {
                 warn!("   toggle  ignored `{spec}`: no toggle named {name}");
             }
@@ -272,13 +278,8 @@ impl<'a> Scheduler<'a> {
         // Host identity right under the version line; the LLC count is the
         // same expression the steal and pool setup below uses.
         info!(
-            "   host    {physical} cores + {smt} SMT = {total} CPUs, {} LLC{}",
-            if llcsplit { 2 } else { topo.all_llcs.len() },
-            if llcsplit {
-                " (SCAFFOLD: fake split, not the hardware)"
-            } else {
-                ""
-            }
+            "   host    {physical} cores + {smt} SMT = {total} CPUs, {} LLC",
+            topo.all_llcs.len()
         );
         let core_performance = core_performance::CorePerformanceLayout::discover(&topo);
         let rank_words = core_performance.rank_words();
@@ -290,13 +291,22 @@ impl<'a> Scheduler<'a> {
             }
         }
         info!("   cores   {}", core_performance.summary());
+        let pref_die = preferred_die(&topo, &core_performance);
+        let x3d_mode = amd_x3d_mode();
+        if let Some(die) = &pref_die {
+            let w = preferred_word(die, x3d_mode.as_deref());
+            info!(
+                "   die     preferred LLC word {w:#x} (x3d mode {})",
+                x3d_mode.as_deref().unwrap_or("n/a")
+            );
+        }
         if opts.verbose {
             for core in core_performance.details() {
                 info!("   {core}");
             }
         }
         if opts.verbose {
-            info!("   slice   {slice_us}µs, {total} per-CPU vtime queues + 1 global wake queue");
+            info!("   slice   {slice_us}µs, {total} per-CPU vtime queues + one wake pool per LLC");
         }
         // cake calls scx_bpf_dsq_peek() unconditionally; on a kernel without
         // the ksym the load fails outright, so "MISSING" is the honest word.
@@ -313,15 +323,12 @@ impl<'a> Scheduler<'a> {
         let probe_on = slots.iter().any(|s| s.0 == "probe" && *s.2 == 1);
         // Stock start says nothing about toggles. An override prints one
         // line naming what moved; the full identity line is --verbose only.
-        let mut changed: Vec<String> = slots
+        let changed: Vec<String> = slots
             .iter()
             .zip(&defaults)
             .filter(|(s, d)| *s.2 != **d)
             .map(|(s, _)| format!("{}={} {}", s.0, s.2, s.1))
             .collect();
-        if llcsplit {
-            changed.push("llcsplit=1 fake-two-dies".to_string());
-        }
         if opts.verbose {
             let line: Vec<String> = slots.iter().map(|s| format!("{}={}", s.0, s.2)).collect();
             info!("   toggle  {}", line.join(" "));
@@ -333,64 +340,35 @@ impl<'a> Scheduler<'a> {
         }
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
-        // Clamped so a probe perturbed by host load cannot mis-tune the
-        // scheduler, and logged so the value used is always on the record.
+        // Clamped so a probe perturbed by host load cannot mis-tune; always logged.
         match probe_handoff_hop_ns() {
             Some(probe) => {
-                // The admission threshold IS the tail of a genuine handoff --
-                // used directly, never a mean times an invented multiplier.
-                // DIAGNOSTIC ONLY -- deliberately does not drive policy yet.
-                //
-                // Measured 2026-07-30: driving cake_handoff_max_ns from this
-                // probe cost mutex-handoff -35.66% (CI[-40.01,-31.31]) with
-                // migrations 2.4-2.7x up, at both `2 * mean` (1240ns) and, by
-                // inspection, `p99` (798ns). The known-good threshold is
-                // 1464ns = 2.34x this probe's median.
-                //
-                // The probe is not wrong about the hardware -- its 625ns
-                // median cross-validates the independent 606ns rdtscp floor
-                // to 3%. It is measuring the wrong DISTRIBUTION: a clean
-                // condvar ping-pong on an idle host, where p99 sits just
-                // 1.28x the median, while real handoffs under contention
-                // carry lock acquisition and cache misses and run far wider.
-                // That is a workload property, and no startup probe can see
-                // it. Making this threshold host-adaptive needs runtime
-                // observation of `used` in ops.stopping, not a boot-time
-                // measurement -- same machinery as G9.7.
+                // The admission threshold IS the tail of a genuine handoff, used directly.
+                // DIAGNOSTIC ONLY: driving cake_handoff_max_ns from this probe cost
+                // mutex-handoff 35%; it measures a clean ping-pong, not contended handoffs.
                 let (med, p99) = (probe.median, probe.p99);
                 let hm = rodata.cake_handoff_max_ns;
-                // The probe's p99 IS the pick-to-landing horizon the tick
-                // predictor needs (§G36): how long this host takes to land a
-                // wake. Zero (probe failed, or a hop too long to predict
-                // with) leaves the predictor off.
-                rodata.cake_wake_hop_ns = if p99 <= WAKE_HOP_MAX_NS {
+                // The probe's p99 is the pick-to-landing horizon the tick predictor needs;
+                // a hop past a quarter tick would call every CPU tick-soon: off.
+                let hop_max = rodata.cake_tick_ns / 4;
+                rodata.cake_wake_hop_ns = if p99 <= hop_max {
                     p99
                 } else {
-                    warn!(
-                        "   probe   hop p99 {p99}ns exceeds {WAKE_HOP_MAX_NS}ns; tick predictor off"
-                    );
+                    warn!("   probe   hop p99 {p99}ns exceeds {hop_max}ns; tick predictor off");
                     0
                 };
-                if opts.verbose {
-                    info!(
-                        "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
-                    );
-                }
+                info!(
+                    "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
+                );
             }
             None => {
-                if opts.verbose {
-                    log::warn!("   probe   handoff probe failed (diagnostic only)");
-                }
+                log::warn!("   probe   handoff probe failed (diagnostic only)");
             }
         }
 
-        // Interrupt sinks are measured, never guessed — and measured LIVE:
-        // per-CPU handler-time share off the run loop, cut at the
-        // distribution's own widest gap (§G30, §G33, §R.26). Nothing is
-        // sampled at attach — an attach-time window measures whatever the
-        // machine happened to be doing during launch (§G30's observer
-        // effect) — so the scheduler starts sink-free; -v announces each
-        // set as it changes.
+        // Interrupt sinks are measured live, never guessed: per-CPU handler-time
+        // share off the run loop, cut at the distribution's widest gap. Nothing is
+        // sampled at attach (that measures launch), so the scheduler starts sink-free.
 
         let siblings = &mut rodata.cpu_sibling;
         siblings.fill(-1);
@@ -432,34 +410,20 @@ impl<'a> Scheduler<'a> {
                 .keys()
                 .next_back()
                 .is_none_or(|cpu| *cpu < span);
-            // §G88 scaffold: with --toggle llcsplit=1 the lower half of the
-            // cores (by core id) is die 0 and the upper half die 1.
-            let half_core = {
-                let mut cores: Vec<usize> = topo.all_cores.keys().copied().collect();
-                cores.sort_unstable();
-                cores.get(cores.len() / 2).copied().unwrap_or(usize::MAX)
-            };
-            let llc_of = |cpu: &scx_utils::Cpu| -> usize {
-                if llcsplit {
-                    usize::from(cpu.core_id >= half_core)
-                } else {
-                    cpu.llc_id
-                }
-            };
-            let nr_llcs = if llcsplit { 2 } else { topo.all_llcs.len() };
+            let llc_of = |cpu: &scx_utils::Cpu| -> usize { cpu.llc_id };
+            let nr_llcs = topo.all_llcs.len();
             let multi_ccd = nr_llcs > 1;
-            rodata.steal_order_live = u8::from(multi_ccd && fits);
+            rodata.steal_order_live = u8::from(fits);
             rodata.nr_steal_cpus = topo.all_cpus.len().saturating_sub(1) as u32;
             order.fill(0);
 
-            // §G88/§G89: the per-CPU LLC word, the dense LLC id and the LLC
-            // count, from every CPU the topology describes.
+            // The per-CPU LLC word, the dense LLC id and the LLC count, from every
+            // CPU the topology describes.
             {
                 let cpus: Vec<(usize, usize)> =
                     topo.all_cpus.values().map(|c| (c.id, llc_of(c))).collect();
-                // Die-local pools need the one-word census: past it the pool
-                // kick is LLC-blind and lands on a die whose dispatch reads
-                // its own pool, so the wake waits (audit 2026-09-06).
+                // Die-local pools need the one-word census: past it the pool kick is
+                // LLC-blind and lands on a die whose dispatch reads its own pool.
                 let max_llcs = if rodata.cake_one_word != 0 {
                     bpf_intf::consts_MAX_LLCS as usize
                 } else {
@@ -484,10 +448,33 @@ impl<'a> Scheduler<'a> {
                 rodata.nr_llcs = layout.nr_llcs;
             }
 
+            // Online CPUs per LLC and per host, tripled for the serial gate's
+            // three-quarters test; claim tries scale with the widest die.
+            {
+                let online = online_cpu_set(&topo);
+                let mut per_llc: BTreeMap<usize, u32> = BTreeMap::new();
+                for cpu in topo.all_cpus.values() {
+                    if online.contains(&cpu.id) {
+                        *per_llc.entry(llc_of(cpu)).or_insert(0) += 1;
+                    }
+                }
+                rodata.nr_cpu_online3 = per_llc.values().sum::<u32>() * 3;
+                rodata.cpu_llc_online3.fill(0);
+                let mut die_max = 0u32;
+                for cpu in topo.all_cpus.values() {
+                    let n = per_llc.get(&llc_of(cpu)).copied().unwrap_or(0);
+                    die_max = die_max.max(n);
+                    if cpu.id < rodata.cpu_llc_online3.len() {
+                        rodata.cpu_llc_online3[cpu.id] = n * 3;
+                    }
+                }
+                rodata.cake_claim_tries = (die_max / 4).max(bpf_intf::consts_CLAIM_TRIES_MIN);
+            }
+
             if multi_ccd && !fits {
                 warn!("   ccd     host wider than steal matrix ({span} CPUs); ring steal only");
             }
-            if multi_ccd && fits {
+            if fits {
                 let mut llc_cache: BTreeMap<usize, usize> = BTreeMap::new();
                 for cpu in topo.all_cpus.values() {
                     let e = llc_cache.entry(llc_of(cpu)).or_insert(0);
@@ -510,7 +497,12 @@ impl<'a> Scheduler<'a> {
                         } else {
                             2
                         };
-                        (class, (dst.id + nr_ids - src.id) % nr_ids)
+                        // Own die: the SMT sibling first, then by id distance.
+                        (
+                            class,
+                            u8::from(dst.core_id != src.core_id),
+                            (dst.id + nr_ids - src.id) % nr_ids,
+                        )
                     });
                     let base = src.id * span;
                     for (slot, dst) in candidates.into_iter().enumerate() {
@@ -520,19 +512,17 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        configure_idle_tracking(&mut skel, one_word);
         configure_acquire_census(&mut skel, probe_on);
+        if idle_exit_max_ns == 0 {
+            skel.progs.cake_cpu_idle.set_autoload(false);
+        }
 
         // Load and attach.
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
 
-        // Handler-edge tracepoints feed the in-handler depth (§G35). The
-        // exit hook of each pair attaches FIRST: cake_irq_edge drops an exit
-        // with no entry, so a handler in flight across the attach costs
-        // nothing, while an entry counted before its exit hook existed
-        // left that CPU mid-handler for the whole run (review 2026-09-06).
-        // A pair whose exit hook fails skips its entry hook for the same
-        // reason; the depth stays zero and steering is chronic-only.
+        // Handler-edge tracepoints feed the in-handler depth. The exit hook of each
+        // pair attaches FIRST (an entry counted before its exit hook exists leaves
+        // that CPU mid-handler for the run); a pair whose exit fails skips its entry.
         let mut irq_links = Vec::with_capacity(4);
         for (name, leave, enter) in [
             (
@@ -552,30 +542,33 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        if idle_exit_max_ns > 0 {
+            match skel.progs.cake_cpu_idle.attach() {
+                Ok(link) => irq_links.push(link),
+                Err(e) => warn!("   idle    cpu_idle tracepoint {e:#}; idle depth unknown"),
+            }
+        }
+        if let (Some(die), Some(bss)) = (&pref_die, skel.maps.bss_data.as_mut()) {
+            bss.cake_llc_pref_word = preferred_word(die, x3d_mode.as_deref());
+        }
+
         // Begin scheduling only after handler accounting is installed.
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
         info!("🍰 attached");
-        // ops.init chose the task-age clock; say which, every start.
-        if let Some(bss) = skel.maps.bss_data.as_ref() {
-            if bss.cake_tick_ns > 0 {
-                info!(
-                    "   age     tick clock ({} ns per tick, offset to monotonic {} ms)",
-                    bss.cake_tick_ns,
-                    bss.cake_jiffies_offset as i64 / 1_000_000
-                );
+        // ops.init chose the task-age clock; say which under -v.
+        let tick_ns = skel.maps.rodata_data.as_ref().map_or(0, |r| r.cake_tick_ns);
+        if opts.verbose {
+            if tick_ns > 0 {
+                info!("   age     tick clock ({tick_ns} ns per tick)");
             } else {
-                info!("   age     precise clock (kernel HZ unavailable; tick clock off)");
+                info!("   age     precise clock (no tick-sized coarse clock resolution)");
             }
         }
 
-        // The file capabilities (cap_bpf,cap_perfmon,cap_sys_nice) are only
-        // needed to load and attach; detach and map access use already-open
-        // fds. Drop them all: while any elevated capability stays in the
-        // permitted set, the kernel's ptrace access check denies
-        // /proc/<pid>/exe to unprivileged observers even with dumpable
-        // restored, which breaks the sudoless bench runner's hash-of-exe
-        // identity verification (and holding dead privileges is bad hygiene).
+        // File capabilities are needed only to load and attach. Drop them all: any
+        // elevated capability left in the permitted set makes the kernel deny
+        // /proc/<pid>/exe to unprivileged observers, breaking hash-of-exe identity.
         if let Err(err) = drop_privileges_for_observers() {
             warn!("post-attach capability drop failed: {err}");
         }
@@ -587,6 +580,8 @@ impl<'a> Scheduler<'a> {
             probe_on,
             verbose: opts.verbose,
             sinks: SinkMonitor::new(*NR_CPU_IDS),
+            pref_die,
+            x3d_mode,
         })
     }
 
@@ -600,10 +595,8 @@ impl<'a> Scheduler<'a> {
             std::thread::sleep(Duration::from_secs(1));
             polls += 1;
 
-            // §G35 self-check: a CPU mid-handler across two reads 50 ms
-            // apart is the signature of an entry counted before its exit
-            // hook existed (review 2026-09-06); a real handler is gone by
-            // the second read. The healthy answer is zero.
+            // Self-check: a CPU mid-handler across two reads 50 ms apart is an entry
+            // counted before its exit hook existed. The healthy answer is zero.
             if self.verbose && (polls == 2 || polls == 6) {
                 let depths = |bss: &bpf_skel::types::bss| -> Vec<u32> {
                     bss.cake_irq_live
@@ -633,6 +626,17 @@ impl<'a> Scheduler<'a> {
 
             if let Some(set) = self.sinks.tick(*NR_CPU_IDS) {
                 self.publish_sinks(&set);
+            }
+            // A game-mode daemon flips the V-cache mode after attach.
+            if let Some(die) = &self.pref_die {
+                let mode = amd_x3d_mode();
+                if mode != self.x3d_mode {
+                    if let Some(bss) = self.skel.maps.bss_data.as_mut() {
+                        bss.cake_llc_pref_word = preferred_word(die, mode.as_deref());
+                    }
+                    info!("   die     x3d mode {}", mode.as_deref().unwrap_or("n/a"));
+                    self.x3d_mode = mode;
+                }
             }
         }
 
@@ -667,7 +671,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         if let (true, Some(bss)) = (self.probe_on, self.skel.maps.bss_data.as_ref()) {
-            // §G93 census: releases by arrival path x displacer band, by reason; holds by band.
+            // Release census: by arrival path x displacer band, by reason; holds by band.
             let bands: Vec<String> = (0..bss.cake_acquire_hist.len())
                 .map(|b| format!("{}us", 1u64 << b))
                 .collect();
@@ -694,6 +698,37 @@ impl<'a> Scheduler<'a> {
                 .map(|v| v.to_string())
                 .collect();
             info!("   g93     hold      {}", holds.join(" "));
+            // Observe-only histograms: bands summed over CPUs, the antimode split
+            // (the emptiest band between the two largest modes) and the median band.
+            let shift = bpf_intf::consts_CAKE_HIST_SHIFT;
+            for (kind, name) in ["hop", "handoff", "burst"].iter().enumerate() {
+                let bands = bss.cake_hist[0][kind].len();
+                let sum: Vec<u64> = (0..bands)
+                    .map(|b| bss.cake_hist.iter().map(|cpu| cpu[kind][b]).sum())
+                    .collect();
+                let total: u64 = sum.iter().sum();
+                if total == 0 {
+                    continue;
+                }
+                let mut peaks: Vec<usize> = (0..bands).collect();
+                peaks.sort_by_key(|b| std::cmp::Reverse(sum[*b]));
+                let (lo, hi) = (peaks[0].min(peaks[1]), peaks[0].max(peaks[1]));
+                let valley = (lo..=hi).min_by_key(|b| sum[*b]).unwrap_or(lo);
+                let mut acc = 0u64;
+                let median = (0..bands)
+                    .find(|b| {
+                        acc += sum[*b];
+                        acc * 2 >= total
+                    })
+                    .unwrap_or(0);
+                let rows: Vec<String> = sum.iter().map(|v| v.to_string()).collect();
+                info!(
+                    "   hist    {name:7} n={total} median>={}ns split>={}ns  {}",
+                    1u64 << (median as u32 + shift),
+                    1u64 << (valley as u32 + shift),
+                    rows.join(" ")
+                );
+            }
             // Gates reached; fired counts are the stats rows serial, seat_retake,
             // probe_fired, rej_tick.
             let tried: Vec<String> = (0..4)
@@ -708,7 +743,7 @@ impl<'a> Scheduler<'a> {
             info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
         }
         if self.probe_on {
-            const NAMES: [&str; 133] = [
+            const NAMES: [&str; 138] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -842,6 +877,11 @@ impl<'a> Scheduler<'a> {
                 "release",
                 "acquire",
                 "select_direct",
+                "ui_kick",
+                "pend_kick",
+                "pend_heal",
+                "release_serve",
+                "pinned_preempt",
             ];
             // The name table must match the BPF enum exactly; a drift prints
             // zeros silently because out-of-range lookups fail quietly.
@@ -903,9 +943,8 @@ impl<'a> Scheduler<'a> {
     fn publish_sinks(&mut self, set: &[bool]) {
         const N: usize = bpf_intf::consts_QMASK_WORDS as usize;
         let words = sink_words::<N>(set);
-        // The whole-core expansion, computed here once per publication
-        // instead of on every claim walk in BPF: a sink's SMT sibling
-        // shares its core.
+        // The whole-core expansion, computed once per publication instead of on
+        // every claim walk in BPF: a sink's SMT sibling shares its core.
         let siblings: Vec<i32> = self
             .skel
             .maps
@@ -936,15 +975,16 @@ impl<'a> Scheduler<'a> {
             unsafe { AtomicU64::from_ptr(published) }.store(word, Ordering::Relaxed);
         }
 
-        // Every publication is logged: a flip re-seats each stage holder on
-        // the flipped core once, so the flip rate is a covariate of any
-        // frame capture (council 2026-09-18).
-        let named: Vec<usize> = set
-            .iter()
-            .enumerate()
-            .filter_map(|(cpu, hot)| hot.then_some(cpu))
-            .collect();
-        info!("   irq     sinks {named:?} steered around");
+        // Verbose only: the flip rate is a covariate of a frame capture, and a
+        // release run is not a measurement session.
+        if self.verbose {
+            let named: Vec<usize> = set
+                .iter()
+                .enumerate()
+                .filter_map(|(cpu, hot)| hot.then_some(cpu))
+                .collect();
+            info!("   irq     sinks {named:?} steered around");
+        }
     }
 }
 
@@ -962,26 +1002,16 @@ fn sink_words<const N: usize>(set: &[bool]) -> [u64; N] {
 struct HandoffProbe {
     /// Typical hop — the switch-cost anchor for the preempt-protect window.
     median: u64,
-    /// Tail of a GENUINE handoff. This is the admission threshold itself, not
-    /// a base to multiply: measured 2026-07-30, using `2 * mean` instead cost
-    /// mutex-handoff -35.66% (CI[-40.01,-31.31]) with migrations 2.4-2.7x up,
-    /// because enough real handoffs land in the tail above the mean that a
-    /// mean-derived cut loses them. The in-tree dose-response wanted a 99.67%
-    /// firing rate on this workload, so the statistic that matches the
-    /// requirement is a high percentile, not an invented multiplier.
+    /// Tail of a GENUINE handoff: the admission threshold itself, not a base to
+    /// multiply. A mean-derived cut loses the real handoffs that land above the
+    /// mean; the dose-response wanted a high firing rate, hence a high percentile.
     p99: u64,
 }
 
 /// Per-CPU time spent in interrupt handlers, in kernel ticks, from
-/// `/proc/stat` (irq + softirq columns, CONFIG_IRQ_TIME_ACCOUNTING).
-///
-/// Handler TIME is the harm itself, not a proxy: a wake suffers exactly
-/// when it lands on a CPU whose handler is running, and the time share IS
-/// that probability. Counting interrupt lines mis-priced both directions --
-/// a 1000 Hz mouse with a ~1 µs handler steals no more time than an
-/// unflagged CPU, while a slow line with a heavy handler could never reach
-/// a count bar (§G33). Softirq time is included because NAPI network
-/// processing shadows wakes the same way and never appeared as line counts.
+/// `/proc/stat` (irq + softirq columns, CONFIG_IRQ_TIME_ACCOUNTING). Handler
+/// TIME is the harm itself: a wake suffers when it lands on a running handler,
+/// so line counts mis-price it; softirq is included because NAPI shadows wakes.
 fn read_irq_ticks(nr_cpus: usize) -> Option<Vec<Option<u64>>> {
     let text = std::fs::read_to_string("/proc/stat").ok()?;
     let mut ticks = vec![None; nr_cpus];
@@ -1021,10 +1051,8 @@ fn last_cpu_id(list: &str) -> Option<usize> {
 }
 
 /// The CPUs `/proc/stat` reported in both reads, and their handler-time
-/// deltas in that order. Only those are ranked: a possible-but-offline id
-/// has no handler time and would sit under every online CPU, turning the
-/// whole online set into the loud side of the widest gap (review
-/// 2026-09-06).
+/// deltas in that order. Only those are ranked: a possible-but-offline id has
+/// no handler time and would push the whole online set above the widest gap.
 fn sink_deltas(current: &[Option<u64>], before: &[Option<u64>]) -> (Vec<usize>, Vec<u64>) {
     current
         .iter()
@@ -1034,19 +1062,10 @@ fn sink_deltas(current: &[Option<u64>], before: &[Option<u64>]) -> (Vec<usize>, 
         .unzip()
 }
 
-/// Split the host's own handler-time distribution at its widest gap: sinks
-/// are the CPUs above the cut (§G33, §R.26).
-///
-/// No unit-carrying threshold -- the cut is wherever the sorted per-CPU
-/// tick deltas separate the most, so it adapts to any host, any device,
-/// and any load without claiming to know in advance what "loud" means.
-/// Deltas feed ratios directly, so no clock or tick-rate conversion exists.
-/// A zero delta means "under one tick this window" and enters the ranking
-/// at half a tick -- the midpoint of what the measurement could not
-/// resolve -- keeping every ratio finite so a lone loud CPU still
-/// separates from an otherwise-quiet machine. A flat distribution has no
-/// gap and therefore no sinks; a cut that would condemn half the machine
-/// has measured host-wide load, not pinned interrupt affinity (None).
+/// Split the host's handler-time distribution at its widest gap: sinks are the
+/// CPUs above the cut. No unit-carrying threshold, so it adapts to any host. A
+/// zero delta enters at half a tick so every ratio stays finite. A flat set has
+/// no sinks; a cut condemning half the machine is load, not affinity (None).
 fn sinks_by_widest_gap(deltas: &[u64]) -> Option<Vec<bool>> {
     let mut ranked: Vec<(f64, usize)> = deltas
         .iter()
@@ -1078,20 +1097,11 @@ fn sinks_by_widest_gap(deltas: &[u64]) -> Option<Vec<bool>> {
     Some(hot)
 }
 
-/// Live IRQ-sink tracking riding the 1 s run loop (§G30, §G33, §R.25/§R.26).
-///
-/// Each window the handler-time deltas are split at their widest gap. A CPU
-/// above the cut for FLAG_POLLS consecutive windows is published as a sink
-/// -- a real sink ranks above the cut every window, ranking noise does not
-/// -- and a published sink is released after UNFLAG_POLLS windows below it,
-/// because removal merely returns placement freedom and a loading screen
-/// must not flap the mask. A set that keeps repeating earns a doubled
-/// sampling interval up to INTERVAL_MAX (longer windows accumulate more
-/// ticks, so confidence also buys resolution); any window whose ranking
-/// disagrees with the published set resets to every tick, so a moved sink
-/// is confirmed at tick rate rather than at the slowed cadence (audit
-/// 2026-09-18). All four constants are agreement counts: every value that
-/// steers comes from the measured distribution alone (§R.26).
+/// Live IRQ-sink tracking riding the 1 s run loop. Each window the handler-time
+/// deltas are split at their widest gap; a CPU above the cut for FLAG_POLLS
+/// windows is published, released after UNFLAG_POLLS below it (a loading screen
+/// must not flap the mask). An unchanged set doubles the interval up to
+/// INTERVAL_MAX; a disagreeing window resets to tick rate. All four are counts.
 struct SinkMonitor {
     /// Last accepted read; deltas span the full gap between accepted reads,
     /// so a slower cadence measures a longer, smoother window.
@@ -1112,9 +1122,8 @@ struct SinkMonitor {
 impl SinkMonitor {
     /// Unchanged windows that earn an interval doubling.
     const STABLE_POLLS: u32 = 8;
-    /// Sampling never slows past this many ticks: one window of lag before
-    /// a moved sink is even seen, then FLAG_POLLS or UNFLAG_POLLS at tick
-    /// rate (at most 4 + 3 s to release, 4 + 2 s to publish).
+    /// Sampling never slows past this many ticks: one window of lag before a
+    /// moved sink is seen, then FLAG_POLLS or UNFLAG_POLLS at tick rate.
     const INTERVAL_MAX: u32 = 4;
     /// Above-cut windows before a CPU is published.
     const FLAG_POLLS: u32 = 2;
@@ -1187,10 +1196,8 @@ impl SinkMonitor {
             if is_hot {
                 self.quiet[cpu] = 0;
                 self.hot_streak[cpu] = (self.hot_streak[cpu] + 1).min(Self::FLAG_POLLS);
-                // The cut wanders under load, so flagged CPUs accrete across
-                // polls — the per-sample half-machine guard cannot see the
-                // UNION. Bound it here: the published set stays a strict
-                // minority, so placement always keeps most of the machine.
+                // The cut wanders under load, so flagged CPUs accrete across polls; bound
+                // the UNION here so the published set stays a strict minority.
                 if !self.published[cpu]
                     && self.hot_streak[cpu] >= Self::FLAG_POLLS
                     && (self.published.iter().filter(|h| **h).count() + 1) * 2 < present.len()
@@ -1232,27 +1239,157 @@ impl SinkMonitor {
     }
 }
 
-/// The longest wake hop the tick predictor (§G36) can use. The predictor
-/// asks whether a CPU's next tick lands inside one hop; a hop at a quarter
-/// of the fastest tick period cake runs under (HZ=1000) or longer would call
-/// every CPU tick-soon at all times and `cake_cpu_clean` would refuse every
-/// candidate. A probe run under a loaded or virtualised host lands here and
-/// turns the predictor off instead (review 2026-09-06).
-const WAKE_HOP_MAX_NS: u64 = 250_000;
+/// The tick period from the coarse clock's resolution, which the kernel sets
+/// to one jiffy. 0 when the resolution is not a plausible tick (a VM or an
+/// odd clocksource): the precise task-age clock is used instead.
+fn coarse_tick_ns() -> u64 {
+    const TICK_MIN_NS: u64 = 500_000;
+    const TICK_MAX_NS: u64 = 20_000_000;
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_getres writes only the timespec it is given.
+    if unsafe { libc::clock_getres(libc::CLOCK_MONOTONIC_COARSE, &mut ts) } != 0 {
+        return 0;
+    }
+    let ns = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+    if (TICK_MIN_NS..=TICK_MAX_NS).contains(&ns) {
+        ns
+    } else {
+        0
+    }
+}
 
-/// Measure one wake + block + switch hop on THIS host.
-///
-/// Two threads ping-pong through a condvar, which exercises exactly the path
-/// `cake_handoff_max_ns` is a proxy for: a blocking handoff between two
-/// tasks. It used to be a slice divisor (/2048), since removed: that made it
-/// made it wrong at any other slice value and wrong on any other CPU -- at a
-/// 1 ms slice it evaluated to 488 ns, below this host's ~606 ns sleep floor, so
-/// nothing could qualify and the co-location gate silently disabled itself.
-///
-/// Runs before the scheduler attaches, so it measures the stock kernel path.
-/// ~2200 round trips, a few milliseconds of startup. Returns nanoseconds per
-/// one-way hop, or None if the probe could not complete -- callers keep the
-/// compiled-in defaults rather than trusting a failed measurement.
+/// cpuidle exit latency per state index (ns, enabled states only) from cpu0's
+/// sysfs, and the driver name; empty on a host without a driver.
+fn cpuidle_states() -> (Option<String>, Vec<u64>) {
+    let base = std::path::Path::new("/sys/devices/system/cpu");
+    let driver = std::fs::read_to_string(base.join("cpuidle/current_driver"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "none");
+    let mut states = Vec::new();
+    if driver.is_some() {
+        let mut idx = 0;
+        while let Ok(lat) =
+            std::fs::read_to_string(base.join(format!("cpu0/cpuidle/state{idx}/latency")))
+        {
+            let disabled =
+                std::fs::read_to_string(base.join(format!("cpu0/cpuidle/state{idx}/disable")))
+                    .is_ok_and(|d| d.trim() == "1");
+            let us: u64 = lat.trim().parse().unwrap_or(0);
+            states.push(if disabled { 0 } else { us * 1000 });
+            idx += 1;
+        }
+    }
+    (driver, states)
+}
+
+/// The AMD 3D V-cache mode ("cache" or "frequency") when the platform driver
+/// exposes it.
+fn amd_x3d_mode() -> Option<String> {
+    let dir = std::fs::read_dir("/sys/bus/platform/drivers/amd_x3d_vcache").ok()?;
+    for entry in dir.flatten() {
+        if let Ok(mode) = std::fs::read_to_string(entry.path().join("amd_x3d_mode")) {
+            return Some(mode.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Per-LLC idle-word masks and the LLC each mode prefers: the die with the most
+/// high-capacity cores, else the largest cache under mode "cache", else the
+/// highest summed platform preference. Multi-LLC hosts within one word only.
+struct PreferredDie {
+    cache: u64,
+    frequency: u64,
+}
+
+fn preferred_die(
+    topo: &Topology,
+    perf: &core_performance::CorePerformanceLayout,
+) -> Option<PreferredDie> {
+    if topo.all_llcs.len() < 2 || *NR_CPU_IDS > 64 {
+        return None;
+    }
+    let mut word: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut big: BTreeMap<usize, u32> = BTreeMap::new();
+    let mut cache: BTreeMap<usize, usize> = BTreeMap::new();
+    for cpu in topo.all_cpus.values() {
+        *word.entry(cpu.llc_id).or_insert(0) |= 1u64 << cpu.id;
+        if cpu.core_type != scx_utils::CoreType::Little {
+            *big.entry(cpu.llc_id).or_insert(0) += 1;
+        }
+        let e = cache.entry(cpu.llc_id).or_insert(0);
+        *e = (*e).max(cpu.cache_size);
+    }
+    let mut pref: BTreeMap<usize, u64> = BTreeMap::new();
+    for core in &perf.cores {
+        *pref.entry(core.identity.llc).or_insert(0) += u64::from(core.preference.unwrap_or(0));
+    }
+    let best = |key: &dyn Fn(&usize) -> u64| -> u64 {
+        word.keys()
+            .max_by_key(|l| (key(l), std::cmp::Reverse(**l)))
+            .map_or(0, |l| word[l])
+    };
+    let by_big = best(&|l| u64::from(big.get(l).copied().unwrap_or(0)));
+    let big_differs = big.values().max() != big.values().min();
+    let by_cache = best(&|l| cache.get(l).copied().unwrap_or(0) as u64);
+    let by_pref = best(&|l| pref.get(l).copied().unwrap_or(0));
+    let all: u64 = word.values().fold(0, |a, w| a | w);
+    let cache_differs = cache.values().max() != cache.values().min();
+    Some(if big_differs {
+        PreferredDie {
+            cache: by_big,
+            frequency: by_big,
+        }
+    } else if cache_differs && word.len() == 2 {
+        // A V-cache pair: the platform re-ranks cores with the mode, so the
+        // frequency die is the other die, not the ranking read at start.
+        PreferredDie {
+            cache: by_cache,
+            frequency: all & !by_cache,
+        }
+    } else {
+        PreferredDie {
+            cache: by_cache,
+            frequency: by_pref,
+        }
+    })
+}
+
+fn preferred_word(die: &PreferredDie, mode: Option<&str>) -> u64 {
+    if mode == Some("cache") {
+        die.cache
+    } else {
+        die.frequency
+    }
+}
+
+/// CPUs online now, from sysfs; every present CPU when the file is unreadable.
+fn online_cpu_set(topo: &Topology) -> std::collections::BTreeSet<usize> {
+    let all: std::collections::BTreeSet<usize> = topo.all_cpus.keys().copied().collect();
+    let Ok(text) = std::fs::read_to_string("/sys/devices/system/cpu/online") else {
+        return all;
+    };
+    let mut set = std::collections::BTreeSet::new();
+    for part in text.trim().split(',') {
+        let (lo, hi) = match part.split_once('-') {
+            Some((a, b)) => (a.parse::<usize>(), b.parse::<usize>()),
+            None => (part.parse::<usize>(), part.parse::<usize>()),
+        };
+        if let (Ok(lo), Ok(hi)) = (lo, hi) {
+            set.extend(lo..=hi);
+        }
+    }
+    if set.is_empty() { all } else { set }
+}
+
+/// Measure one wake + block + switch hop on THIS host: two threads ping-pong
+/// through a condvar, the blocking handoff `cake_handoff_max_ns` is a proxy
+/// for. Runs before attach, so it measures the stock kernel path; ~2200 round
+/// trips. Returns ns per one-way hop, or None, and callers keep the defaults.
 fn probe_handoff_hop_ns() -> Option<HandoffProbe> {
     const WARMUP: u32 = 200;
     const ITERS: u32 = 2_000;
@@ -1309,11 +1446,8 @@ fn probe_handoff_hop_ns() -> Option<HandoffProbe> {
 }
 
 /// Parse the command line, dropping options cake does not have instead of
-/// refusing to start. A legacy flag in a user's scx_loader config (for
-/// example `--profile default`) used to keep the scheduler off entirely;
-/// now the option and its bare value are dropped, the rest is parsed, and
-/// every dropped token is reported once logging is up. Real errors on real
-/// options (a bad value or `--help`) keep clap's behaviour.
+/// refusing to start (a legacy scx_loader flag must not keep the scheduler
+/// off); dropped tokens are reported once logging is up. Real errors keep clap's.
 fn parse_opts_lenient(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString>>,
 ) -> std::result::Result<(Opts, Vec<String>), clap::Error> {
@@ -1508,7 +1642,7 @@ fn smt_fold(siblings: &[i32]) -> Option<(u32, u64, u64)> {
     Some((shift, left, right))
 }
 
-/// The §G88/§G89 LLC topology the loader publishes to rodata, built from
+/// The LLC topology the loader publishes to rodata, built from
 /// (cpu id, llc id) pairs so any host shape can be tested without a machine.
 struct LlcLayout {
     /// Physical identity is never collapsed to the bounded pool namespace.
@@ -1516,7 +1650,7 @@ struct LlcLayout {
     /// Dense pool index per topology LLC id; every id maps, ids are
     /// assigned in ascending LLC order.
     dense: BTreeMap<usize, u8>,
-    /// §G88: the CPUs (ids below 64) sharing each LLC, as one word. An LLC
+    /// The CPUs (ids below 64) sharing each LLC, as one word. An LLC
     /// with no CPU below 64 gets all ones: the census paths that read the
     /// word only run inside one word, and all ones is the LLC-blind walk.
     word: BTreeMap<usize, u64>,
@@ -1695,24 +1829,17 @@ mod tests {
     }
 
     #[test]
-    fn idle_callback_is_omitted_only_for_kernel_mask_path() {
+    fn idle_and_release_callbacks_are_registered() {
         use libbpf_rs::skel::SkelBuilder;
         use std::mem::MaybeUninit;
 
-        for one_word in [false, true] {
-            let mut object = MaybeUninit::uninit();
-            let builder = super::BpfSkelBuilder::default();
-            let mut skel = builder.open(&mut object).expect("open embedded BPF object");
-            assert!(!skel.struct_ops.cake_ops_mut().update_idle.is_null());
-            super::configure_idle_tracking(&mut skel, one_word);
-            assert_eq!(
-                skel.struct_ops.cake_ops_mut().update_idle.is_null(),
-                one_word
-            );
-            assert_eq!(skel.progs.cake_update_idle.autoload(), !one_word);
-            assert!(!skel.struct_ops.cake_ops_mut().cpu_release.is_null());
-            assert!(skel.progs.cake_cpu_release.autoload());
-        }
+        let mut object = MaybeUninit::uninit();
+        let builder = super::BpfSkelBuilder::default();
+        let mut skel = builder.open(&mut object).expect("open embedded BPF object");
+        assert!(!skel.struct_ops.cake_ops_mut().update_idle.is_null());
+        assert!(!skel.struct_ops.cake_ops_mut().cpu_release.is_null());
+        assert!(!skel.struct_ops.cake_ops_mut().disable.is_null());
+        assert!(skel.progs.cake_cpu_release.autoload());
     }
 
     use super::{
@@ -1725,7 +1852,7 @@ mod tests {
     #[test]
     #[ignore = "requires BPF load capabilities and a sched_ext kernel"]
     fn verifier_load_topologies() -> anyhow::Result<()> {
-        use super::{BpfSkelBuilder, configure_idle_tracking};
+        use super::BpfSkelBuilder;
         use scx_utils::{scx_ops_load, scx_ops_open};
         use std::mem::MaybeUninit;
 
@@ -1740,6 +1867,9 @@ mod tests {
             (32, 1),
             (32, 2),
             (64, 16),
+            (48, 4),
+            (96, 4),
+            (128, 8),
             (128, 1),
             (1024, 1),
         ] {
@@ -1753,6 +1883,7 @@ mod tests {
             ro.nr_llcs = llcs as u32;
             ro.cake_one_word = u8::from(one_word);
             ro.cake_rank_tiers = if one_word { cores as u32 } else { 0 };
+            ro.cake_claim_tries = ((cpus / llcs.max(1)) as u32 / 4).max(4);
             ro.cpu_perf_known = if one_word { u64::MAX >> (64 - cpus) } else { 0 };
             ro.cpu_sibling.fill(-1);
             ro.cpu_llc_domain.fill(u16::MAX);
@@ -1785,7 +1916,6 @@ mod tests {
                     }
                 }
             }
-            configure_idle_tracking(&mut skel, one_word);
             match scx_ops_load!(skel, cake_ops, uei) {
                 Ok(loaded) => {
                     eprintln!("verifier accepted: {cpus} CPUs, {llcs} LLCs");
@@ -1959,7 +2089,7 @@ mod tests {
     #[test]
     fn llc_layout_counts_domains_above_cpu_63() {
         // 128 CPUs in 16 LLCs of 8: every LLC is a pool, and a CPU above
-        // 63 lands in its own LLC's pool, not pool 0 (review 2026-09-06).
+        // 63 lands in its own LLC's pool, not pool 0.
         let l = LlcLayout::build(&grid(128, 8), 16);
         assert_eq!(l.nr_llcs, 16);
         assert!(l.collapsed.is_none());

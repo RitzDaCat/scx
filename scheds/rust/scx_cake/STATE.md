@@ -36,6 +36,161 @@ the day's three commits squashed to one; origin force-pushed.
 
 ## RESUME HERE
 
+**2026-09-19 (evening) — ROUND-2 INSTRUCTION COUNCIL, POOL-TOKEN PROOF,
+PRE-PUSH REVIEW: six commits on the layout round, then the nightly squash
+(`keep/pre-squash-2026-09-19b` holds the 17 pre-squash commits).**
+
+| commit | what | receipt |
+|---|---|---|
+| `8f8a5ed7d` | codegen (council 4/4): seat and deep-idle RMWs in the relaxed fetch form (one `lock or/and`, was a cmpxchg loop); seat RUN without the lock and map lookup (HOLD/RUN under rq(cpu), RELEASE decides on pid/seq, RUN never writes pid/seq); u64 seat indices; nr_llcs read once in dispatch_search; stopping's hint compare dropped; cpu_release counts behind the mark | fnspills running 7/6/216 → 5/5/200, dispatch_search 7/34/615 → 7/36/599 |
+| `4639238fb` | idle-mask pointers cached at init (council 4/4, shape C 3-1): the kernel's idle and SMT-idle cpumasks are boot-allocated (idle.c `scx_idle_init_masks`, never freed; hotplug restarts cake), captured in ops.init as `__kptr_untrusted` statics in `.data.masks`; every hot read is one probe load, not a get+put kfunc pair | select_cpu 12/23/695 → 10/30/678, claim_warm 6/9/458 → 11/13/469; attach + rotation |
+| `114fbf18a` | both-empty dispatch gates (ring-steal qmask early-out, pending-token test) as always_inline in dispatch_search's frame; R12 (dispatch_search inlined into cake_dispatch) tried and dropped, 8/53 | dispatch_search 6/38/605 → 7/38/636 |
+| `9379f60bb` | **the pool token is proof** (council 4/4): a pooled task carries its pool + 1 in the low 5 bits of its slice; the token lowers where the task is next seen out of the pool (ops.running first, a re-enqueue, ops.disable), so a zero token proves an empty pool and the both-empty dispatch skips the pool count too. The interlock keeps `unserved` (inc before insert, dec at serve) for the update_idle kick and the landing wait; kicking on the proof token doubled dispatch runs (rot9: 157k → 309k/s); a raised `unserved` beside a zero token is a pop the serve never saw, reset on that evidence | dispatch_search 7/38/636 → 13/41/703, running 5/5 → 6/6 |
+| `d367bcef0` | pool-token fixes (external review, two agents): the tag lives in the slice, not the vtime key (stopping's charge made ordinary tasks read as tagged); `cake_slice_from_service` is the one grant source and clears the tag bits; the reset is a CAS on the value read; the cpu_idle program's autoattach off (attached twice on cpuidle hosts); `cake_llc_slot` back to the 128 B stride with a size assert | model check in the session scratchpad |
+| `fb057beee` | loader: a release run prints its identity once; the IRQ-sink publication and age-clock lines are `--verbose`; the signed-printed u64 offset gone | — |
+| `ceddc0b12` | **pre-push review fixes** (three Fable reviewers over `e355a60f2..fb057beee`, kernel citations in the session transcript): ops.disable's seen ran behind the one-word return (a wide host kept a token raised for a task promoted out of the class while queued); the stale-`unserved` reset re-reads the proof token after its CAS and gives back the count of an insert that raised both words between the read and the swap (x86 needs an NMI between two adjacent loads for it; arm64 none); `_Static_assert(!(SLICE_NS & CAKE_POOL_TAG_MASK))`; the cpu_idle tracepoint stays unloaded on a host wider than one word (its word has no reader there) | release + debug zero warnings, fmt, clippy; `cakebench try` on the squash `763365ecd` (binary `9121fbe4d124`, 10 s): verifier accepted, ran, native restored, 0 stalls |
+
+**Tag safety, traced on 7.2.6 ext.c:** the kernel writes `scx.slice` off-CPU
+only through `refill_task_slice_dfl` on the local/global/bypass enqueue
+paths that skip ops.enqueue (`!scx_rq_online`, bypassing, `PF_EXITING`,
+`SCX_ENQ_LAST`), and none can hold a tagged task: exiting and last need a
+run first (running strips), offline and bypass come with a hotplug or a
+PM notifier, and a hotplug exits cake (no `cpu_online`/`cpu_offline`
+ops; the loader re-execs). `SCX_SLICE_DFL` and `SLICE_NS` keep the tag
+bits clear. Reviewer notes kept, not fixed: the continuation-arm pinned
+KICK_PREEMPT zeroes whoever is curr when the irq_work lands (one extra
+dispatch if the target already picked the wakee; the old ENQ_PREEMPT on a
+user DSQ was ignored outright); stopping's unconditional `hint` store can
+lose one WOKE sample to a remote runnable stop (predates the round);
+`hop_max = tick/4` switches the tick predictor off when the coarse clock
+resolution falls outside 0.5–20 ms (no shipping HZ does).
+
+**2026-09-19 (later) — INSTRUCTION AND LAYOUT ROUND: two commits on top of
+the self-sizing set (`bd24209c3`, `8248fe6c3`; local, NOT pushed).**
+Council of three (instruction analysis; data layout / quantization /
+bitpacking; verifier+JIT cost model with one design ruling), fed by
+`bpftool prog profile` under appsim: select_cpu ~744 insns / ~500 cycles
+per run above the profile floor, dispatch ~467 / ~240, running ~65 / ~100,
+stopping ~40 / ~90, update_idle ~15 insns. **Only ~140 of select_cpu's ~500
+cycles and ~60 of dispatch's ~240 are cake's own instructions**; the rest
+is kfunc bodies (idle smtmask get+put, the atomic claim, dsq_insert; two
+rhashtable counts per dispatch). Instruction shaving is worth ≤ 5 ns per
+op; the 44 surviving rodata lddw+ldxb pairs are ≤ 25 cycles of independent
+L1 loads; the eight divides are one per placement (`work / n`, ~0.4 ms/s)
+plus rare/probe arms; 32-bit vs 64-bit ops cost the same on the x86 JIT.
+**Quantization rejected with a range proof:** `work ≤ age/4` reaches 2^43 ns
+after 2.4 h, so a 32-bit unit needs ≥ 2^11 ns, coarser than the 1464 ns
+floor the grant is clamped to; div r64 vs r32 differs ≤ 5 cycles. Narrowing
+fields saves nothing (same uop). Stride stays 128 B (Raptor Lake pairs
+128 B-aligned lines). Also recorded: every implicit-args kfunc now costs
+one more call (`scx_prog_sched` on the multi-scheduler tree) than the
+2026-09-15 ladder assumed.
+
+| commit | what | receipt (appsim 8-slot ABBABAAB vs its parent) |
+|---|---|---|
+| `bd24209c3` | dispatch counts its own queue only behind a set qmark bit; `cake_llc_of` folds on one LLC. **Ruling** (against STATE.md:454's rejection): every insert into DSQ[cpu] marks under rq(cpu)'s lock (ops.enqueue runs under task_rq's lock incl. the queued-wakeup path, ext.c 2055-2078, core.c 3911-3920, 4412-4425; REENQ paths ext.c 4394/4443/3159) and only this CPU's dispatch clears it under the same lock (ext.c 2923); removal paths only lower the count. No interleaving exists | dispatch 44.8 → 32.6 ns/run (−27 %), total cake BPF 32.3 → 30.4 ms/s; frames: 7/8 slots identical, s8_new 0.1 % low 1412 (see below) |
+| `8248fe6c3` | shared-line layout: one-CPU seat tests read the CPU's own seat slot (`held`, under the seat lock beside `pid`) instead of the global word every stage switch rewrites; running reads the word only through the holder census; frontier advances in 65 µs steps (`FRONTIER_GRAIN_NS`); one line per LLC pool (pending, mark, served); probe-only run-slot words on the second line | dispatch 33.2 → 32.2, running 27.1 → 26.5, stopping 14.5 → 13.8, total 30.6 → 30.1 ms/s; frames: 7/8 identical, s5_new 0.1 % low 1335 |
+
+**Unresolved, carried:** in each of the last two rotations one new-arm slot
+dipped at the 0.1 % low (a handful of 0.9–0.97 ms frames whose whole appsim
+chain ran long); old arms show the same frame class (s6_old max 0.90 ms,
+s4_old 0.84 in `rot3`), seven of eight slots per rotation are identical,
+and the 4-slot run of 2026-09-19 dipped on both arms. Not called null: the
+next rotation (or an A/A on `8248fe6c3`) decides whether the new arms carry
+it. Net over the round vs the pushed nightly `e355a60f2`: dispatch 42.7 →
+32.2 ns/run, total cake BPF 29.4 → 30.1 ms/s (the interlock's +2.8 minus
+these −2.4), frames flat within the carried question.
+
+Deferred from the layout lens, with a census owed first: lock-free seat
+slot (`pid|seq<<32`, −4 helper calls per stage pair, but a HOLD/RELEASE
+race can lose a reservation: not placement-neutral); stopping precomputing
+stage/starved/subhandoff into the groove to trade four remote-dirty task
+lines for one storage lookup (needs `perf c2c` on those loads).
+
+**2026-09-19 — SELF-SIZING ROUND: debloat + six build commits on top of the
+nightly `e355a60f2` (`c2664a27a` … `ecc608b5d`, local, NOT pushed): the
+maintainer picks what goes to testers.** Standard set 2026-09-19: fit any
+CPU (Intel/AMD, consumer/enterprise), no host-fitted ceilings, floors or
+pauses, seamless event-based handoffs, kernel coding style, no comment bloat.
+
+Councils (all Fable 5.1 unless noted; reports in the session scratchpad
+`selfsizing_compendium.md`, `selfsizing_designs.md`): magic numbers ×3
+(BPF constants, loader probes, design assumptions), static-to-dynamic plan,
+dual-CCD ×3 (multi-LLC paths, X3D placement, hardware audit), Threadripper
+4-CCD; designers A (measure at load) and B (observe at runtime) + arbiter;
+six reviewers (kernel API, verifier/cost, game path, portability, estimator
+stability, simplicity) voting K1–K12 / D1–D6; three code reviewers on the
+result. Built = everything at 6/6 or 5/6; deferred = the grant timer (D2,
+behind the `grant_lt_tick` census) and cpu_release evacuation policy (K2b
+built as claim+kick, the §G93 trace still decides whether to evacuate).
+
+| commit | what |
+|---|---|
+| `c2664a27a` | comment debloat to kernel style: cake.bpf.c 3509 → 2952 lines, comment lines 1062 → 516; instruction stream identical; `comment_lint` ceiling 0.70 → 0.30 |
+| `dd08b940a` | **§G95 enqueue/update_idle interlock**: `ops.update_idle` registered on every host; a per-LLC `pool_pending` token raised before a pool insert (the insert lands after its op, ext.c 2055-2079), lowered on every serve; `update_idle(idle=true)` self-kicks when up (idle.c 812-826 orders the bit before the call); a both-empty dispatch re-picks ≤ `CAKE_PEND_SPIN_MAX` for the landing then heals a token nothing lands for. Also: `alone` only for the owner's own put_prev (`p->on_cpu`); cpu_release claims+kicks a die-local idle CPU for own-queue work; `ops.disable` retires seats; pinned-wake verdict on the insert (kthreads) |
+| `0601e4b9c` | sizing from the host: toggles g85/g86/g87/g89 (27 sites) and `llcsplit` removed; serial gate per die (¾ of the waker's LLC's online CPUs idle) instead of 3N/4 of the possible span; steal order on every host ≤ STEAL_SPAN (sibling, distance, cross-die classes), `cand++` gone; `cake_claim_tries = max(4, die/4)` rodata; tick from `clock_getres(CLOCK_MONOTONIC_COARSE)` rodata (`CONFIG_HZ` gone), hop cap tick/4 (250 µs literal gone); hop probe logged always; load shapes (48,4) (96,4) (128,8) |
+| `5d92f48c6` | **§G96 hardware arms, inert here by rodata gates**: capacity-first cold pick on hybrid parts (`cake_cap_word`, one cache domain only); cpuidle driver + per-state exit latency in rodata, `tp_btf/cpu_idle` attached only with a driver → `cake_deep_idle_word` (state exit > handoff floor) avoided like IRQ-hot cores; multi-LLC: a stage thread off `cake_llc_pref_word` re-homes when a whole core is free there, workers follow the waker's die; V-cache mode re-read each second |
+| `6c6511881` | observe-only histograms under probe: hop (IMMED, `sched_info.last_queued`), handoff quantum, burst; loader prints antimode split + median; `--handoff-ns` sweep override |
+| `ecc608b5d` | review fixes: continuation-arm pinned verdict as KICK_PREEMPT (a user DSQ ignores ENQ_PREEMPT); second-move pool serve lowers the token; dispatch refills prev only when nothing landed; `pending_wait` kicks PREEMPT and heals by CAS on the count first seen; re-home pick honours seats/deep word; cap arm gated to one cache domain; V-cache pair's frequency die = the cache die's complement; load shapes set claim tries |
+
+**LLVM allocation, again (recorded for the next editor):** a constant
+`return true` in `cake_seat_blocks` cost select_cpu +10 spills (a rodata
+read of `cake_one_word` restores 12/23); inlining `cake_wake_protect` grew
+wake_place by 80 insns (own frame); the pinned kick after the insert put
+enqueue at 9/46 in every shape tried (accepted: enqueue runs ~8k/s).
+
+**Measured (appsim helldivers2-mission-fitted, 8 slots ABBABAAB, nightly
+`e355a60f2` BPF vs head `ecc608b5d`, all attached/restored; scratchpad
+`rot5/`):** 1 % low 1581 vs 1580 fps, 0.1 % low 1524 vs 1528, p99 0.619 vs
+0.619 ms, p999 0.648 vs 0.648 — frames identical. ns/run: select_cpu
+89.8 → 88.8, enqueue 193 → 188, dispatch 42.7 → 44.4 (+4 %: the token read
+and `!cake_local_nr` on the refill), running 28.6 → 27.4, stopping 14.9 →
+14.3. **Total cake BPF 29.4 → 32.1 ms/s (+9 %): `update_idle` 9.1 ns/run ×
+312k runs/s = 2.8 ms/s** (two entries per idle transition, body only; the
+trampoline is not in bpf_stats). That is §G95's price on an idle-heavy host:
+0.18 % of the machine, no frame change here; it buys the wait C1 removed
+under saturation. perf-sched-pipe (2 blocks vs native, noise warn): head
+0.757 µs/op vs native 1.183 (−36 %); the pre-round head was 0.731 vs
+1.164, the old nightly 0.755 vs 1.191 — the interlock's entries on a
+wake-storm microbench cost the 3 % the shape round had bought. **probe=1
+appsim slot (head, 45 s, 7.06 M selects):** ui_kick 2,139, pend_kick 3,025,
+pend_heal 1 (the leak fix holds), release_serve 298, pinned_preempt 730,
+kick_alone 300, select_direct 722, seat_retake 99k, pool_direct 110k;
+tried serial/retake/probe/tick 142/189,692/1,931/138,220; §G93 holds 4–8 µs
+band 5,832 of 7,318. Histograms: hop median < 512 ns (6.07 M of 7.06 M
+under 512 ns, tail to 8 ms); handoff quantum bimodal, antimode ≥ 8 µs
+(the 1464 ns floor sits below both modes on appsim); burst bimodal 2 µs /
+32 µs, antimode ≥ 16 µs (the 64 µs stage boundary sits above the upper
+mode's peak). These are appsim's distributions; the game's own are the
+ones that decide §G37 / the stage boundary.
+
+**Risks recorded, not fixed:** the interlock's bit-store → token-load order
+relies on x86's lock-prefixed `assign_bit` (arm64 `set_bit` is relaxed; a
+fetch-add read would cost a contended RMW per idle entry); sibling-first
+steal order changes the ring steal and neighbour probe on this host (priced
+in the rotation above: dispatch +4 %, frames flat); pinned kthreads
+(ksoftirqd, per-CPU kworkers) now preempt a stage mid-burst on every wake
+past a long sleep (`pinned_preempt` census); a worker whose wakers sit on
+two dies can ping-pong under the waker-die rule; stage herding onto one die
+on a uniform 4-CCD part is self-limiting by the whole-core test only; cpuidle
+threshold = handoff floor makes every state above C1 "deep" on the 5800X /
+14900K (soft: `cake_prefer_irq_clean` falls back); `cake_hist` is 512 KiB of
+BSS with probe off. None of §G96 has a capture: every arm is inert here and
+needs a tester's `-v --toggle probe=1` on the target host.
+
+**Record corrections:** :713 said the serial gate uses ceil(3N/4) of online
+CPUs — it used `nr_cpu_span * 3` until `0601e4b9c`; I11's "self-kick spin"
+objection is void on ≥ 6.13 (idle-to-idle re-pick does not notify); §G58's
+timer machinery is not in the tree (only in `77251dd02`); §S.5 names
+`cake_preempt_protect_ns`, which no longer exists (`PREEMPT_PROTECT_SHIFT`).
+
+Owed: maintainer's push decision; the §G93 trace on a WoW dungeon (gates
+cpu_release's evacuation, unchanged by this round); testers' probe=1 logs
+from a 5800X / 14900K / 7950X3D / Threadripper for §G96; the game-scene
+histograms before any actuation of the floor or the stage boundary (§G37
+Phase A' sweep: `--handoff-ns 800/1464/3000`); the grant timer behind
+`grant_lt_tick`.
+
 Squash note: the 22 commits of 2026-09-18/19 (`b95f00d57` … `534f6d335`)
 were squashed into one for the nightly push; the hashes cited in the two
 entries below name those pre-squash commits, kept on the local branch
@@ -2706,6 +2861,8 @@ real session), live replica (loader logic run standalone on the live host), audi
 | # | change | evidence | verdict | key numbers |
 |---|---|---|---|---|
 | **G93** | **RT-displacement release gate: `cpu_release` re-enqueues only when the displacer's measured burst exceeds the displaced task's refill; probe half shipped (run-slot burst inputs, release/acquire census; path-row mask fixed `64e3a4591`)** | **TRACE owed (`bench/rt_displace_capture.sh` + `rt_displace.py`, WoW CPU-paced dungeon)** | ⏳ **UNDER TEST 2026-09-18**: probe half in, gate not built | live 22:10: main thread 249 RT displacements/s, 88 % hop cold; ~520/s data-loop holds 5-10 µs, ~500/s kwin 48 µs; gate ships iff CI95_low(refill)+lat_hop > p90(hold) per displacer band |
+| **G95** | **enqueue/update_idle interlock: per-LLC pool-pending token, self-kick from update_idle, bounded re-pick then heal (`dd08b940a`, fixes `ecc608b5d`)** | appsim 8-slot: frames identical, +2.8 ms/s update_idle entries; census ui_kick 2.1k/45 s, pend_heal 1 | ✅ **BUILT 2026-09-20**, priced | closes crack C1 under saturation; game-scene receipt owed |
+| **G96** | **hardware arms, rodata-gated: capacity-first pick (hybrid), cpuidle deep-idle word (tracepoint, driver hosts), preferred-die stage home + waker-die workers (multi-LLC) (`5d92f48c6`, `ecc608b5d`)** | inert on this host by construction (`cake_cap_tiers`=0, `cake_idle_exit_max_ns`=0, `nr_llcs`=1) | ⏳ **UNMEASURED 2026-09-20** | needs testers' probe=1 logs on 5800X / 14900K / 7950X3D / TR |
 | **G89** | **die-local pool, hint, pick, steal gate, probe order; `--toggle llcsplit=1` scaffold** | **CENSUS on the fake split (appsim)** | ✅ **SHIPPED 2026-09-04** | cross-die: hint 169k → 0, pool service 471k → 0, steal 883k → 927; 1% low 1485 → 1559; one-LLC identical |
 | **G88** | **LLC-confined census walks and seat decline** | **FIELD (9950X3D DOOM)** | ✅ **SHIPPED 2026-09-04** | 1% low 47.14 → 108 to 115 across all flag combinations; lavd 117.54 on that box |
 | **G87** | **protect window and pinned margin bounded by the wakee's slice** | **rig + FIELD** | ✅ **SHIPPED 2026-09-04 (maintainer)** | cyclictest spikes >100 us 230 to 6331 → 10 to 14; DOOM g87=1 170.16 avg / 114.66 1% low, best of four |
