@@ -36,8 +36,8 @@ needs the scoped helper extended); the probe-folded object is the stand-in.
 | 6 | lock-prefixed atomic, line contended (`qmask` word, multi-LLC `wake_mark`, idle mask `test_and_clear`) | 50–100 ns | contention = other CPUs' write rate on that line |
 | 7 | DSQ raw spinlock (inside insert/peek/move) | µs under a wake storm, tens of ns idle | number of CPUs inserting/consuming the same pool |
 | 7 | rq-lock switch on a remote move (`unlink_dsq_and_switch_rq_lock`) | ~100s of ns; two rq locks | every pool consume and every steal |
-| 8 | `scx_bpf_kick_cpu(IDLE)` | kicker: deferred to rq unlock via irq_work (~free); kicked CPU: IPI + idle exit, µs | whether the CPU is idle |
-| 8 | `scx_bpf_kick_cpu(PREEMPT)` | victim loses the rest of its slice | — |
+| 8 | `scx_bpf_kick_cpu(IDLE)` | kicker: irq_work, delivered when IRQs re-enable (from a hardirq: after the whole handler, 19–31 µs on the nvidia ISR); kicked CPU polling in MWAIT C1 (this host, no cpuidle driver): a flag store, exit < 1 µs, no IPI; a CPU in a real C-state (`acpi_idle` hosts): IPI + exit latency, µs | whether the target polls (2026-09-18) |
+| 8 | `scx_bpf_kick_cpu(PREEMPT)` | kicker as above; the victim is running, so it pays a real IPI (~1–2 µs) and loses the rest of its slice. A `LOCAL_ON` insert with `ENQ_PREEMPT` delivers the same resched under the rq lock the enqueue already holds, with no irq_work | — |
 | 9 | attach / detach (bypass mode, all tasks reclassed) | tens of ms system-wide | inherent to sched_ext |
 | 9 | watchdog (`WATCHDOG_TIMEOUT_MS` = 5000) | forced unload to EEVDF | a runnable task stalled 5 s |
 

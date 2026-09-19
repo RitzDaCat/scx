@@ -36,6 +36,307 @@ the day's three commits squashed to one; origin force-pushed.
 
 ## RESUME HERE
 
+Squash note: the 22 commits of 2026-09-18/19 (`b95f00d57` … `534f6d335`)
+were squashed into one for the nightly push; the hashes cited in the two
+entries below name those pre-squash commits, kept on the local branch
+`keep/pre-squash-2026-09-19`.
+
+**2026-09-19 — SPEED COUNCIL VOTE, REVIEW, SEVEN COMMITS (`64e3a4591` →
+`f70d87461`, local, not pushed): §G93 census fix, a lost-wakeup fix, the
+V2/V6/V8 shape, the tried/fired census, V12, V14, V16. NONE MEASURED YET:
+the `try` (verifier: `__arg_nullable` on `cake_wake_place`, the V12
+subprogram) and the bpfstats rotation old-vs-new are owed before any is a
+keep.**
+
+Council: four Fable 5.1 speed agents (low/medium/high/xhigh) + four Opus 5
+hitch agents; compendium F1–F8 / V1–V23 in the session scratchpad
+(`vote_compendium.md`, `vote_tally.md`). Vote: V21/V22/V23 8/8; V12/V18/V19
+7/8; in-lens unanimous (hitch agents abstained "out of lens") V1, V2, V6,
+V7, V8, V14, V16; V11 4/5 (S1: race table first), V5 4/5 (S4: the qmark
+inline re-opens §G25), V15 4/6, V20 out of tree. **Rejected by vote, do not
+re-propose without new evidence:** V3 explicit starved guard (the DIV is
+already behind `cake_starved`, object insns 1324/1334 skip 1336), V4
+flatten the insert shim (its outlined copy has 0 hot callers), V9 jiffies
+`__ksym` (this host's BTF has no `jiffies` VAR; S2 read a type, not a var),
+V10 `exec_start` stamp (clock-family mix; a kconfig-gated clock is two
+hosts), V13 idle snapshot across select_cpu→enqueue (§G83; no channel), V17
+seq-versioned "pool proven empty" word (1/8: the kernel pops a user DSQ
+without ops.dequeue — consume, bypass, property change — so a producer seq
+cannot prove empty; §G41's 20 ms stall class). A Fable reviewer then
+validated the 7/8 + 8/8 + in-lens set against the code and object, and
+three independent Fable confirmers agreed on every "approve with changes"
+item (ballots in the session transcript).
+
+| commit | what | placement |
+|---|---|---|
+| `64e3a4591` | §G93 probe: `cake_release_census[path & 2]` folded the IMMED row into non-IMMED (PATHS=3); index by the bounded path | probe only |
+| `14d9f8ef9` | enqueue's anti-collision pooled wake had `goto no_idle`: a CPU idling between the pick and the insert read the pool empty and nobody kicked it (since 6b690648d, 2026-09-03; the 09-17 repair fixed the wake arm only). Now `goto kick_idle` | yes: one more idle search after a pooled wake; latency, never liveness |
+| `ac98fd65a` | V2 `cake_wake_admit` / `cake_admit_direct`: grant + key from one set of task loads, one quotient when the runtime term won (`cake_slice_from_service` exposes q); V6 dispatch both-empty leaves before the seat/peek state; V8 stopping tests the seat gate before `cake_stage` | identical |
+| `7fdfe5525` | V19 tried census: `cake_tried[cpu][gate]` BSS slots for serial, retake, neighbour probe, §G36 tick, printed under probe as `tried serial/retake/probe/tick`; counted in `cake_system_serial_tried` / `cake_cpu_curr_retake` wrappers | probe only |
+| `fe857db16` | V12: `cake_select_undecided` — the wake whose home holds a well-served peer claims an idle CPU from select_cpu (LOCAL_ON\|IMMED verdict: ops.enqueue skipped, synchronous insert); enqueue's arm keeps the grant test, the pool insert and the post-insert search, its own idle pick removed; `select_direct` stat | same CPU, different lane; forks now take this arm (were queued behind the busy home), exec wakes go to the pool |
+| `f9c1bdff1` | V14: enqueue_wake's `cpu_curr(tcpu)` serves the self-race test, `cake_wake_place` (`__arg_trusted __arg_nullable`) and `cake_wake_preempt`, which takes the occupant and a caller-computed window (`cake_wake_protect`) | verdict on a read a few hundred ns older; `rs->pid` check makes a changed occupant "no preempt" |
+| `f70d87461` | V16: select_cpu's four decided arms share one insert exit | identical |
+
+fnspills (st/ld/insns), tip → head: select_cpu 10/19/787 → 12/23/699;
+enqueue 11/33/735 → 7/28/656; dispatch_search 5/32/559 → 4/36/593
+(both-empty path: 2 st + 1 ld before the exit, was 9 stack ops in the first
+95 insns); stopping 20/25/316 → 18/26/301; wake_preempt 8/11/225 →
+15/16/236 (one kfunc read fewer); enqueue_wake 1/1/71 → 3/4/76 (V2's
+out-param). **LLVM lesson, recorded:** any new statement in select_cpu's
+body — an atomic, a cold call, a plain store to a fresh BSS address, an
+inline arm at the tail, a value carried to the tail — re-ran register
+allocation and kept `prev_cpu` on the stack for the whole function (9/18 →
+9/38 or 17/20); the census went into the gate's own first call and V12 into
+its own subprogram for that reason. V1 (one toggle read per function) was
+tried on select_cpu and dropped (12/23/699 → 12/29/684: the helpers' reads
+stay, the local costs fills). V7 (prev_cpu in a callee-saved register,
+snapshot-first order) not attempted: the same allocator; needs a JIT-level
+receipt, not source shaping. V18 needs `llc_misses` in the sudoers
+`prog profile` rule (today `cycles instructions` only). Static counts are
+attribution; the receipt for all of it is the bpfstats rotation.
+
+**Seamlessness council (three Fable 5.1 lenses: event completeness,
+rescues, state coherence; maintainer's standard 2026-09-19: no gaps,
+misses or rescues). Kernel facts they rest on:** K1 an insert made from
+ops.select_cpu/ops.enqueue lands only after the op returns
+(`mark_direct_dispatch` → `direct_dispatch`, ext.c 2055-2079), so every
+"search after the insert" in cake runs BEFORE the landing — the 09-17 and
+`14d9f8ef9` repairs narrow the window, they do not close it; K3 the kernel
+sets the idle bit first and calls `ops.update_idle` second, by design as an
+enqueue/update_idle interlock (idle.c 822-826); the idle-to-idle re-pick
+sets the bit with no notify, so a self-kick from update_idle cannot spin on
+this kernel (the I11 objection of 09-18 does not hold here); K2 a kick is
+irq_work delivered after the waker re-enables IRQs, so it always follows
+K1's landing; KICK_IDLE is dropped when the target is neither idle nor in
+dispatch, which never hits cake (every KICK_IDLE follows a won claim);
+WF_EXEC is not a wake (`sched_exec` gets prev_cpu back, no enqueue), so the
+exec note above is wrong and struck.
+
+| # | crack (votes) | window / consequence | rescue today | event-complete design |
+|---|---|---|---|---|
+| C1 | pool insert vs a CPU going idle (3/3) — waker's idle read precedes its landing (K1); idler's pool count (2919) precedes its bit set (K3); `cake_update_idle` returns at once on one-word hosts | 1–3 µs per idle entry, needs every other CPU busy; wakee waits for the next dispatch on the die, ≤ the occupant grant (3 ms) | "the next dispatch"; the 24 ms wall; watchdog | register `update_idle` on one-word hosts: on idle=true read `qmask[0]` and `nrq(pool)` (2 loads), self-kick flags 0 when non-zero; producer side makes `cake_wake_mark_set`'s xchg unconditional (a fence between insert and idle read). Cost = the trampoline per idle transition (I11 measured +11–16 ms/s in 09-18's form) — the harness decides |
+| C2 | `alone` skips the idle kick on every non-wake enqueue (2661-2670) (3/3) | a property-change / affinity re-enqueue or a slice-0 put_prev under an RT displacer lands on DSQ[tcpu] unkicked while CPUs idle; ≤ owner grant or RT hold | owner's next dispatch, a steal | `alone` only when the enqueuing CPU is tcpu and its curr is p (the owner's own put_prev); cpu_release reads `nrq(cpu)` and claims+kicks when non-zero |
+| C3 | `cake_wake_preempt` prices the OLD key (1627), the insert stamps the clamped one (3/3) | sleeper-vs-sleeper churn under saturation; a fresh occupant evicted by a wakee whose stamped key would sort behind it; the pinned arm has a third clamp (2469-2472) | none (policy) | stamp the clamped key before the verdict (`cake_admit_direct` on the wake route too) and unify the three key formulas |
+| C4 | seat bit outlives a holder that leaves SCX while blocked (RT promotion → `switched_from_scx` → `ops.disable`, not registered) (1/3) | on a light host self-sustaining: seat preference + decline keep the CPU idle, nothing runs there, the bit never clears; one CPU out of the warm set | load | register `ops.disable` → `cake_seat_retire`, as `cake_exit_task` does; pid reuse: retake/immunity compare pid only |
+| C5 | pinned kthread wake behind an occupant: `LOCAL_ON\|tcpu` with no IMMED and no PREEMPT, before the pinned-preempt verdict (2545-2549) (1/3) | a per-CPU kworker/ksoftirqd waits the occupant's grant, ≤ 3 ms; no counter | none | the pinned-user rule (2459-2479) delivered as `CAKE_ENQ_PREEMPT` on the insert |
+| C6 | §G41 mark set before the landing (K1): a same-LLC retire or the foreign rescue between mark and landing leaves a non-empty pool unmarked, multi-LLC only (1/3) | the other die skips it until a same-die dispatch re-sets the mark | that re-set; `offer_remote`'s kick | `cake_llc_pool_rescue` reads the count, not the mark; correct the 1533/794 comments |
+| C7 | `retake` flag set remotely (2063), cleared only by the next `running` on prev_cpu; if the PREEMPT insert is rerouted first it stays and exiles continuations (1/3) | one dispatch | self-heals | clear when consumed in enqueue (2637) |
+| C8 | `wake_served` stamped with the rq clock, compared cross-CPU without the clamp 358-360 promises (1/3) | TSC-skewed hosts only: spurious pool-first | — | clamp at the reader or `bpf_ktime_get_ns` (portability invariant) |
+
+Verified complete by the council: LOCAL_ON\|IMMED claims (lost claim → REENQ, displaced → REENQ; cake's REENQ arm covers both), PREEMPT riding the insert, kick-after-insert ordering (K2), `wake_mark_retire` (correct Dekker, SEQ_CST both sides), qmask, run-slot tear direction, `cpu_irq_live`, consume-skips-ineligible + pool forward. Not cracks: the 24 ms wall (a polled deadline over hysteresis), the cross-die slice wait (§G89 trade, 60 % 1 %-low receipt), tick-bound expiry (a timer in ops.running is priced, not recommended without a capture).
+
+Council's fix-first (all three): C1, then C2, then C3. Nothing implemented: C1 is a construct with a priced cost (I11's +11–16 ms/s vs a ≤ 3 ms tail that only saturation reaches), C3 changes placement — both are the maintainer's pick; C2, C4, C5, C7 are small and placement-widening on rare paths; C6/C8 are portability.
+
+Tooling: `bench/frame_attrib.py` (V22) joins a MangoHud log with the sched
+trace per frame (classes rt_displaced / preempted / wait / kwin_late /
+idle_wait / cpu_bound). Hitch fact F1 refined by the council: the Warframe
+capped-scene tail is two events per 273-frame period (A: +1.5 ms delayed
+present with a 1.8 ms catch-up; B: +0.7 ms ten frames later, kwin's repaint
+timer 0.9–1.4 ms late), native and cake identical to 0.04 ms; `perf record
+-a -g` filtered by tid offline names kwin's job without caps.
+
+**Measured overnight 2026-09-19 (1-shot, game closed).** `cakebench try`
+head 45a6bc2515fc: verifier accepted, native restored, 0 stalls.
+
+appsim ABBA (helldivers2-mission-fitted, 45 s per slot, bpfstats deltas,
+old = `494d7a496` receipt, new = head receipt, all four slots attached and
+restored; scratchpad `rot3/`):
+
+| callback | old | new | delta |
+|---|---:|---:|---:|
+| select_cpu ns/run | 89.6 | 87.9 | −1.8 % |
+| enqueue | 196.9 | 189.5 | −3.8 % |
+| dispatch | 46.1 | 42.2 | −8.6 % |
+| running | 27.9 | 28.2 | +1.3 % |
+| stopping | 14.7 | 14.2 | −3.4 % |
+| all cake BPF ms/s | 29.75 | 28.81 | −3.2 % |
+| appsim p99 / p999 ms | 0.618 / 0.650 | 0.620 / 0.653 | +0.3 % / +0.4 % (slot spread 0.649–0.656) |
+| appsim 1 % / 0.1 % low fps | 1579 / 1499 | 1569 / 1452 | −0.6 % / −3 % (s3_new 1382, s2_new 1522: slot noise) |
+
+perf-sched-pipe, 2 blocks each vs native (diagnostic tier, noise `warn`,
+external CPU 6–13 %; one old-arm sample `noisy` 28 %): old
+`4f189ad29129` 0.755 µs/op vs native 1.191; head `ccd4511b9be8` 0.731 vs
+native 1.164 → head −3.2 % per op against old, the same size as the BPF
+cost delta. Verdict: BPF cost down ~3 %, frame tails flat within slot
+noise, no regression seen; the frame-scale levers stay §G93 / blocked
+share / cold hops (V23).
+
+probe=1 appsim slot (head, 45 s, 7.05 M selects): tried/fired — serial
+96 / 3, retake 189,982 / 101,876, neighbour probe 1,742 / 1,141, tick
+evaluated 142,021 / rejected 4,868; select_direct (V12) 694 (0.01 %),
+pool_direct (reroute) 115,076, wp_fired 1,205, expiry_preempt 65; §G93:
+9,206 RT displacements (205/s), holds 4–8 µs band dominant. Nothing at
+fired=0 on appsim; the cut rule still needs both games.
+
+Owed, in order: probe=1 slot in both games (V19's cut rule: fired=0 in
+both games AND one saturated harness slot, with a recorded design reason);
+V18 seat pricing once the sudoers `prog profile` rule carries
+`llc_misses`; V11 race table; the seamlessness council's findings (below,
+when in); then the §G93 trace (`rt_displace_capture.sh 30`) and the
+irq_leave scene-matched bisect from the 09-18 list below.
+
+**2026-09-18 — TIME-GAP AUDIT, COUNCIL ROUNDS, GPU CHAIN: SIX COMMITS ON THE
+BRANCH, NONE MEASURED YET (local commits `b95f00d57` → `851d373b8`, not pushed).**
+
+Started from the 09-17 hotfix (two dedup edits that treated a snapshot as a
+state). Audit of every read→consume gap; a council of three (sibling
+schedulers, time gaps, registers/L1); two solvers in worktrees; six reviewers;
+then a GPU chain council of three and an optimisation council of six with a
+vote round. All numbers below are static attribution or council estimates:
+**no capture has run**; the A/B/C rotation and the GPU measurement set are
+owed before any of this is a keep.
+
+| commit | what | decision change |
+|---|---|---|
+| `b95f00d57` | D1 one whole-core snapshot per select_cpu; D2 one predictor clock per idle search; D3 running's clock for the frontier sweep; D4 probe tag call guarded at its sites; C1 run slot `pid` tag (running stamps, stopping zeroes; a remote pricer with a non-owner read prices nothing — core assigns `rq->curr` after `ops.running`, so the outgoing task was priced with its charged vtime) | none |
+| `ce4e92e66` | reviewer consensus 5+/6: I6 probe counters in cold `*_probe` subprograms behind one toggle test (select_cpu 1233→839 insns, TOTAL 8329→6319; spill counts are probe key stores); I1 seat-holder census by pid spares non-holders the storage lookup; I2 retake rides `ENQ_PREEMPT`; I7 `cake_multi_llc()` at callers; I8 running reads back its stamp; I9 hot BSS slot-aligned (`probe_busy_flag` shared `cake_seat_word`'s line: probe=1 census was inflated); I10b own-only dispatch refreshes by its run stamp; I4 loader `INTERVAL_MAX` 16→4 + disagreement reset (sink lag 32/48 s → 6/7 s) | I2 head insert; I10b one run of lag |
+| `ef4b07bb8` | probe census: `grant_{vacant,expired,lt_tick,ge_tick}` at the continuation-arm pool insert, `hd_corebusy`, `rej_irq`/`rej_tick`; run slot stores the grant | none |
+| `966ce4274` | the verdict rides the insert: `cake_wake_place` (idle → `LOCAL_ON` IMMED; yielding occupant → `LOCAL_ON` `ENQ_PREEMPT`; else pool + one search); retake evictee claims direct; `cake_claim_free` before the decline kick and the forward; `expiry_preempt`: an occupant past its grant yields to a continuation wake | same verdicts, earlier and bound; expiry: the tick's grace goes |
+| `5fdde1eab` | `cake_subhandoff`: a burst below `cake_handoff_max_ns` is not declined its warm home by the starved-turn gate | yes: sub-µs kthreads keep their home |
+| `851d373b8` | home claim and retake test the sink's thread (`cake_cpu_irq_bad`), not its core; cold pick keeps the core mask; `cake_core_irq_bad` removed | yes: CPUs 4 and 1 regain warm home/retake |
+
+Held by the councils, in the session scratchpad only (diffs exist for the
+first two): I10a `wake_served` grain (3/6: count `WAKE_SERVED_ST` writes vs
+consumes first; the stamp already has a `WALL/2` grain); I12 WOKE scope
+(4/6; comment must say device-handler and softirq wakes only); I3 derived
+core word from the idle word (**§G83, rejected 2026-09-03** — mechanism now
+replaces a kfunc pair, not an atomic; re-open is the maintainer's call);
+I11 idle-entry pool recheck (**dropped as written**: seat decline / affinity
+head → self-kick spin; 6.13–6.15 lack the interlock; +11–16 ms/s); P2.1
+chain-origin preempt on the continuation arm (4/6: waker kthread-or-stage ∧
+wakee slice < occupant slice, native's PREEMPT_SHORT shape; needs the
+`grant_*` census to show a CPU-bound regime in WoW and the maintainer to
+re-open gap 3's ban on wake-preempt levers); P5.2 deadline `bpf_timer`
+(only if `grant_lt_tick` carries the tail); P1.2(b,c) microburst seat
+exemptions (the 1464 ns bound splits the display chain: vkd3d_fence bursts
+are 1.6–2.1 µs); P3.2 third door onto a seat and P3.4 deferred retake (after
+the evictee census); P4.2 demote by measured share (after P4.1's census).
+
+Rejected on this host, recorded: "microburst follows the waker CPU" (§G47
+stands; the idle claim already runs the kthread during the handler with no
+IPI: no cpuidle driver, MWAIT C1 polling, exit < 1 µs; valid only where
+cpuidle exit exceeds the handler remainder, §G51's rodata gate). Do not
+enable BIOS Global C-State Control for the gaming profile: it is the only
+way this host acquires a C-state problem. Shallow-idle preference from BPF
+(14–22 ms/s for a NULL value here) and seat-sibling pairing (g72 null,
+§G38 +59%) stay parked.
+
+Facts the councils established (live `/proc`, kernel tree): IRQ 97 is on
+CPU 12 (the record's "13" was stale), `irq/97-nvidia` is FIFO (outside
+scx); the chain's SCX links are `nvidia-modeset/kthread_q` (~1.3 µs
+bursts, one wake per IRQ), `nvidia-drm/timeline-*` (~1 µs) and the game's
+submit threads (vkd3d_queue 18 µs); none reaches stage class. Hop p99 125 µs
+vs native 41 µs is the queued minority of ISR-origin wakes: the kick's
+irq_work waits for the handler (19–31 µs), then the pool wait when the
+preempt is refused. Slice expiry is tick-checked only, ticks are aligned
+(HZ=1000, no `skew_tick`), so under a full pool the wait is ~U[0,1) ms —
+the dominant term, not the 1.5 ms cap (a model; `grant_*` measures it).
+`scx_bpf_now()` in dispatch, stopping(true) and running takes the fresh
+`sched_clock` branch (the rq clock is unpinned around dispatch). Rule
+change on disk (gitignored `CLAUDE.md`, skill): invariants absolute, design
+guidelines yield to measurement; spills are priced (~0.2–0.3 ns per pair on
+Zen 5) against the helper/re-read/kfunc they avoid, never a gate alone.
+
+**Measured, same evening (`before` = `2b74d5b76` receipt `1722aa0bda96`, `tip` =
+`ca4dc1c6d` receipt `3b10a00cdc99`, both attached four times, verifier
+accepted, no stall, native restored each slot; a five-reviewer data council
+agreed 5/5 on every line).** Frame ABBA (`runs/game/WowB/2026-09-18`, MangoHud
+per-frame, 60 s × 4, GPU 98.7–98.9 % every slot): **NULL** — 1 % low 117.5 →
+118.1, 0.1 % low 111.6 → 112.9, p99.9 8.96 → 8.86 ms against a 0.29 ms
+before-vs-before spread; every metric sits on the slot-1→4 warm-up line; the
+chain waits 16–25 µs per 5.3 ms frame, nothing queues, the scheduler is off
+the critical path (the frame rig labels the build; it did not verify the
+attach). Cost rotation (`cake-bpfstats`, A B B A, 50 s deltas inside each
+attach, bpf_stats on for all four): **POSITIVE** — select_cpu 99.1/99.0 →
+90.5/91.5 ns/run, dispatch 83.3/81.3 → 73.4/69.6, enqueue/running/stopping
+level, BPF cost per program run 57.7 → 53.5 ns (−7.3 %, 4.6× the slot spread),
+−2.0 ms/s at matched load (~430k program runs/s, 2.5 → 2.3 % of one CPU);
+chain-thread migrations per dispatch −21..−28 % (vkd3d-swapchain 22 → 17 %,
+nvidia-modeset/kthread_q 30 → 22 %, vkd3d_fence 39 → 29 %, nvidia-drm
+timeline 49 → 35 %; both tip slots below both before slots, slot 4 rebounds
+to slot 1). One regression: `cake_irq_leave` +55 ns/run on identical bytecode
+(+0.24 ms/s; the `cake_irq_live` re-alignment or the per-thread depth reads on
+IRQ 97's exit path). Attribution: the ns wins belong to D1/D2 and I6/I7/I10b;
+the three decision-changing commits show only in the migration drop, and their
+stated aim (the earlier ISR-origin hop) is unmeasured. Cost slot 4 ran at a
+different load (GPU 83 %, IRQ 1774/s vs 2100–2240/s): per-call ns and
+migration fractions survive it, rates do not. Evidence: session scratchpad
+`rot/` (bpf/sched/irq/gpu snapshots per slot, `summary.md`), disposable.
+
+**`irq_leave` follow-up, same night.** A four-member council (layout, reader
+traffic, skeptic, fix design) agreed on a mechanism: `851d373b8` made the
+CPU 4/1 home test read the sink's `cake_irq_live` line (before, the sibling's
+chronic bit short-circuited it), and the 2026-09-17 SMT-paired slot gave
+CPU 12's handler-exit decrement a line transfer per remote read; symbol
+tables of both objects rule layout out. `92c2120d3` gives each CPU its own
+slot (the pairing's only reader left with `851d373b8`; −49 insns, edges
+27 → 11/12, no behaviour change) — kept as a correct simplification. **It did
+not confirm the mechanism:** the tip-vs-fix rotation ran in a different
+scene (GPU 59–68 %, IRQ 97 at 2.2–3.3k/s, every callback 10–15 ns dearer)
+and `irq_leave` read 121/225 tip vs 115/179 fix — within-arm spread larger
+than the arm gap, both far above the first rotation's 41/72. The skeptic's
+"bisect first" was right; the cause is open. Next: `bpftool prog profile`
+(cycles vs instructions) on `irq_leave` before vs fix, then a before-vs-fix
+rotation with the game parked on one screen so the scene cannot drift.
+Process fault recorded: that rotation ran without a fresh go and without a
+scene check.
+
+Rule written down (`docs/PERFORMANCE.md`, migration verdict): a migration
+count proves nothing; a reduction is a win only when waits stay flat, run time
+per burst and misses per instruction fall, and the census shows the removed
+moves were the home-was-idle kind. Today's −21..−28 % has layer 1a (waits
+flat) only; 1b/1c/2 owed.
+
+**Live dungeon capture, 22:10 CDT (maintainer's cake attached, WoW retail,
+observe-only, single arm; six-lens council).** GPU 97.5 %, host 3.1/16 CPUs
+busy, scheduler 32.5 ms/s = 1 % of busy time. **The frame is CPU-paced by the
+main thread** (93.7 % of a CPU, 195 µs bursts, 4.6k blocks/s of 14 µs, 0.43 µs
+mean wait, 0.2 % of wall): no WoW thread waits > 0.75 µs/dispatch, 93 % of
+wakes direct-placed, ThreadPool_High ×6 one per core (32 % migrations, the
+fan-out-collision kind), input/network/audio chains clean (audio entirely RT;
+NIC on CPU 2; input < 1 µs per cake hop). **One finding, four lenses:** the
+main thread takes **249 involuntary switches/s from RT** (kwin RR on CPU 4,
+50 µs; pipewire data loops FIFO on 1/5/6, 7 µs) and `cake_cpu_release`
+evacuates it cold every time (`scx_bpf_reenqueue_local` → REENQ → pool/claim),
+including the 7 µs holds where a warm wait beats the L2 refill; ~250 of its
+946 hops/s, the other ~700 follow voluntary blocks (home declined at wake:
+core busy / seat / lost claim — census needed). Est. 1–3 % of main-thread
+time, unmeasured. Candidate (gated on attribution): `cpu_release` keeps a
+seated stage on its own queue when the displacer's measured mean burst is
+below the refill bound (+~0.02 ms/s; decision change: bounded warm wait over
+a cold hop; confirm main migr 19.7 → ≤ 15 %, wait ≤ 0.9 µs, run/burst flat,
+frame ABBA not worse). Input lens flags one open check on `851d373b8`: a
+stage may now home on CPU 1, the mouse IRQ's sibling; A/B the IRQ-80 handler
+duration tip vs parent. Corrections to the record: xhci IRQ 80 = mouse
+receiver + GoXLR audio, keyboard = IRQ 46 on CPU 5; evdev reader is
+`libinput-connec` (RR); NIC = r8169 IRQ 135 on CPU 2 with
+`napi_defer_hard_irqs=1 / gro_flush_timeout=20 µs` (origin unknown). Next
+capture logs: MangoHud frames, per-CPU softirqs incl. HI, IRQ 135 + NET_RX,
+`cpu_release` by displacer burst, `pw-top` ERR deltas, evdev report count.
+Evidence: scratchpad `live1/` (disposable).
+
+**§G93 registered (design council: three designers + arbiter).** Probe
+half shipped; capture (`bench/rt_displace_capture.sh`) and parser
+(`bench/rt_displace.py`) in the tree; the gate waits for the trace. The
+capture runs as the user with tracefs events readable (`chmod -R o+rX
+/sys/kernel/tracing/events`, done 2026-09-18) and `sched_schedstats=1`.
+
+Owed, in order: (0) the ISR → `kthread_q` wake-to-run histogram per arm
+(bpftrace on `sched_wakeup`/`sched_switch`; tracefs must be opened by the
+maintainer) — the one measurement that says whether `966ce4274` earns its
+keep beyond the migration drop; (1) the A/B/C rotation HEAD-before-today `2b74d5b76` →
+`b95f00d57` → `ce4e92e66` → tip, `cake-bpfstats` ns/run per callback, WoW
+per-thread migrations/preemptions, `perf stat` IPC/L1d; (2) the GPU
+measurement set per arm: `nvidia-smi` 1 Hz, `/proc/<tid>/schedstat` every
+250 ms for the chain tids + IRQ-97 rate, `sched_schedstats=1` for `wait_max`,
+`perf stat -a -e msr/aperf/,msr/mperf/`; choke = a 250 ms bucket with a
+submit-chain thread's mean wait > 100 µs and GPU util ≥ 10 points under the
+arm's median, or `wait_max` > 1 ms; (3) probe=1 slot for the new census
+sites; (4) HD2 + WoW frame ABBA for `5fdde1eab` and `851d373b8` (the
+decision changes) and the §R.6 pipe/messaging guard for `966ce4274`.
+MangoHud is not injected in the current WoW instance: no frame claim
+without a relaunch under `mangohud %command%`.
+
 **2026-09-17 — HOT-PATH EFFICIENCY: select_cpu 118–130 → 87–90 ns PER WAKE, SCHEDULING
 UNCHANGED (one squashed commit; pushed to nightly for testing).**
 Deep dive into duplicate work and poor pathing in the hot path, measured per
@@ -704,7 +1005,9 @@ User's core/boost/cache steering: live CPPC ranks cores 4/5 highest (196), then
 3 (191), 1 (186), 2 (181), 0 (176), 6 (171), 7 (166). These are ordinal
 hints, not throughput ratios. Cake already uses startup ranks after eligibility
 and locality preferences; it does not track live boost headroom. Active
-amd-pstate-epp, performance governor/EPP and boost are enabled. Each SMT pair
+amd-pstate-epp with the `powersave` governor and EPP `balance_performance`
+(read from sysfs 2026-09-18; an earlier note here said performance), boost
+enabled, effective C0 5.46–5.53 GHz on every thread. Each SMT pair
 shares 48 KiB L1 data and 1 MiB L2; all cores share 96 MiB L3. IBS op/fetch PMUs
 are exposed, but no IBS cache/IPC profile was collected. Next distinguish
 effective throughput and cache-miss cost from CPU rank before adding policy.
@@ -1522,6 +1825,44 @@ build is gone. Tester's setup: game pinned to die 0 (96 MB L3, cores 0-7 =
 PUs 0-7 and 16-23), everything else on die 1 (32 MB, cores 8-15), system in
 frequency mode. §G87 approved by the maintainer on that chart: default ON,
 `--toggle g87=0` is the off-switch.**
+
+**§G93 (under test, probe half only; design council 2026-09-18): the
+RT-displacement release gate.** Construct: `ops.cpu_release` re-enqueues a
+displaced SCX task only when the displacer's own mean burst
+(`sum_exec_runtime/nvcsw`, no identity) is at least the displaced task's
+burst >> `CAKE_RELEASE_REFILL_SHIFT`; otherwise the task stays at its local
+DSQ head (a task core re-enqueued for IMMED is re-inserted there without
+IMMED at enqueue; a slice-exhausted one keeps its owner queue with the qmark
+hidden until `ops.cpu_acquire`). Hypothesis: for sub-refill holds (pipewire
+data loops, 5–10 µs) a warm wait beats a cold migration (§G38 +59 %); the live
+dungeon capture showed the main thread displaced ~249/s, 88 % hopping cold.
+Kernel facts (ext.c, tree 7.2): release fires at the end of
+`put_prev_task_scx` after `stopping`; a preempted task with slice > 0 sits at
+the local head unless IMMED (then core itself re-enqueues it, reason
+PREEMPTED, before release); slice == 0 goes through `ops.enqueue` as a plain
+continuation; a local DSQ is rq-private, so a stay is invisible to the steal
+ring for the hold; the displaced task cannot be peeked from release;
+`cpu_release/acquire` carry a deprecation warning upstream in favour of
+`SCX_ENQ_IMMED` (alternative (ii), a per-CPU hold average from a tracepoint,
+held). Gate: trace T1–T5 (`bench/rt_displace.py`): keep home for a displacer
+band iff CI95_low(refill) + lat_hop > p90(hold), refill from the wake-side
+warm-vs-cold split (today's displacements almost never stay) with §G38 as
+the prior; then a one-binary `--toggle release=0|1` ABBA on a CPU-paced
+scene, ≥ 4 runs/arm, screened on severe-frame ratio, scored on 0.1 % low and
+p99.9−median, layers 1a/1b flat or better, bpfstats level. Shipped now
+(probe half, `4e930d1b3`+): `stopping(runnable)` stores the outgoing burst
+inputs, slice and IMMED bit in the run slot; `cpu_release` counts path × band
+× reason into `cake_release_census`/`cake_release_reason` and stamps the
+release; `ops.cpu_acquire` (registered under probe only) histograms the hold
+into `cake_acquire_hist`; the loader prints all three at exit. Costs, probe
+off: none (rodata-folded; the acquire op is not registered). Constants:
+`CAKE_RELEASE_BAND_SHIFT` 10 (ns → ~µs), `CAKE_RELEASE_BANDS` 8 (1 µs ..
+≥ 128 µs, one band per RT population), `CAKE_RELEASE_PATHS` 3,
+`CAKE_RELEASE_REASONS` 4; `CAKE_RELEASE_REFILL_SHIFT` lands with the gate
+from the trace's bound sweep (§S.5 precedent: measured, not chosen). Risks
+recorded: a long RR hold is unbounded by cake (no tick on an RT-held CPU),
+so eligibility per band needs the hold p90 first; the hidden-mark arm parks
+work for the hold's length; the upstream direction away from `cpu_release`.
 
 **§G89 (shipped, default on, `--toggle g89=0` = one pool, LLC-blind): die-
 local pool and picks.** One wake pool per LLC (`LLC_WAKE_DSQ_BASE + llc`,
@@ -2364,6 +2705,7 @@ real session), live replica (loader logic run standalone on the live host), audi
 
 | # | change | evidence | verdict | key numbers |
 |---|---|---|---|---|
+| **G93** | **RT-displacement release gate: `cpu_release` re-enqueues only when the displacer's measured burst exceeds the displaced task's refill; probe half shipped (run-slot burst inputs, release/acquire census; path-row mask fixed `64e3a4591`)** | **TRACE owed (`bench/rt_displace_capture.sh` + `rt_displace.py`, WoW CPU-paced dungeon)** | ⏳ **UNDER TEST 2026-09-18**: probe half in, gate not built | live 22:10: main thread 249 RT displacements/s, 88 % hop cold; ~520/s data-loop holds 5-10 µs, ~500/s kwin 48 µs; gate ships iff CI95_low(refill)+lat_hop > p90(hold) per displacer band |
 | **G89** | **die-local pool, hint, pick, steal gate, probe order; `--toggle llcsplit=1` scaffold** | **CENSUS on the fake split (appsim)** | ✅ **SHIPPED 2026-09-04** | cross-die: hint 169k → 0, pool service 471k → 0, steal 883k → 927; 1% low 1485 → 1559; one-LLC identical |
 | **G88** | **LLC-confined census walks and seat decline** | **FIELD (9950X3D DOOM)** | ✅ **SHIPPED 2026-09-04** | 1% low 47.14 → 108 to 115 across all flag combinations; lavd 117.54 on that box |
 | **G87** | **protect window and pinned margin bounded by the wakee's slice** | **rig + FIELD** | ✅ **SHIPPED 2026-09-04 (maintainer)** | cyclictest spikes >100 us 230 to 6331 → 10 to 14; DOOM g87=1 170.16 avg / 114.66 1% low, best of four |

@@ -92,6 +92,24 @@ enum consts {
 	QMASK_WORDS	= MAX_CPUS / 64,
 	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
 	CLAIM_TRIES			= 4,			/* §G86: idle-word bits tried per claim */
+	SEAT_CAP			= 64,			/* seats live inside one idle word */
+	/* §G93 census: RT displacement holds and displacer bursts in log2 bands
+	 * of ~1 us (ns >> 10), eight bands 1 us .. >= 128 us: the pipewire
+	 * data loops (5-10 us) and kwin's p99 (~50 us) each land in their own. */
+	CAKE_RELEASE_BAND_SHIFT		= 10,
+	CAKE_RELEASE_BANDS		= 8,
+	CAKE_RELEASE_PATHS		= 3,			/* arrival: non-IMMED / IMMED / slice-exhausted */
+	CAKE_RELEASE_REASONS		= 4,			/* RT / DL / stop / unknown */
+	SEAT_HOLDER_SLOTS		= 4 * SEAT_CAP,		/* holder census by pid: a full word collides with a quarter of the non-holders */
+};
+
+/* Gates reached, for the tried/fired census (probe). Power of two: the index is masked. */
+enum cake_tried_gate {
+	CAKE_TRIED_SERIAL,		/* the waker's handoff bit is saturated */
+	CAKE_TRIED_RETAKE,		/* a stage wake whose seat another task runs */
+	CAKE_TRIED_PROBE,		/* neighbour probe entered: no idle CPU, occupant kept tcpu */
+	CAKE_TRIED_TICK,		/* §G36 tick test evaluated on an idle candidate */
+	CAKE_TRIED_NR,
 };
 
 #endif /* __CAKE_INTF_H */

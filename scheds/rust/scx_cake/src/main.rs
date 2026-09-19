@@ -50,6 +50,15 @@ fn configure_idle_tracking(skel: &mut OpenBpfSkel<'_>, one_word: bool) {
     }
 }
 
+/// ops.cpu_acquire exists for the §G93 hold census only; a release run does
+/// not pay a BPF entry per RT-to-SCX switch to record nothing.
+fn configure_acquire_census(skel: &mut OpenBpfSkel<'_>, probe_on: bool) {
+    if !probe_on {
+        skel.struct_ops.cake_ops_mut().cpu_acquire = std::ptr::null_mut();
+        skel.progs.cake_cpu_acquire.set_autoload(false);
+    }
+}
+
 /// scx_cake: a gaming-first sched_ext scheduler.
 #[derive(Debug, PartialEq, Eq, Parser)]
 #[command(after_help = toggle_help())]
@@ -512,6 +521,7 @@ impl<'a> Scheduler<'a> {
         }
 
         configure_idle_tracking(&mut skel, one_word);
+        configure_acquire_census(&mut skel, probe_on);
 
         // Load and attach.
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
@@ -599,7 +609,7 @@ impl<'a> Scheduler<'a> {
                     bss.cake_irq_live
                         .iter()
                         .take(*NR_CPU_IDS)
-                        .flat_map(|s| s.depth)
+                        .map(|s| s.depth)
                         .collect()
                 };
                 let first = self.skel.maps.bss_data.as_ref().map(|b| depths(b));
@@ -656,8 +666,49 @@ impl<'a> Scheduler<'a> {
                 );
             }
         }
+        if let (true, Some(bss)) = (self.probe_on, self.skel.maps.bss_data.as_ref()) {
+            // §G93 census: releases by arrival path x displacer band, by reason; holds by band.
+            let bands: Vec<String> = (0..bss.cake_acquire_hist.len())
+                .map(|b| format!("{}us", 1u64 << b))
+                .collect();
+            info!("   g93     bands (>=) {}", bands.join(" "));
+            for (path, name) in ["non-immed", "immed", "slice-0"].iter().enumerate() {
+                let row: Vec<String> = bss.cake_release_census[path]
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect();
+                info!("   g93     release {:9} {}", name, row.join(" "));
+            }
+            let reasons: Vec<String> = bss
+                .cake_release_reason
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
+            info!(
+                "   g93     release by reason rt/dl/stop/unknown {}",
+                reasons.join(" ")
+            );
+            let holds: Vec<String> = bss
+                .cake_acquire_hist
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
+            info!("   g93     hold      {}", holds.join(" "));
+            // Gates reached; fired counts are the stats rows serial, seat_retake,
+            // probe_fired, rej_tick.
+            let tried: Vec<String> = (0..4)
+                .map(|g| {
+                    bss.cake_tried
+                        .iter()
+                        .map(|row| row[g])
+                        .sum::<u64>()
+                        .to_string()
+                })
+                .collect();
+            info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
+        }
         if self.probe_on {
-            const NAMES: [&str; 121] = [
+            const NAMES: [&str; 133] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -779,6 +830,18 @@ impl<'a> Scheduler<'a> {
                 "x_steal_moved",
                 "pool_direct",
                 "kick_alone",
+                "seat_skip",
+                "grant_vacant",
+                "grant_expired",
+                "grant_lt_tick",
+                "grant_ge_tick",
+                "hd_corebusy",
+                "rej_irq",
+                "rej_tick",
+                "expiry_preempt",
+                "release",
+                "acquire",
+                "select_direct",
             ];
             // The name table must match the BPF enum exactly; a drift prints
             // zeros silently because out-of-range lookups fail quietly.
@@ -873,14 +936,15 @@ impl<'a> Scheduler<'a> {
             unsafe { AtomicU64::from_ptr(published) }.store(word, Ordering::Relaxed);
         }
 
-        if self.verbose {
-            let named: Vec<usize> = set
-                .iter()
-                .enumerate()
-                .filter_map(|(cpu, hot)| hot.then_some(cpu))
-                .collect();
-            info!("   irq     sinks {named:?} steered around");
-        }
+        // Every publication is logged: a flip re-seats each stage holder on
+        // the flipped core once, so the flip rate is a covariate of any
+        // frame capture (council 2026-09-18).
+        let named: Vec<usize> = set
+            .iter()
+            .enumerate()
+            .filter_map(|(cpu, hot)| hot.then_some(cpu))
+            .collect();
+        info!("   irq     sinks {named:?} steered around");
     }
 }
 
@@ -1023,9 +1087,11 @@ fn sinks_by_widest_gap(deltas: &[u64]) -> Option<Vec<bool>> {
 /// because removal merely returns placement freedom and a loading screen
 /// must not flap the mask. A set that keeps repeating earns a doubled
 /// sampling interval up to INTERVAL_MAX (longer windows accumulate more
-/// ticks, so confidence also buys resolution); any change resets to every
-/// tick. All four constants are agreement counts: every value that steers
-/// comes from the measured distribution alone (§R.26).
+/// ticks, so confidence also buys resolution); any window whose ranking
+/// disagrees with the published set resets to every tick, so a moved sink
+/// is confirmed at tick rate rather than at the slowed cadence (audit
+/// 2026-09-18). All four constants are agreement counts: every value that
+/// steers comes from the measured distribution alone (§R.26).
 struct SinkMonitor {
     /// Last accepted read; deltas span the full gap between accepted reads,
     /// so a slower cadence measures a longer, smoother window.
@@ -1046,8 +1112,10 @@ struct SinkMonitor {
 impl SinkMonitor {
     /// Unchanged windows that earn an interval doubling.
     const STABLE_POLLS: u32 = 8;
-    /// Sampling never slows past this many ticks.
-    const INTERVAL_MAX: u32 = 16;
+    /// Sampling never slows past this many ticks: one window of lag before
+    /// a moved sink is even seen, then FLAG_POLLS or UNFLAG_POLLS at tick
+    /// rate (at most 4 + 3 s to release, 4 + 2 s to publish).
+    const INTERVAL_MAX: u32 = 4;
     /// Above-cut windows before a CPU is published.
     const FLAG_POLLS: u32 = 2;
     /// Below-cut windows before a published sink is removed.
@@ -1108,12 +1176,14 @@ impl SinkMonitor {
         }
 
         let mut changed = false;
+        let mut disagree = false;
         for (cpu, &is_hot) in hot.iter().enumerate() {
             if present.binary_search(&cpu).is_err() {
                 self.hot_streak[cpu] = 0;
                 self.quiet[cpu] = 0;
                 continue;
             }
+            disagree |= is_hot != self.published[cpu];
             if is_hot {
                 self.quiet[cpu] = 0;
                 self.hot_streak[cpu] = (self.hot_streak[cpu] + 1).min(Self::FLAG_POLLS);
@@ -1145,6 +1215,13 @@ impl SinkMonitor {
             self.stable = 0;
             self.interval = 1;
             return Some(self.published.clone());
+        }
+        if disagree {
+            // A rank the published set does not show yet: confirm or
+            // dismiss it at tick rate instead of after the slowed window.
+            self.stable = 0;
+            self.interval = 1;
+            return None;
         }
         self.stable += 1;
         if self.stable >= Self::STABLE_POLLS {
@@ -1742,7 +1819,7 @@ mod tests {
         monitor.hot_streak[1] = 1;
         monitor.quiet[0] = 2;
         monitor.stable = 7;
-        monitor.interval = 16;
+        monitor.interval = SinkMonitor::INTERVAL_MAX;
         assert_eq!(monitor.observe(None), None);
         assert!(monitor.published[0]);
         assert_eq!(monitor.hot_streak, vec![0; 8]);
@@ -1783,6 +1860,31 @@ mod tests {
         monitor.observe(Some(next));
         assert!(monitor.published[0]);
         assert_eq!(monitor.quiet[0], 0);
+    }
+
+    #[test]
+    fn irq_rank_disagreement_resets_the_slowed_interval_before_publication() {
+        let mut monitor = SinkMonitor::new(8);
+        monitor.observe(Some(vec![Some(0); 8]));
+        monitor.published[0] = true;
+        monitor.stable = SinkMonitor::STABLE_POLLS - 1;
+        monitor.interval = SinkMonitor::INTERVAL_MAX;
+        // CPU 1 now carries the load: one window is not yet a publication
+        // (FLAG_POLLS), but the confirmation must come at tick rate.
+        let mut next = vec![Some(1); 8];
+        next[1] = Some(1000);
+        assert_eq!(monitor.observe(Some(next)), None);
+        assert_eq!((monitor.stable, monitor.interval), (0, 1));
+        assert!(monitor.published[0]);
+        assert!(!monitor.published[1]);
+        // An agreeing window keeps the slow-down bookkeeping.
+        monitor.published = vec![false; 8];
+        monitor.published[1] = true;
+        monitor.hot_streak.fill(0);
+        let mut next = vec![Some(2); 8];
+        next[1] = Some(2000);
+        assert_eq!(monitor.observe(Some(next)), None);
+        assert_eq!((monitor.stable, monitor.interval), (1, 1));
     }
     use std::{cell::RefCell, rc::Rc};
 
