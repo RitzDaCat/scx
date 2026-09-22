@@ -2177,6 +2177,11 @@ __noinline s32 cake_wake_place(struct task_struct *p __arg_trusted, s32 tcpu,
 		return 0;
 	}
 
+	/* Pre-6.18 compat returns an untrusted rq->curr pointer. Read it here
+	 * instead of passing it through the trusted global-subprogram argument.
+	 * Kernels with the kfunc retain the caller's single occupant read. */
+	if (!bpf_ksym_exists(scx_bpf_cpu_curr))
+		curr = cake_cpu_curr(tcpu);
 
 	/* No idle CPU anywhere, and every route owes tcpu a decision: the occupant
 	 * loses the CPU or the wakee waits because the occupant deserves it. Cake has
@@ -2266,7 +2271,8 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 		u64 vt;
 		u64 slice = cake_wake_admit(p, &vt);
 
-		cake_wake_place(p, tcpu, slice, vt, curr);
+		cake_wake_place(p, tcpu, slice, vt,
+				bpf_ksym_exists(scx_bpf_cpu_curr) ? curr : NULL);
 	}
 	return 0;
 }
