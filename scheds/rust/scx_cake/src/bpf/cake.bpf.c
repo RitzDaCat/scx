@@ -9,6 +9,33 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
+/* on_cpu changed from signed int to u8. Separate CO-RE flavors keep both
+ * reads relocatable; load-time constants prune the unused paths. */
+struct task_struct___cake_on_cpu_u8 {
+	u8 on_cpu;
+} __attribute__((preserve_access_index));
+
+struct task_struct___cake_on_cpu_int {
+	int on_cpu;
+} __attribute__((preserve_access_index));
+
+static __always_inline bool cake_task_on_cpu(struct task_struct *p)
+{
+	struct task_struct___cake_on_cpu_u8 *new = (void *)p;
+	struct task_struct___cake_on_cpu_int *old = (void *)p;
+
+	if (bpf_core_field_exists(new->on_cpu)) {
+		if (bpf_core_field_size(new->on_cpu) == sizeof(new->on_cpu))
+			return new->on_cpu != 0;
+	}
+	if (bpf_core_field_exists(old->on_cpu)) {
+		if (bpf_core_field_size(old->on_cpu) == sizeof(old->on_cpu))
+			return old->on_cpu != 0;
+	}
+	/* Unknown layout: retain the idle kick rather than assume continuation. */
+	return false;
+}
+
 _Static_assert((MAX_CPUS & (MAX_CPUS - 1)) == 0,
 	       "MAX_CPUS must remain a power of two");
 _Static_assert((RECIP_TABLE_SIZE & (RECIP_TABLE_SIZE - 1)) == 0,
@@ -2408,7 +2435,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		 * pick; a kicked idle CPU would lose the steal race or move it cold. Any
 		 * other re-enqueue has no owner about to pick. The mark is read before
 		 * the insert sets it; a stale set bit keeps the kick. */
-		alone = !(enq_flags & CAKE_ENQ_WAKEUP) && p->on_cpu &&
+			alone = !(enq_flags & CAKE_ENQ_WAKEUP) && cake_task_on_cpu(p) &&
 			!cake_qmark_test((u32)tcpu);
 		/* The own vtime queue is a user DSQ, where the kernel ignores
 		 * ENQ_PREEMPT: the verdict, taken before the insert so its inputs
