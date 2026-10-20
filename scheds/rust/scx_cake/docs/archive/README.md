@@ -1,13 +1,11 @@
 # Historical records
 
-These documents retain the conclusions, source identities and assumptions of
-their dates. They are not current launch instructions or default-policy claims.
-Start with [current state](../../STATE.md), [current design](../../DESIGN.md),
-or the [documentation map](../README.md).
+Each record keeps the conclusions, source and assumptions of its date; none is a
+current instruction or default. Current status: [STATE](../../STATE.md) ·
+[DESIGN](../../DESIGN.md) · [documentation map](../README.md).
 
-The state archive contains the older decision ledger and `§` registry. Search
-for a specific construct or commit instead of treating its embedded CURRENT
-STATE headings as the status of this checkout.
+`STATE_ARCHIVE.md` holds the older ledger and `§` registry: search it for a construct
+or commit. Its CURRENT STATE headings are not this checkout's status.
 
 | Record | Original title |
 |---|---|
@@ -27,6 +25,5 @@ STATE headings as the status of this checkout.
 | [STATE_ARCHIVE.md](STATE_ARCHIVE.md) | scx_cake — STATE archive |
 | [SWEEP_ARITH_2026-08-03.md](SWEEP_ARITH_2026-08-03.md) | Full internal-arithmetic sweep — 2026-08-03 (follow-on to CENSUS_ARITH) |
 
-Keep historical evidence intact. When moving a document here, update its inbound
-links and add it to this index. Raw run data belongs in the companion benchmark
-repository; preserve the recorded paths and hashes.
+Keep evidence intact. Moving a document here: fix its inbound links and add it to this
+index. Raw run data stays in `scx_cake_bench`, with its recorded paths and hashes.

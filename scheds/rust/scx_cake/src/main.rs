@@ -112,8 +112,8 @@ struct Opts {
     #[clap(long = "toggle", value_name = "NAME=0|1")]
     toggle: Vec<String>,
 
-    /// Observe-only sweep: override the handoff floor (ns) so the probe
-    /// histograms show how the split moves with the threshold.
+    /// Test only: override the handoff floor (ns, default 1464). It moves
+    /// the slice floor, serial handoff, sub-handoff and deep-idle cutoffs.
     #[clap(long = "handoff-ns", value_name = "NS")]
     handoff_ns: Option<u64>,
 }
@@ -512,7 +512,7 @@ impl<'a> Scheduler<'a> {
         rodata.cake_vcap_unit_ns = bpf_intf::consts_SLICE_NS as u64 + tick;
         if let Some(ns) = opts.handoff_ns {
             rodata.cake_handoff_max_ns = ns;
-            warn!("   sweep   handoff_max {ns} ns (observe-only override)");
+            warn!("   sweep   handoff_max {ns} ns (policy override)");
         }
         let (idle_driver, idle_states) = cpuidle_states();
         for (slot, ns) in rodata.cake_idle_state_ns.iter_mut().zip(&idle_states) {

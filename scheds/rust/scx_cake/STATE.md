@@ -11,16 +11,14 @@
 
 ---
 
-## Now (2026-10-12)
+## Now (2026-10-20)
 
 | | |
 |---|---|
-| 🌿 Code | local `d295e8bb8` on `RitzDaCat/scx_cake-nightly` · pushed `fe076988f` · last upstream merge PR #3786 (`c410fcbd7`) |
-| 🖥️ Host | `7.2.9-2-cachyos-custom`: bitops, lean idle, DSQ index, wake signals (old numbering 1–4; wake signals without its warning fix) · experimental-patches renumbered 10-13: 1 bitops, 2 lean idle (proven), 3 DSQ index, 4 wake signals (unproven) · `sched_ext.dsq_direct=Y` covers every cake DSQ ID · 7.2.9 sets `SCX_RQ_IN_WAKEUP` only on the core wakeup path, so pre-7.2.9 numbers are not comparable |
+| 🌿 Code | policy unchanged since `fe076988f` (lean idle `lazy` default; the burstkey toggle came and went) · `RitzDaCat/scx_cake-nightly` pushed at `4b6d2c424`, newer commits local · last upstream merge PR #3786 (`c410fcbd7`) |
+| 🖥️ Host | stock `7.2.10-1-cachyos` since 2026-10-15, so **no 🧩 feature is active**: portable bitops, lean `lazy` falls back silently, no DSQ index or signals · `7.2.9-2-cachyos-custom` still installed; experimental-patches carries a `cachyos-7.2.10` series (1 bitops, 2 lean idle, 3 DSQ index, 4 wake signals) · 🧩 results below were measured on 7.2.9-custom with `sched_ext.dsq_direct=Y` · 7.2.9 sets `SCX_RQ_IN_WAKEUP` only on the core wakeup path, so pre-7.2.9 numbers are not comparable |
 | ⚙️ Defaults | native CTZ/POPCNT (auto) · E1 cached rq clock in `ops.running` · **lean idle `lazy`** (silent fallback without the kernel flag) · policy base: 2026-09-28 pool-serving C (archive) |
 | 🧪 Test-only flags | `--native-bitops` `--portable-bitops` `--native-ring` `--native-hist` `--kernel-signals` `--signal-report` `--handoff-ns` `--toggle probe=1` `--inspect-bpf` `--lean-idle` — the release is flagless |
-| 📦 10-05 arm A′ | wide-host idle popcount (D), `update_idle` pool interlock (F), exit pool check, census identities, `PEND_HEAL`: committed in `758e2e841`, pushed |
-| ⚠️ Lost binaries | `cost_c1c1e5aad80f` (base), `cost_400e7a766333` (E1): `target/` wiped 10-05 ~11:26; rebuild by SHA (`cakebench cost`) |
 
 ```mermaid
 flowchart LR
@@ -170,19 +168,20 @@ Appsim helldivers2-mission-fitted, 20 s, `cakebench cost`, busy 30–31 %, runs 
 
 | # | | Item | Detail |
 |---|---|---|---|
-| 1 | ⏳ | Game A/B for E1 | kept binaries lost → rebuild by SHA |
-| 2 | ⏳ | DSQ direct A/B | reboot with `sched_ext.dsq_direct=0` |
-| 3 | ⏳ | Lean `lazy`: GPU-limited check (FPS cap or high resolution) + `cakebench cost` | CPU-limited KovaaK's A/B done 10-12 (`runs/kovaaks_leanidle_20261012`) |
+| 1 | ⏳ | Game A/B for E1 | kept binaries `cost_c1c1e5aad80f` (base), `cost_400e7a766333` (E1) lost when `target/` was wiped 10-05 ~11:26 → rebuild by SHA (`cakebench cost`) |
+| 2 | ⏳ | DSQ direct A/B | 🧩 kernel booted, then reboot with `sched_ext.dsq_direct=0` |
+| 3 | ⏳ | Lean `lazy`: GPU-limited check (FPS cap or high resolution) + `cakebench cost` | needs the 🧩 kernel · CPU-limited KovaaK's A/B done 10-12 (`runs/kovaaks_leanidle_20261012`) |
 | 4 | 🔍 | `cake_enqueue` 610–710 ns, `cake_cpu_release` ~370 ns/run | 10× the other callbacks — next cost target |
 | 4b | 🔍 | Tail spikes | KovaaK's CPU-limited: worst frames hold **no** scheduler delay > 50 µs (threads blocked on game sync / GPU) — `scx_cake_bench/runs/tail_20261012/RESULT.md` · capture again where spikes are seen (GPU-limited, loaded, other games) |
 | 5 | 🔍 | `irq_leave` 550–1,010 ns/run | 09-25 profile: 946 cycles / 600 insns; cause open |
 | 6 | 🧹 | Flagless release | decide or remove each test-only flag |
-| 7 | 🧹 | `cake.bpf.c` comment density 0.25 | ceiling 0.20 |
+| 7 | 🧹 | comment density: `cake.bpf.c` 0.25, `intf.h` 0.23 | ceiling 0.20; `bench/comment_lint.py` defaults to 0.30, so pass `--max-ratio 0.20` |
 | 8 | ⏳ | Pre-revert carry-overs (archive) | `verifier_load_topologies` multi-LLC / >64 / sparse; HZ 250/300 stalls; WoW GPU-bound A/B; OSLTT vs `9db04489e`; §G93 trace; §G96 tester logs |
 | 9 | ⏳ | D+F on a real > 64-CPU host | tester |
 | 10 | ⏳ | Spread pick in frames | only if the retake drop is worth it |
 | 11 | ⏳ | IRQ-woken wake priority, quiet host | tools `scx_cake_bench/runs/kovaaks_irqwake_20261005/tools/` (`run.sh`, `irq_wake.py`, `diag_wake.py`; set PID/WIN in `kv_ab.py`, `CAKE_DIAG_TGID`); arms `kv-x` / `kv-y`; `run1/` slots 1–5 likely skewed |
 | 12 | ⏳ | CPU-bound tail: trace, then 7 guarded ideas | Deadlock CPU-limited: nightly worst 5.14 ms vs LAVD 2.84 · plan + interference check in [cpu-bound-tail-20261014](docs/research/cpu-bound-tail-20261014/README.md) |
+| 13 | ⏳ | 7.2.10 kernel review | host on 7.2.10 since 10-15 · the experimental-patches port notes only that `bpf_jit_comp.c` and `ext.c` changed since 7.2.9 · review eBPF, sched_ext and the CachyOS patch set and note what helps or breaks cake here |
 
 ---
 

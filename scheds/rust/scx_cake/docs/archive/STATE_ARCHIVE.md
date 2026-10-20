@@ -6,6 +6,14 @@ rule.
 
 ---
 
+## Moved 2026-10-20: STATE.md "Now" rows superseded by the stock 7.2.10 host (nothing edited)
+
+| | |
+|---|---|
+| 🌿 Code | local `d295e8bb8` on `RitzDaCat/scx_cake-nightly` · pushed `fe076988f` · last upstream merge PR #3786 (`c410fcbd7`) |
+| 🖥️ Host | `7.2.9-2-cachyos-custom`: bitops, lean idle, DSQ index, wake signals (old numbering 1–4; wake signals without its warning fix) · experimental-patches renumbered 10-13: 1 bitops, 2 lean idle (proven), 3 DSQ index, 4 wake signals (unproven) · `sched_ext.dsq_direct=Y` covers every cake DSQ ID · 7.2.9 sets `SCX_RQ_IN_WAKEUP` only on the core wakeup path, so pre-7.2.9 numbers are not comparable |
+| 📦 10-05 arm A′ | wide-host idle popcount (D), `update_idle` pool interlock (F), exit pool check, census identities, `PEND_HEAL`: committed in `758e2e841`, pushed |
+
 ## Moved 2026-10-04: everything below the pattern ledger (STATE.md restructured; nothing edited)
 
 ## Current navigation (reviewed 2026-10-02)
