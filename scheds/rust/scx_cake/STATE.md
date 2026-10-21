@@ -15,7 +15,7 @@
 
 | | |
 |---|---|
-| 🌿 Code | policy unchanged since `fe076988f` (lean idle `lazy` default; the burstkey toggle came and went) · `RitzDaCat/scx_cake-nightly` pushed at `4b6d2c424`, newer commits local · last upstream merge PR #3786 (`c410fcbd7`) |
+| 🌿 Code | policy unchanged since `fe076988f` (lean idle `lazy` default; the burstkey toggle came and went) · upstream RCU verifier fix `0e6dee3b7` backported locally as `3f8c3cb0e` · `RitzDaCat/scx_cake-nightly` pushed at `4b6d2c424`, newer commits local · last upstream merge PR #3797 (`5f5823e2f`) |
 | 🖥️ Host | stock `7.2.10-1-cachyos` since 2026-10-15, so **no 🧩 feature is active**: portable bitops, lean `lazy` falls back silently, no DSQ index or signals · `7.2.9-2-cachyos-custom` still installed; experimental-patches carries a `cachyos-7.2.10` series (1 bitops, 2 lean idle, 3 DSQ index, 4 wake signals) · 🧩 results below were measured on 7.2.9-custom with `sched_ext.dsq_direct=Y` · 7.2.9 sets `SCX_RQ_IN_WAKEUP` only on the core wakeup path, so pre-7.2.9 numbers are not comparable |
 | ⚙️ Defaults | native CTZ/POPCNT (auto) · E1 cached rq clock in `ops.running` · **lean idle `lazy`** (silent fallback without the kernel flag) · policy base: 2026-09-28 pool-serving C (archive) |
 | 🧪 Test-only flags | `--native-bitops` `--portable-bitops` `--native-ring` `--native-hist` `--kernel-signals` `--signal-report` `--handoff-ns` `--toggle probe=1` `--inspect-bpf` `--lean-idle` — the release is flagless |
@@ -30,6 +30,18 @@ flowchart LR
 ```
 
 ---
+
+## 2026-10-20 · RCU backport and upstream stall audit
+
+| | Finding / evidence boundary |
+|---|---|
+| RCU backport | `3f8c3cb0e` cherry-picks upstream `0e6dee3b7`: `cake_wake_place` stays noinline, becomes static, and drops `curr`'s trusted/nullable annotations so the verifier follows the caller's RCU pointer. No scheduling-policy change. |
+| Checks | Package fmt, debug/release Clippy, release build, 45 tests passed; 1 privileged topology-verifier test ignored. Existing unrelated `scx_rustland_core` unused-manifest-key warning remains. No new verifier load, bpf-next test, activation or game capture. Installed cake 1.2.2 remains active. |
+| Upstream baseline | Installed `scx-scheds 1.1.4-1` / cake 1.2.2 has the exact Cake `src/` tree of nightly `9db04489e` (September 22). Current upstream additionally has the RCU fix. |
+| Unconfirmed report | One upstream user reportedly sees a game stall after about 10 minutes. Kernel/game/logs unknown; source audit only. No cause or ten-minute trigger established. |
+| Accumulating virtual-time lead | Upstream retains the uncapped charge and peer-limited frontier behind the archived September 25–26 multi-second runnable-task stalls. Nightly's `99377e26f` bounds both. Historical evidence: archive entry "G98 BOUNDED VTIME LEAD" and `git show 99377e26f:scheds/rust/scx_cake/STATE.md`; not rerun here. |
+| Pool counter corruption | Upstream lacks stopping's slice-residue clear, included in nightly `8fc5ec9b1`. An extracted upstream `cake_pool_seen` test turned ordinary charged slice bits into a false pool decrement (0 to -1); the next real insert falsely read empty. Nightly's clear prevented it. Offline arithmetic proof only; no kernel-race or game-stall reproduction. Archive: "POOL TOKEN LEAK FIXED". |
+| Memory shape | CPU/pool arrays and diagnostic rings are fixed-size; task-storage records follow live tasks. No obvious ever-growing event history found. No runtime memory-leak measurement. |
 
 ## Pattern ledger
 
