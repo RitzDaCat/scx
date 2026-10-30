@@ -1144,7 +1144,7 @@ impl<'a> Scheduler<'a> {
             info!("   tried   serial/retake/probe/tick {}", tried.join(" "));
         }
         if self.probe_on {
-            const NAMES: [&str; 120] = [
+            const NAMES: [&str; 126] = [
                 "select_calls",
                 "serial",
                 "home_warm",
@@ -1196,6 +1196,7 @@ impl<'a> Scheduler<'a> {
                 "taci_groove",
                 "taci_warm",
                 "taci_notify",
+                "taci_pinned",
                 "pick_idle",
                 "kick",
                 "nrq",
@@ -1217,6 +1218,7 @@ impl<'a> Scheduler<'a> {
                 "taciw_groove",
                 "taciw_warm",
                 "taciw_notify",
+                "taciw_pinned",
                 "t_nrq",
                 "t_taci",
                 "t_pick",
@@ -1265,6 +1267,10 @@ impl<'a> Scheduler<'a> {
                 "pend_heal",
                 "release_serve",
                 "pinned_preempt",
+                "pinned_claim",
+                "pinned_kick",
+                "yield_keep",
+                "yield_give",
             ];
             // The name table must match the BPF enum exactly; a drift prints
             // zeros silently because out-of-range lookups fail quietly.
@@ -1423,7 +1429,7 @@ fn census_violations(names: &[&str], tot: &[u64]) -> Vec<String> {
             .and_then(|i| tot.get(i).copied())
     };
     let sum = |parts: &[String]| -> Option<u64> { parts.iter().map(|n| get(n)).sum() };
-    let sites = ["home", "groove", "warm", "notify"];
+    let sites = ["home", "groove", "warm", "notify", "pinned"];
     let clocks = [
         "period",
         "ticksoon",
@@ -1440,6 +1446,7 @@ fn census_violations(names: &[&str], tot: &[u64]) -> Vec<String> {
         ("taci", get("taci"), sum(&tries)),
         ("taci_win", get("taci_win"), sum(&wins)),
         ("home_warm", get("home_warm"), get("taciw_home")),
+        ("pinned_claim", get("pinned_claim"), get("taciw_pinned")),
         ("kt", get("kt"), sum(&reads)),
         ("running", get("running"), get("kt_running")),
     ];
@@ -2744,6 +2751,7 @@ mod tests {
             ("taci_groove", 4742),
             ("taci_warm", 2247710),
             ("taci_notify", 54785),
+            ("taci_pinned", 0),
             ("kt", 9453561),
             ("kt_period", 3132465),
             ("kt_ticksoon", 53550),
@@ -2756,6 +2764,8 @@ mod tests {
             ("taciw_groove", 4699),
             ("taciw_warm", 2206488),
             ("taciw_notify", 53754),
+            ("taciw_pinned", 0),
+            ("pinned_claim", 0),
         ];
         rows.iter().copied().unzip()
     }

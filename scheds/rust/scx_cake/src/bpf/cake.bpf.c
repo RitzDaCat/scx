@@ -162,6 +162,7 @@ enum cake_stat {
 	CAKE_SITE_TACI_GROOVE,
 	CAKE_SITE_TACI_WARM,
 	CAKE_SITE_TACI_NOTIFY,
+	CAKE_SITE_TACI_PINNED,
 	CAKE_SITE_PICK_IDLE,
 	CAKE_SITE_KICK,
 	CAKE_SITE_NRQ,
@@ -183,6 +184,7 @@ enum cake_stat {
 	CAKE_SITE_TACIW_GROOVE,
 	CAKE_SITE_TACIW_WARM,
 	CAKE_SITE_TACIW_NOTIFY,
+	CAKE_SITE_TACIW_PINNED,
 	/* clock-pair sums (ns) around one call each; T_CAL is the empty pair. */
 	CAKE_SITE_T_NRQ,
 	CAKE_SITE_T_TACI,
@@ -238,6 +240,10 @@ enum cake_stat {
 	CAKE_SITE_PEND_HEAL,		/* unserved reset under a zero token: pops the serve never saw */
 	CAKE_SITE_RELEASE_SERVE,	/* cpu_release found own-queue work and kicked an idle CPU */
 	CAKE_SITE_PINNED_PREEMPT,	/* pinned wake preempted the occupant on its insert */
+	CAKE_SITE_PINNED_CLAIM,		/* pinned wake claimed its idle owner: local DSQ, no dispatch */
+	CAKE_SITE_PINNED_KICK,		/* pinned preempt behind own-queue work, sent as a kick */
+	CAKE_SITE_YIELD_KEEP,		/* a yield kept its slice: nothing waits for this CPU */
+	CAKE_SITE_YIELD_GIVE,		/* a yield gave its slice up to waiting work */
 	CAKE_STAT_NR,
 };
 
@@ -298,8 +304,8 @@ static __always_inline void cake_stat_inc2(u32 idx, u32 site)
 		cake_stat_inc2_cold(idx, site);
 }
 
-_Static_assert(CAKE_SITE_TACIW_NOTIFY - CAKE_SITE_TACIW_HOME ==
-	       CAKE_SITE_TACI_NOTIFY - CAKE_SITE_TACI_HOME,
+_Static_assert(CAKE_SITE_TACIW_PINNED - CAKE_SITE_TACIW_HOME ==
+	       CAKE_SITE_TACI_PINNED - CAKE_SITE_TACI_HOME,
 	       "claim wins mirror claim sites one for one");
 
 /* PROBE site timing: a clock pair around one call, summed per CPU; the
@@ -2364,6 +2370,15 @@ __noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 	return 0;
 }
 
+/* select_cpu never runs for a one-CPU wake: its home claim, screened by the idle word. */
+static __always_inline bool cake_pinned_claim(s32 cpu)
+{
+	if (cake_one_word && (u32)cpu < 64 &&
+	    !(cake_idle_word() & (1ULL << ((u32)cpu & 63))))
+		return false;
+	return cake_taci(cpu, CAKE_SITE_TACI_PINNED);
+}
+
 /* Pinned-wake service: a pinned task's wake takes the continuation path and no
  * other CPU may steal it, so without this it waits out the occupant's slice.
  * Preempts by raw sleep depth @d, read before the insert rewrites dsq_vtime. */
@@ -2532,17 +2547,34 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		 * pick; a kicked idle CPU would lose the steal race or move it cold. Any
 		 * other re-enqueue has no owner about to pick. The mark is read before
 		 * the insert sets it; a pooled wake the owner may take first keeps the kick. */
-			alone = !(enq_flags & CAKE_ENQ_WAKEUP) && cake_task_on_cpu(p) &&
+		alone = !(enq_flags & CAKE_ENQ_WAKEUP) && cake_task_on_cpu(p) &&
 			!cake_qmark_test((u32)tcpu) && !cake_pool_pending(cake_llc_of(tcpu));
+		pin = false;
+		if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed == 1) {
+			/* Under this rq lock a clear mark proves the own queue empty. */
+			bool empty = !cake_qmark_test((u32)tcpu);
+			bool claim = empty && cake_pinned_claim(tcpu);
+
+			pin = !claim && cake_pinned_wake_preempt(p, tcpu, d, slice);
+			/* Nothing queued to pass: no ops.dispatch at the pick, and no kick. */
+			if (claim || (empty && pin)) {
+				cake_stat_inc(claim ? CAKE_SITE_PINNED_CLAIM :
+					      CAKE_SITE_PINNED_PREEMPT);
+				p->scx.dsq_vtime = vt;
+				cake_dsq_insert(p, CAKE_DSQ_LOCAL_ON | (u32)tcpu, slice,
+						enq_flags | (claim ? CAKE_ENQ_IMMED :
+							     CAKE_ENQ_PREEMPT));
+				return;
+			}
+		}
 		/* The own vtime queue is a user DSQ, where the kernel ignores
 		 * ENQ_PREEMPT: the verdict, taken before the insert so its inputs
 		 * do not outlive it, is delivered as a kick after. */
-		pin = (enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed == 1 &&
-		      cake_pinned_wake_preempt(p, tcpu, d, slice);
 		cake_qmark_set((u32)tcpu);
 		cake_dsq_insert_vtime(p, (u64)(u32)tcpu, slice, vt, enq_flags);
 		if (pin) {
 			cake_stat_inc(CAKE_SITE_PINNED_PREEMPT);
+			cake_stat_inc(CAKE_SITE_PINNED_KICK);
 			cake_kick(tcpu, CAKE_KICK_PREEMPT);
 		}
 		if (alone && !cake_local_nr(tcpu)) {
@@ -2998,6 +3030,27 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+}
+
+/* ops.yield: give the slice up only to work waiting for this CPU. Without
+ * this op the kernel zeroes it, and every yield runs ops.dispatch. */
+bool BPF_STRUCT_OPS(cake_yield, struct task_struct *from, struct task_struct *to)
+{
+	struct rq *rq = bpf_this_cpu_ptr(&runqueues);
+	u32 cpu = bpf_get_smp_processor_id();
+
+	if (to)
+		return false;
+	/* Own-queue and local tasks all count on this rq; pooled ones may not. */
+	if (rq->scx.nr_running > 1 || cake_pool_pending(cake_llc_of((s32)cpu)) ||
+	    (cake_multi_llc() && cake_one_word && cpu < 64 &&
+	     cake.remote_pool[cpu & 63].word)) {
+		cake_stat_inc(CAKE_SITE_YIELD_GIVE);
+		cake_set_slice(from, 0);
+	} else {
+		cake_stat_inc(CAKE_SITE_YIELD_KEEP);
+	}
+	return false;
 }
 
 /* PROBE census: releases by the displaced task's arrival path and displacer
@@ -3493,6 +3546,7 @@ SCX_OPS_DEFINE(cake_ops,
 	       .cpu_acquire	= (void *)cake_cpu_acquire,
 	       .running		= (void *)cake_running,
 	       .stopping	= (void *)cake_stopping,
+	       .yield		= (void *)cake_yield,
 	       .update_idle	= (void *)cake_update_idle,
 	       .enable		= (void *)cake_enable,
 	       .exit_task	= (void *)cake_exit_task,
