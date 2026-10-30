@@ -22,6 +22,8 @@ need. This page indexes the investigations. Kernel patches now ship per feature 
 | ❌ | burstkey: cosmos-style requeue key | no gain; cosmos itself loses to cake `lazy` in CPU-limited KovaaK's | [report](burstkey-20261012/README.md) |
 | ❌ | sibwake: same-process wake → waker's SMT sibling | idle cores: lows −43 %; saturated: tails +6 % (weak) | [report](sibwake-20261012/README.md) |
 | ⏳ | 🐧 CPU-bound tail (Deadlock: nightly worst 5.14 ms vs LAVD 2.84) | planned, nothing built; trace first, then 7 guarded ideas | [plan](cpu-bound-tail-20261014/README.md) |
+| 🧪 | 🐧 Spin latency under stress (tester charts: extreme median ×19 rusty) | reproduced 10-29: the `cpu_release` re-enqueue (S8) is the RT-load loss (same-CPU resume 7–28 % vs 100 %, 3.5 CPUs of BPF); §G99 release hold ❌ (overshoot fixed, sleeper wakes 3.7 ms late); §G93 gate or a v3 hold next, chop rule after | [plan](spin-storm-20261028/README.md) |
+| ✅🧪 | 🐧 CPU-to-CPU wake map vs EEVDF (c2clat) | §G100 and §G101 default (`26b8f2604`, `1218ad972`) · §G100 pinned fast lane: p50 beats EEVDF (cross-core 644 vs 673 ns), p90 −37 to −41 % vs HEAD; §G101 `ops.yield` keep: under a yield spin BPF −32 %, idle kicks −94 %, same-CPU p50 991 → 697 ns (EEVDF 731); p99/p99.9 still behind EEVDF; ShadowGate, both together: worst frame lower in 8/9 pairs (p 0.039), fps +2 % beside Blender | [report](wake-map-20261029/README.md) |
 
 | | Also |
 |---|---|

@@ -65,6 +65,39 @@ Recorded anchors (`cake-bpfstats`, 12 s KovaaKs menu, STATE.md `:1700`): 1.1.3
 select 58 / dispatch 20 / running 26 ns per run; the §G77b stack select 116 /
 dispatch 79 / update_idle 33 / running 58 ns. Dispatch at 78k runs/s measured
 111–120 ns/run on the game cores (bpfstats 2026-09-02, source comment `§G76`).
+Spin storm (2026-10-29, `research/spin-storm-20261028/`, extreme with RT stressors):
+dispatch 879.5–912.7 ns/run at 2.9–3.1 M/s (161.8 without RT); `cpu_release` 191.8 ns
+at 1.06 M/s. IBS: half of dispatch is lock spin inside `scx_bpf_dsq_move_to_local`
+(`switch_rq_lock`, `scx_consume_dispatch_q`, `scx_dispatch_dequeue`), 15 % the move,
+14 % its psi update, 4 % each DSQ hash lookup in `nr_queued` and `peek`; 8.3 % of its
+loads hit a peer's modified line. The bpf_stats clock is 22–57 % of the small
+callbacks' samples (stats on only); `irq_leave`'s 0.6–1.4 µs/run is a stats-window
+artifact (IBS 0–1 of ~80 expected samples). 9800X3D line transfer (c2clat): SMT
+sibling 24–27 ns one-way, cross-core 34 ns median (28–53); IBS load latency L2 ~11
+cycles, L3 ~84, peer HitM ~74–76.
+Wake paths (2026-10-29, `research/wake-map-20261029/`, c2clat, perf-on trace,
+waking → switch-in p50): idle landing 635 ns (EEVDF 664–683); pinned wake through the owner
+DSQ and a dispatch pass 712 ns end to end vs 644 with the §G100 claim (A/B p50,
+cross-core); preempting a busy occupant 2,741 (EEVDF 1,770); idle landing beside a busy
+SMT sibling 1,971 (EEVDF 1,077); unpinned in-place preempt 1,260, neighbour bound in
+enqueue then migrated 2,423 (EEVDF in place 1,807). Cake raised 104–109 k IWI/s under
+the c2clat + Blender load, EEVDF 0.1 k. A `sched_yield` under cake (no `ops.yield`) is a
+full `cake_dispatch` pass: a probe pass beside an 8.4 M/s yield spin made 13.4 M ring-steal
+move attempts at 141 ns each (probe-timed) and 191,775 idle kicks, each an irq_work self-IPI.
+Yield (2026-10-29, §G101, same report, 3-thread `sched_yield` spin): without `ops.yield` each
+yield is a `cake_dispatch` pass, 12.5 ns/run when nothing is marked (stats on) and a ring-steal
+move attempt when peers are; `cake_yield` replaces it at 7.28 ns/run (one helper call for
+`bpf_this_cpu_ptr(&runqueues)`, one `rq->scx.nr_running` load, the pool token). v1's local
+`scx_bpf_dsq_nr_queued` kfunc plus the own-mark read cost 7.42 ns/run (p 0.029; 18.3 ns per kfunc
+probe-timed with the clock pair). No stats, per yield per thread: EEVDF 55.6 ns, cake with
+`cake_yield` 75.5 ns, without 84.7 ns; the 20 ns left is the sched_ext path around a kept prev.
+Game (2026-10-29, ShadowGate, native UE 5): the game made no `sched_yield` in 19.5 s and pins no
+thread, so neither `cake_yield` nor the §G100 claim runs for it. On a quiet host (CPU-limited
+~485 fps) clean frames matched HEAD (frame p99 2,992,996 vs 3,014,920 ns, p 1.0). Beside a steady
+Blender the joint build ran fps +2.0 % and frame p50 2,347,619 → 2,288,088 ns (p 0.065), and its
+worst frame fell in 8 of 9 pairs (p 0.039): the gain comes through other tasks, not the game's. Under
+Proton every finite `Sleep` is a `sched_yield` (Wine source), so a Proton game is where
+`cake_yield` is priced in frames.
 
 ## 2. Site map — where each operation class lives
 

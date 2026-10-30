@@ -90,7 +90,8 @@ core, then any idle CPU.
 | Turn-starved wake, unpinned | the wake path |
 | Wake whose CPU runs a task that is not starved (unpinned) | that task is past its slice, the tick has not stopped it, and it is not a stage on its own seat → preempt it · else pool + idle kick |
 | Forced requeue, or seat collision (unpinned) | clean idle CPU · else pool + idle kick |
-| Anything else: continuation, pinned wake, other wakes | its CPU's owner queue (a pinned wake may preempt by the same test, with its own slice), then kick an idle CPU unless the task is still on its CPU with nothing else waiting there or in its pool |
+| Pinned wake, own queue empty | its CPU's local queue at once, no dispatch pass: when that CPU is idle, or to preempt its occupant by the same test, with its own slice |
+| Anything else: continuation, pinned wake, other wakes | its CPU's owner queue (a pinned wake may preempt by the same test, with its own slice, sent as a kick), then kick an idle CPU unless the task is still on its CPU with nothing else waiting there or in its pool |
 
 **Wake path**, in order:
 
@@ -188,6 +189,10 @@ slice = max(1464, min(2 * floor(runtime / n), floor(age / (2 * n)), 1500000))
 Age under 3 ms counts as 3 ms; the low 5 bits are cleared (they tag pooled tasks).
 Kernel threads placed directly get a flat 3 ms. A slice is a budget the kernel tick
 enforces, not a preemption promise: cake has no `ops.tick`.
+
+A `sched_yield` keeps its slice unless something waits for this CPU: another task on
+its run queue, work in its LLC pool, or another LLC's offer. Then the slice drops to 0,
+as the kernel does without `ops.yield`.
 
 ---
 
