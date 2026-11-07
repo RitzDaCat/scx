@@ -142,7 +142,7 @@ flowchart TD
 |---|---|
 | ID span | counts sparse and offline IDs, not just online CPUs |
 | Steal order | same LLC, then LLCs with the same cache size, then the rest; within each, SMT sibling first, then the following IDs, wrapping. Precomputed below ID 128; wider hosts walk a ring |
-| Idle word | one-word hosts: cake keeps its own word of really idle CPUs, changed only by `ops.update_idle` and the dispatch re-arm, and runs without `SCX_OPS_KEEP_BUILTIN_IDLE`, so the kernel stops updating its masks. A claim sets a bit in a second word on the same line, cleared when that CPU next goes idle. Claimable is idle and not claimed; the whole-core read ignores claims, so a claimed core stays whole until that CPU runs. Wide hosts keep the kernel's masks and picker |
+| Idle word | one-word hosts: cake keeps its own word of really idle CPUs, changed only by `ops.update_idle`, the dispatch re-arm and `ops.dispatch`'s clear when a queued prev's slice ends (bypass hides idle exits), and runs without `SCX_OPS_KEEP_BUILTIN_IDLE`, so the kernel stops updating its masks. A claim sets a bit in a second word on the same line, cleared when that CPU next goes idle. Claimable is idle and not claimed; the whole-core read ignores claims, so a claimed core stays whole until that CPU runs. Wide hosts keep the kernel's masks and picker |
 | Claim tries | max(4, online CPUs in the widest LLC / 4) |
 | Preferred LLC | multi-LLC one-word hosts: the most big cores; on a V-cache pair, the cache LLC in AMD `cache` mode, else the other; otherwise the largest cache (`cache` mode) or highest platform preference. The mode is re-read every second |
 | Deep idle | one-word hosts avoid a CPU in an idle state slower to exit than the handoff floor |

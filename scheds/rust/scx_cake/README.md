@@ -249,7 +249,10 @@ the launch arguments, and the scheduler and kernel logs.
 |---|---|
 | [src/main.rs](./src/main.rs) | loader: flags, topology, attach, IRQ-sink monitor |
 | [src/core_performance.rs](./src/core_performance.rs) | platform core ranking, read once at start |
+| [src/build_identity.rs](./src/build_identity.rs) | SHA-256 of the running binary, for the start banner and `--version` |
+| [src/inspect_bpf.rs](./src/inspect_bpf.rs) | `--inspect-bpf`: per-program BPF and JIT dump after the verifier load |
 | [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | scheduling policy |
+| [src/bpf/scalar-experiments.bpf.h](./src/bpf/scalar-experiments.bpf.h) | bit helpers: steal-ring rotate and next, log2 bands |
 | [src/bpf/wake-signals.bpf.h](./src/bpf/wake-signals.bpf.h) | `--kernel-signals` reads |
 | [src/bpf/intf.h](./src/bpf/intf.h) | shared constants and limits |
 | [bench/README.md](./bench/README.md) | bench tools |
