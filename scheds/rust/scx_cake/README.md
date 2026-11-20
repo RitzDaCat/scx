@@ -148,6 +148,7 @@ Each step is a sched_ext callback in
 | `cake_dispatch` | a CPU's local DSQ is empty | moves work as in step 4 |
 | `cake_yield` | a task calls `sched_yield` | keeps or zeroes the slice |
 | `cake_running`, `cake_stopping` | a task starts or stops running | stamps the run, charges its virtual runtime |
+| `cake_init_task` | a task is forked, or cake attaches | creates the task's storage record while no rq lock is held |
 | `cake_cpu_release` | a higher scheduling class takes the CPU | re-enqueues waiting local tasks and kicks an idle CPU to serve the owner queue when possible |
 | `cake_update_idle` | a CPU goes idle or wakes | serves pool work that arrived as it went idle; keeps cake's idle word, or tracks idle CPUs past ID 63 on wide hosts |
 

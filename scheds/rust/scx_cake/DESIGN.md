@@ -126,8 +126,11 @@ wake to serve it. The task owns its count in BPF task storage. A hint in
 its slice lets ordinary wakes and runs skip the lookup. When the kernel
 removes a runnable task during a property change or suspend, the quiescent
 callback returns its count even if the kernel has replaced the slice.
-Ordinary sleeps return immediately. If task storage cannot be allocated,
-the task goes to the kernel's global dispatch queue.
+Ordinary sleeps return immediately. Cake creates the storage in
+`ops.init_task`, at fork and at attach, where no rq lock is held. Every
+other callback only looks it up, because a create under the rq lock can
+deadlock in the memory charge. A task whose create failed goes to the
+kernel's global dispatch queue.
 
 When Cake observes 64 or more tasks in an owner queue or wake pool, it
 examines up to eight tasks and asks the kernel to move one that can run

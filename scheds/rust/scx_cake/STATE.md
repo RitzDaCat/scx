@@ -31,6 +31,72 @@ flowchart LR
 
 ---
 
+## 2026-11-20 · Task storage is created in `ops.init_task` (1.4.2, on the nightly)
+
+A user reported four hard lockups on a Ryzen 9 9950X3D under Cake 1.3.0
+and 1.4.1, on CachyOS 7.3.1, 7.3.3 and 7.4.0-rc3. Each capture showed one
+CPU spinning on its own rq lock inside `ops.stopping`:
+
+```
+__schedule
+ dequeue_task_scx
+  cake_stopping -> cake_home_sample
+   bpf_task_storage_get(F_CREATE)
+    bpf_selem_alloc -> kmalloc_nolock
+     obj_cgroup_uncharge_pages -> refill_stock
+      queue_work_on -> try_to_wake_up
+       native_queued_spin_lock_slowpath
+```
+
+The create charges the map's memcg. That charge can queue work, and the
+wakeup takes the rq lock that `__schedule()` already holds. Every other
+CPU then hangs on the stuck CPU's TLB-flush IPI. The pool count added
+for 1.4.2 created the same record from `ops.enqueue`, also under the rq
+lock.
+
+Cake now creates the record in `ops.init_task`, which the kernel calls
+with no rq lock at fork and for every existing task at attach. Every
+other callback only looks the record up. A task whose create failed
+still runs: it has no home or seat, and its pooled wakes go to the
+global queue. This needs a stock kernel only. The lockup did not
+reproduce on the 9800X3D, so the fix is checked against the reported
+path and has no before and after. The desktop freeze of 2026-11-19 left
+no record; whether it was this lockup is unknown.
+
+On 1.4.1 a thread create and join took 4,309 and 4,322 ns before the
+fix and 4,547 and 4,536 ns after (median of 2,000 pairs, two runs each
+in ABBA order, 7.3.5). A thread that blocked fewer than 64 times used to
+skip the allocation. The cost on the 1.4.2 source is unmeasured.
+
+ShadowGate at 720p Low, uncapped, four quiet launches per build, each
+run against the 1.4.2 work without the fix (`3df00acc05a7`):
+
+| Build | FPS, reference / build | Frame p99, ms | Frame p99.9, ms | Input p99, ms |
+|---|---:|---:|---:|---:|
+| 1.4.2 work with the fix (`d0a13ad04920`, the nightly) | 603.25 / 604.35 | 1.865 / 1.862 | 2.088 / 2.124 | 1.732 / 1.713 |
+| 1.4.1 with the fix (`a176722ae3f3`) | 601.96 / 593.81 | 1.866 / 1.879 | 2.076 / 2.158 | 1.734 / 1.749 |
+| 1.4.2 work with the fix and the seat keep (`0f3398f44e76`) | 593.10 / 599.96 | 1.870 / 1.867 | 2.106 / 2.077 | 1.737 / 1.743 |
+
+The same reference averaged 603.25, 601.96 and 593.10 FPS in the three
+runs, so one run does not resolve the fix's +1.10 FPS. The paired
+changes for the fix were +2.66, -1.79, +5.21 and -1.69 FPS. No build
+reached a 605 FPS average.
+
+### Seat keep in `ops.stopping`
+
+A stage thread that blocks on the CPU whose seat record still names it
+already holds that acquisition. The experiment marked the seat held
+again without the storage lookup, the seat lock, the sequence bump and
+three record writes. `ops.stopping` went from 308 to 327 instructions in
+the object. In two profile slots per build it retired 842.77 and 835.28
+instructions per call and used 490.03 and 487.19 cycles; the per-slot
+cycles overlap. A first form also tested the record in `ops.running` and
+added 11.7 instructions per run there, from spills in the inlined seat
+update. The game run is the third row above. The experiment stays out of
+the nightly: the game does not resolve it and the cycle saving did not
+separate. Patches, builds and results are in
+`scx_cake_bench/runs/shadowgate_init_task_storage_142/`.
+
 ## 2026-11-20 · Fixed homes and alternative placements in ShadowGate
 
 On the single-CCD Ryzen 7 9800X3D and stock CachyOS 7.3.5, each policy
@@ -960,6 +1026,8 @@ Metric levels follow `CLAUDE.md` (1 = game frames … 4 = static counts).
 |---|---|---|---|---|
 | Kept locally | Drop the low-bit correction in the slice grant | Stock, existing Cake requirements | Direct admission p10 10 to 9 ns in 8/8 pairs, empty-clock p10 9 ns in both arms | ShadowGate +0.84 aggregate FPS across four pairs. The two blocks disagreed. [Measurements](#2026-11-20--direct-admission-latency-in-local-142) |
 | Screened | Precompute the stopping cap by priority | Stock, existing Cake requirements | ShadowGate +0.66 aggregate FPS, median launch p99.9 +0.092 ms | Keep the existing formula. [Measurements](#precompute-the-stopping-cap-at-startup) |
+| Default | Create task storage in `ops.init_task`, lookup only elsewhere | Stock, existing Cake requirements | Removes the create under the rq lock from a reported hard lockup. ShadowGate 603.25 to 604.35 FPS, unresolved. Thread create and join +214 and +238 ns on 1.4.1 | Reporter's test on the 9950X3D. Create cost on 1.4.2. [Measurements](#2026-11-20--task-storage-is-created-in-opsinit_task-142-on-the-nightly) |
+| Screened | Seat keep: a stage thread blocking on the seat it still owns skips the lookup and the seat lock | Stock, existing Cake requirements | `ops.stopping` 842.77 to 835.28 instructions per call, 490.03 to 487.19 cycles with overlapping slots. ShadowGate 593.10 to 599.96 FPS in one run | Out of the nightly. [Measurements](#seat-keep-in-opsstopping) |
 | Replaced | **Lean idle claim `lazy`** (K1–K4, `SCX_OPS_LEAN_IDLE` + `_LAZY_SMT`), replaced by §G103 | 🧩 patch 2, which cake no longer uses | KovaaK's (CPU-limited: uncapped ~770 FPS, GPU ~39 %) quiet: avg FPS **+1.4 %**, p99 **−5.1 %**, 1 % low **+7.5 %**, stddev −18 % (16/16) · 16 hogs: 0.1 % low +6.6 %, max −16 %, nothing worse · `on` ≈ `off` · [why](#why-lazy-wins) | §G103 against `lazy` on the 🧩 kernel (Owed #3) |
 | ✅ | E1: `ops.running` reads cached `rq->scx.clock` | 🐧 ≥ 6.14 · else `scx_bpf_now()` | appsim 24 slots: running −3.10 ns [−4.32, −1.91], BPF −1.9 %, frames neutral | ⏳ game A/B |
 | ✅ | Native CTZ/POPCNT (auto) | 🧩 patch 1 · else portable builtins | running −2.31 ns, select −4.11 / −0.2 ns · KovaaK's: no frame difference after 2 rounds ([evidence](#evidence)) | — |
