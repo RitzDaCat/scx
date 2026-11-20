@@ -33,6 +33,7 @@ bench/*
 !bench/capture_preflight.py
 !bench/fnspills.py
 !bench/comment_lint.py
+!bench/call_depth.py
 !bench/review_regressions.py
 !bench/topology_regressions.py
 !bench/pool_mark_ordering.py

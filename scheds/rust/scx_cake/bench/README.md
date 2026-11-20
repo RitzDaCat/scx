@@ -10,6 +10,7 @@ pipeline. Ignored local tools a clone lacks are listed in [STRUCTURE](../docs/ST
 | Files | Purpose and limit |
 |---|---|
 | `comment_lint.py` | stale names, duplicate comments, comment density (ceiling 0.20) and block format |
+| `call_depth.py` | deepest call chain per program against the eight-frame verifier limit of 6.13 to 6.18; this host's kernel accepts more, so run it before a push |
 | `fnspills.py` | per-function BPF stack spills; not runtime cost |
 | `review_regressions.py`, `review_regressions.c` | extract scheduler functions into deterministic helper models; the C no longer compiles against current source |
 | `topology_regressions.py`, `topology_regressions.c` | offline topology and policy cases using that extractor; stops on functions that no longer exist |
