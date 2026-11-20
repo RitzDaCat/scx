@@ -34,7 +34,7 @@ futex −84 %, `update_idle` hook +11–16 ms/s); home over-claim ❌ (P3a, fute
 
 | # | Idea | Source | Risk to a win | Guard |
 |---|---|---|---|---|
-| 1 | Pinned kthread wake behind an occupant gets `ENQ_PREEMPT` on the insert | audit C5 (archive, 09-18) | 🟡 seats | never preempt a seat holder; occupant must have run its protect window (§G87 rule) |
+| 1 | Pinned kthread wake behind an occupant gets `ENQ_PREEMPT` on the insert (in code since `a33393738` without these guards; [spin-storm](../spin-storm-20261028/README.md) T1 + T3 add them) | audit C5 (archive, 09-18) | 🟡 seats | never preempt a seat holder; occupant must have run its protect window (§G87 rule) |
 | 2 | Non-wake re-enqueue (`alone`) kicks an idle CPU when CPUs idle | audit C2 | 🟢 `lazy` whole-core bit | normal claim order, plain kick, no verify |
 | 3 | Home choice reads occupant grant left: divert when occupant is a kthread or past grant | new | 🔴 home rate, P3a | only if the trace shows home waits; reuse `cake.run[cpu]`, no new claim |
 | 4 | Kthreads get `cake_task_slice`, not flat `SLICE_NS` | new | 🟢 | change the kthread slice only; `SLICE_NS` feeds vcap / frontier window |

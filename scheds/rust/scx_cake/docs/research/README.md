@@ -1,9 +1,13 @@
 # Research and experimental patches
 
+The [Cake 1.4.2 system review](cake-system-review/README.md) includes editable
+CAD and Blender models, a cache-line map, a measured ShadowGate frame and
+the corresponding placement and progress checks.
+
 Verdicts live in the [STATE.md](../../STATE.md) pattern ledger, each with its kernel
 need. This page indexes the investigations. Kernel patches now ship per feature in
 [experimental-patches](https://github.com/RitzDaCat/experimental-patches)
-`kernel/sched-ext/cachyos-<ver>/`; the host runs stock 7.2.10 since 2026-10-15.
+`kernel/sched-ext/cachyos-<ver>/`; the host was observed on stock 7.3.0-2 on 2026-10-22.
 
 **Legend** · ✅ kept / default · ❌ rejected · ➖ no effect · 🧪 open · ⏳ planned · 🐧 stock · 🧩 custom patch
 
@@ -22,6 +26,7 @@ need. This page indexes the investigations. Kernel patches now ship per feature 
 | ❌ | burstkey: cosmos-style requeue key | no gain; cosmos itself loses to cake `lazy` in CPU-limited KovaaK's | [report](burstkey-20261012/README.md) |
 | ❌ | sibwake: same-process wake → waker's SMT sibling | idle cores: lows −43 %; saturated: tails +6 % (weak) | [report](sibwake-20261012/README.md) |
 | ⏳ | 🐧 CPU-bound tail (Deadlock: nightly worst 5.14 ms vs LAVD 2.84) | planned, nothing built; trace first, then 7 guarded ideas | [plan](cpu-bound-tail-20261014/README.md) |
+| Needs clean rerun | Bounded integer superoptimization | three new targets: proved slice removes 16 BPF ops / two branches per caller and passed stock verifier; timing screen excluded for noise. Earlier ceil -0.135 ns mean inconclusive; tools kept, source unchanged | [investigation](superoptimization/README.md) |
 | 🧪 | 🐧 Spin latency under stress (tester charts: extreme median ×19 rusty) | reproduced 10-29: the `cpu_release` re-enqueue (S8) is the RT-load loss (same-CPU resume 7–28 % vs 100 %, 3.5 CPUs of BPF); §G99 release hold ❌ (overshoot fixed, sleeper wakes 3.7 ms late); §G93 gate or a v3 hold next, chop rule after | [plan](spin-storm-20261028/README.md) |
 | ✅🧪 | 🐧 CPU-to-CPU wake map vs EEVDF (c2clat) | §G100 and §G101 default (`26b8f2604`, `1218ad972`) · §G100 pinned fast lane: p50 beats EEVDF (cross-core 644 vs 673 ns), p90 −37 to −41 % vs HEAD; §G101 `ops.yield` keep: under a yield spin BPF −32 %, idle kicks −94 %, same-CPU p50 991 → 697 ns (EEVDF 731); p99/p99.9 still behind EEVDF; ShadowGate, both together: worst frame lower in 8/9 pairs (p 0.039), fps +2 % beside Blender | [report](wake-map-20261029/README.md) |
 
